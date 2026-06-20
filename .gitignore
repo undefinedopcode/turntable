@@ -1,0 +1,13 @@
+# binaries
+/octoparser
+/bin/
+
+# local config / data
+octoparser.local.yaml
+/data/
+
+# go
+vendor/
+*.test
+*.out
+coverage.txt

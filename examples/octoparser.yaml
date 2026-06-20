@@ -1,0 +1,24 @@
+# Example OctoParser configuration.
+# Copy to ./octoparser.yaml and edit. See DESIGN.md §10.
+
+sources:
+  # JSON file exposed as the logical name "users".
+  users:
+    connector: json
+    path: ./data/users.json
+
+  # CSV file with an explicit delimiter.
+  sales:
+    connector: csv
+    path: ./data/sales.csv
+    delimiter: ","
+
+  # SQL database, credentials via env var interpolation (v0.2).
+  warehouse:
+    connector: sql
+    driver: postgres
+    dsn: "postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:5432/analytics?sslmode=require"
+
+defaults:
+  output: table
+  max-rows: 1000000

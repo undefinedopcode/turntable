@@ -1,0 +1,494 @@
+package sql
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// Parser converts a token stream into an AST. This is a skeleton parser that
+// handles the SELECT shape and a subset of expressions; the full grammar is
+// completed in the v0.1 milestone.
+type Parser struct {
+	toks []Token
+	pos  int
+}
+
+// NewParser returns a Parser over the given tokens.
+func NewParser(toks []Token) *Parser { return &Parser{toks: toks} }
+
+// Parse lexes and parses src into a Statement.
+func Parse(src string) (Statement, error) {
+	toks, err := Lex(src)
+	if err != nil {
+		return nil, err
+	}
+	return NewParser(toks).ParseStatement()
+}
+
+func (p *Parser) cur() Token    { return p.toks[p.pos] }
+func (p *Parser) peek() Token    { return p.toks[p.pos+1] }
+func (p *Parser) advance() Token { t := p.toks[p.pos]; p.pos++; return t }
+
+func (p *Parser) atEOF() bool { return p.cur().Kind == TKEOF }
+
+func (p *Parser) kw(word string) bool {
+	t := p.cur()
+	return t.Kind == TKKeyword && strings.EqualFold(t.Value, word)
+}
+
+func (p *Parser) op(s string) bool {
+	t := p.cur()
+	return t.Kind == TKOperator && t.Value == s
+}
+
+func (p *Parser) expectOp(s string) error {
+	if !p.op(s) {
+		return p.errf("expected %q", s)
+	}
+	p.advance()
+	return nil
+}
+
+func (p *Parser) expectKW(word string) error {
+	if !p.kw(word) {
+		return p.errf("expected keyword %q", word)
+	}
+	p.advance()
+	return nil
+}
+
+func (p *Parser) errf(format string, args ...any) error {
+	t := p.cur()
+	return fmt.Errorf("parse error at offset %d (token %q): %s",
+		t.Pos, t.Value, fmt.Sprintf(format, args...))
+}
+
+// ParseStatement parses a single (currently SELECT) statement.
+func (p *Parser) ParseStatement() (Statement, error) {
+	if !p.kw("SELECT") {
+		return nil, p.errf("expected SELECT")
+	}
+	return p.parseSelect()
+}
+
+func (p *Parser) parseSelect() (*SelectStmt, error) {
+	if err := p.expectKW("SELECT"); err != nil {
+		return nil, err
+	}
+	s := &SelectStmt{}
+
+	// optional DISTINCT handled in v0.1
+	items, err := p.parseSelectList()
+	if err != nil {
+		return nil, err
+	}
+	s.Items = SelectList{Items: items}
+
+	if !p.kw("FROM") {
+		return nil, p.errf("expected FROM")
+	}
+	p.advance()
+	from, err := p.parseTableRef()
+	if err != nil {
+		return nil, err
+	}
+	s.From = from
+
+	// JOINs
+	for p.kw("INNER") || p.kw("LEFT") || p.kw("JOIN") {
+		j, err := p.parseJoin()
+		if err != nil {
+			return nil, err
+		}
+		s.Joins = append(s.Joins, j)
+	}
+
+	if p.kw("WHERE") {
+		p.advance()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		s.Where = e
+	}
+
+	if p.kw("GROUP") {
+		p.advance()
+		if err := p.expectKW("BY"); err != nil {
+			return nil, err
+		}
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			s.GroupBy = append(s.GroupBy, e)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+	}
+
+	if p.kw("HAVING") {
+		p.advance()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		s.Having = e
+	}
+
+	if p.kw("ORDER") {
+		p.advance()
+		if err := p.expectKW("BY"); err != nil {
+			return nil, err
+		}
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			ot := OrderTerm{Expr: e}
+			if p.kw("DESC") {
+				ot.Desc = true
+				p.advance()
+			} else if p.kw("ASC") {
+				p.advance()
+			}
+			s.OrderBy = append(s.OrderBy, ot)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+	}
+
+	if p.kw("LIMIT") {
+		p.advance()
+		n, err := p.parseInt()
+		if err != nil {
+			return nil, err
+		}
+		s.Limit = &n
+	}
+
+	if p.kw("OFFSET") {
+		p.advance()
+		n, err := p.parseInt()
+		if err != nil {
+			return nil, err
+		}
+		s.Offset = &n
+	}
+
+	return s, nil
+}
+
+func (p *Parser) parseSelectList() ([]SelectItem, error) {
+	var items []SelectItem
+	for {
+		if p.op("*") {
+			p.advance()
+			items = append(items, SelectItem{Star: true})
+		} else {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			item := SelectItem{Expr: e}
+			if p.kw("AS") {
+				p.advance()
+				t := p.advance()
+				if t.Kind != TKIdent {
+					return nil, p.errf("expected alias after AS")
+				}
+				item.As = t.Value
+			}
+			items = append(items, item)
+		}
+		if !p.op(",") {
+			break
+		}
+		p.advance()
+	}
+	return items, nil
+}
+
+func (p *Parser) parseTableRef() (TableRef, error) {
+	var tr TableRef
+	t := p.advance()
+	if t.Kind == TKOperator && t.Value == "(" {
+		// subquery
+		sub, err := p.parseSelect()
+		if err != nil {
+			return tr, err
+		}
+		if err := p.expectOp(")"); err != nil {
+			return tr, err
+		}
+		tr.Subquery = sub
+	} else if t.Kind == TKIdent || t.Kind == TKKeyword {
+		// qualified "prefix:source" or bare name
+		name := t.Value
+		if p.op(":") {
+			p.advance()
+			src, err := p.parseSourceString()
+			if err != nil {
+				return tr, err
+			}
+			tr.Prefix = name
+			tr.Source = src
+		} else {
+			tr.Name = name
+		}
+	} else {
+		return tr, p.errf("expected table reference")
+	}
+	if p.kw("AS") {
+		p.advance()
+		a := p.advance()
+		if a.Kind != TKIdent {
+			return tr, p.errf("expected alias after AS")
+		}
+		tr.Alias = a.Value
+	} else if p.cur().Kind == TKIdent {
+		// implicit alias
+		tr.Alias = p.advance().Value
+	}
+	return tr, nil
+}
+
+// parseSourceString reads the remainder of a qualified source spec until the
+// next whitespace-delimited keyword/ident boundary. For v0.1 we accept a
+// single ident/path token; richer path parsing is added with the file
+// connectors.
+func (p *Parser) parseSourceString() (string, error) {
+	// collect a path-like token: idents, dots, slashes, digits
+	var b strings.Builder
+	for {
+		t := p.cur()
+		if t.Kind == TKIdent || t.Kind == TKInt || t.Kind == TKFloat {
+			b.WriteString(t.Value)
+			p.advance()
+		} else if t.Kind == TKOperator && (t.Value == "." || t.Value == "/") {
+			b.WriteString(t.Value)
+			p.advance()
+		} else {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "", p.errf("expected source after ':'")
+	}
+	return b.String(), nil
+}
+
+func (p *Parser) parseJoin() (Join, error) {
+	j := Join{Kind: JoinInner}
+	if p.kw("INNER") {
+		p.advance()
+	} else if p.kw("LEFT") {
+		j.Kind = JoinLeft
+		p.advance()
+	}
+	if err := p.expectKW("JOIN"); err != nil {
+		return j, err
+	}
+	ref, err := p.parseTableRef()
+	if err != nil {
+		return j, err
+	}
+	j.Ref = ref
+	if err := p.expectKW("ON"); err != nil {
+		return j, err
+	}
+	on, err := p.parseExpr()
+	if err != nil {
+		return j, err
+	}
+	j.On = on
+	return j, nil
+}
+
+func (p *Parser) parseInt() (int, error) {
+	t := p.advance()
+	if t.Kind != TKInt {
+		return 0, p.errf("expected integer")
+	}
+	n, err := strconv.Atoi(t.Value)
+	return n, err
+}
+
+// parseExpr is a placeholder that parses primary expressions and binary ops
+// with minimal precedence. Full precedence climbing arrives in v0.1.
+func (p *Parser) parseExpr() (Expr, error) {
+	return p.parseOr()
+}
+
+func (p *Parser) parseOr() (Expr, error) {
+	left, err := p.parseAnd()
+	if err != nil {
+		return nil, err
+	}
+	for p.kw("OR") {
+		p.advance()
+		right, err := p.parseAnd()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOp{Op: "OR", Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseAnd() (Expr, error) {
+	left, err := p.parseCompare()
+	if err != nil {
+		return nil, err
+	}
+	for p.kw("AND") {
+		p.advance()
+		right, err := p.parseCompare()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOp{Op: "AND", Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseCompare() (Expr, error) {
+	left, err := p.parseAdd()
+	if err != nil {
+		return nil, err
+	}
+	t := p.cur()
+	if t.Kind == TKOperator {
+		switch t.Value {
+		case "=", "<>", "<", "<=", ">", ">=":
+			p.advance()
+			right, err := p.parseAdd()
+			if err != nil {
+				return nil, err
+			}
+			return &BinaryOp{Op: t.Value, Left: left, Right: right}, nil
+		}
+	}
+	// IN / BETWEEN / LIKE / IS NULL handled in v0.1
+	return left, nil
+}
+
+func (p *Parser) parseAdd() (Expr, error) {
+	left, err := p.parseMul()
+	if err != nil {
+		return nil, err
+	}
+	for p.op("+") || p.op("-") {
+		op := p.advance().Value
+		right, err := p.parseMul()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOp{Op: op, Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseMul() (Expr, error) {
+	left, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	for p.op("*") || p.op("/") {
+		op := p.advance().Value
+		right, err := p.parsePrimary()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOp{Op: op, Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parsePrimary() (Expr, error) {
+	t := p.cur()
+	switch {
+	case t.Kind == TKInt:
+		p.advance()
+		v, _ := strconv.ParseInt(t.Value, 10, 64)
+		return &LitInt{V: v}, nil
+	case t.Kind == TKFloat:
+		p.advance()
+		v, _ := strconv.ParseFloat(t.Value, 64)
+		return &LitFloat{V: v}, nil
+	case t.Kind == TKString:
+		p.advance()
+		return &LitString{V: t.Value}, nil
+	case p.kw("TRUE"):
+		p.advance()
+		return &LitBool{V: true}, nil
+	case p.kw("FALSE"):
+		p.advance()
+		return &LitBool{V: false}, nil
+	case p.kw("NULL"):
+		p.advance()
+		return &LitNull{}, nil
+	case p.op("("):
+		p.advance()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectOp(")"); err != nil {
+			return nil, err
+		}
+		return e, nil
+	case t.Kind == TKIdent || (t.Kind == TKKeyword && isFuncKW(t.Value)):
+		// function call or column ref
+		name := p.advance().Value
+		if p.op("(") {
+			p.advance()
+			fc := &FuncCall{Name: name}
+			if p.op("*") {
+				p.advance()
+				fc.Args = []Expr{&ColRef{Name: "*"}}
+			} else if !p.op(")") {
+				for {
+					e, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					fc.Args = append(fc.Args, e)
+					if !p.op(",") {
+						break
+					}
+					p.advance()
+				}
+			}
+			if err := p.expectOp(")"); err != nil {
+				return nil, err
+			}
+			return fc, nil
+		}
+		ref := &ColRef{Name: name}
+		if p.op(".") {
+			p.advance()
+			// qualifier was name, field is next
+			field := p.advance()
+			ref.Qualifier = name
+			ref.Name = field.Value
+		}
+		return ref, nil
+	}
+	return nil, p.errf("unexpected token in expression: %q", t.Value)
+}
+
+func isFuncKW(s string) bool {
+	switch s {
+	case "COUNT", "SUM", "AVG", "MIN", "MAX", "CAST", "COALESCE":
+		return true
+	}
+	return false
+}
