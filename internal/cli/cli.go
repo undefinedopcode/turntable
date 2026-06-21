@@ -184,25 +184,32 @@ func (a *App) Run(ctx context.Context, args []string) int {
 }
 
 func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) int {
+	return a.runQueryInto(ctx, query, explain, quiet, a.Out, a.Err)
+}
+
+// runQueryInto parses, plans, and executes one query, writing results to out
+// and metadata/errors to errw. Splitting the writer out from a.Out lets the
+// REPL route output through readline's managed TTY writers.
+func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet bool, out, errw io.Writer) int {
 	stmt, err := sql.Parse(query)
 	if err != nil {
-		fmt.Fprintf(a.Err, "parse error: %v\n", err)
+		fmt.Fprintf(errw, "parse error: %v\n", err)
 		return 1
 	}
 	p, err := plan.Build(ctx, stmt.(*sql.SelectStmt), a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
-		fmt.Fprintf(a.Err, "plan error: %v\n", err)
+		fmt.Fprintf(errw, "plan error: %v\n", err)
 		return 1
 	}
 
 	if explain {
-		fmt.Fprintf(a.Out, "%s\n", formatPlan(p.Root, 0))
+		fmt.Fprintf(out, "%s\n", formatPlan(p.Root, 0))
 		return 0
 	}
 
 	it, schema, err := plan.Exec(ctx, p)
 	if err != nil {
-		fmt.Fprintf(a.Err, "exec error: %v\n", err)
+		fmt.Fprintf(errw, "exec error: %v\n", err)
 		return 1
 	}
 
@@ -211,7 +218,7 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 	if a.Output == render.FormatTable {
 		rows, err := engine.Materialize(ctx, it)
 		if err != nil {
-			fmt.Fprintf(a.Err, "exec error: %v\n", err)
+			fmt.Fprintf(errw, "exec error: %v\n", err)
 			return 1
 		}
 		if a.maxRows > 0 && len(rows) > a.maxRows {
@@ -219,15 +226,15 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 		}
 		r, err := render.New(a.Output)
 		if err != nil {
-			fmt.Fprintf(a.Err, "%v\n", err)
+			fmt.Fprintf(errw, "%v\n", err)
 			return 1
 		}
-		if err := r.Render(a.Out, schema, rows); err != nil {
-			fmt.Fprintf(a.Err, "render error: %v\n", err)
+		if err := r.Render(out, schema, rows); err != nil {
+			fmt.Fprintf(errw, "render error: %v\n", err)
 			return 1
 		}
 		if !quiet && len(rows) > 0 {
-			fmt.Fprintf(a.Err, "(%d rows)\n", len(rows))
+			fmt.Fprintf(errw, "(%d rows)\n", len(rows))
 		}
 		return 0
 	}
@@ -237,20 +244,20 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 		// Fall back to materialize if streaming isn't supported.
 		rows, merr := engine.Materialize(ctx, it)
 		if merr != nil {
-			fmt.Fprintf(a.Err, "exec error: %v\n", merr)
+			fmt.Fprintf(errw, "exec error: %v\n", merr)
 			return 1
 		}
 		r, rerr := render.New(a.Output)
 		if rerr != nil {
-			fmt.Fprintf(a.Err, "%v\n", rerr)
+			fmt.Fprintf(errw, "%v\n", rerr)
 			return 1
 		}
-		if err := r.Render(a.Out, schema, rows); err != nil {
-			fmt.Fprintf(a.Err, "render error: %v\n", err)
+		if err := r.Render(out, schema, rows); err != nil {
+			fmt.Fprintf(errw, "render error: %v\n", err)
 			return 1
 		}
 		if !quiet && len(rows) > 0 {
-			fmt.Fprintf(a.Err, "(%d rows)\n", len(rows))
+			fmt.Fprintf(errw, "(%d rows)\n", len(rows))
 		}
 		return 0
 	}
@@ -258,13 +265,13 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 	if a.maxRows > 0 {
 		cappedIt = engine.NewLimitIter(it, &a.maxRows, 0)
 	}
-	n, err := sr.RenderStream(a.Out, schema, cappedIt)
+	n, err := sr.RenderStream(out, schema, cappedIt)
 	if err != nil {
-		fmt.Fprintf(a.Err, "render error: %v\n", err)
+		fmt.Fprintf(errw, "render error: %v\n", err)
 		return 1
 	}
 	if !quiet && n > 0 {
-		fmt.Fprintf(a.Err, "(%d rows)\n", n)
+		fmt.Fprintf(errw, "(%d rows)\n", n)
 	}
 	return 0
 }

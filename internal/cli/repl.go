@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/april/octoparser/internal/connector"
 	"github.com/april/octoparser/internal/render"
-	"golang.org/x/term"
+	"github.com/chzyer/readline"
 )
 
 // historyFile is the path used to persist REPL line history.
@@ -24,78 +25,137 @@ const replPrompt = "octo> "
 // exit code. When stdin is not a TTY it falls back to a simple line reader so
 // piped input still works (e.g. `echo 'SELECT 1' | octoparser --repl`).
 func (a *App) repl(ctx context.Context) int {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !readline.IsTerminal(int(os.Stdin.Fd())) {
 		return a.replBatch(ctx, os.Stdin)
 	}
 
-	hist, err := loadHistory()
+	// readline owns raw-mode terminal handling, line editing, history, tab
+	// completion, and CRLF output translation — so there is nothing for us to
+	// get wrong at the terminal level. Query results and errors are written to
+	// the readline instance's Stdout/Stderr, which it keeps in sync with the
+	// raw TTY.
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:            replPrompt,
+		HistoryFile:       historyPath(),
+		HistorySearchFold: true,
+		AutoComplete:      a.replCompleter(),
+		Stdin:             os.Stdin,
+		Stdout:            os.Stdout,
+		Stderr:            os.Stderr,
+	})
 	if err != nil {
-		hist = nil // non-fatal
-	}
-
-	old, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		fmt.Fprintf(a.Err, "repl: cannot enter raw mode: %v\n", err)
+		fmt.Fprintf(a.Err, "repl: %v\n", err)
 		return 1
 	}
-	defer term.Restore(int(os.Stdin.Fd()), old)
+	defer rl.Close()
 
-	// In raw mode the terminal does not translate \n to a carriage return, so
-	// every newline must be written as \r\n. Wrap the output and error writers
-	// once and route all interactive output (prompts, results, errors, row
-	// counts) through them. Both stdout and stderr share the same TTY.
-	out := &crlfWriter{w: a.Out}
-	errw := &crlfWriter{w: a.Err}
-	savedOut, savedErr := a.Out, a.Err
-	a.Out, a.Err = out, errw
-	defer func() { a.Out, a.Err = savedOut, savedErr }()
-
-	fmt.Fprint(out, replBanner())
-	r := newLineEditor(os.Stdin, out, a.completions())
-	r.history = hist
+	fmt.Fprintln(rl.Stdout(), replBanner())
+	var pending strings.Builder
 
 	for {
-		fmt.Fprint(r.out, replPrompt)
-		line, ok := r.readLine()
-		if !ok { // Ctrl-D / EOF
-			fmt.Fprintln(r.out)
+		// Use a continuation prompt when accumulating a multi-line statement.
+		if pending.Len() > 0 {
+			rl.SetPrompt(replContPrompt)
+		} else {
+			rl.SetPrompt(replPrompt)
+		}
+		line, rerr := rl.Readline()
+		if rerr == io.EOF { // Ctrl-D
+			fmt.Fprintln(rl.Stdout())
 			break
 		}
-		// Remember non-blank lines (minus the prompt echo).
-		if strings.TrimSpace(line) != "" {
-			r.history = append(r.history, line)
-		}
-		if r.lastWasCtrlC {
-			r.lastWasCtrlC = false
-			fmt.Fprintln(r.out, "^C")
+		if rerr == readline.ErrInterrupt {
+			// Ctrl-C: cancel any pending multi-line input and start fresh.
+			pending.Reset()
+			fmt.Fprintln(rl.Stdout(), "^C")
 			continue
 		}
-		// A line may be a dot-command or a SQL fragment. SQL fragments are
-		// accumulated until a terminating semicolon.
-		handled, quit, err := a.handleReplLine(ctx, line, r)
-		if err != nil {
-			fmt.Fprintf(r.out, "error: %v\n", err)
-		}
-		if quit {
+		if rerr != nil {
+			fmt.Fprintf(rl.Stderr(), "read error: %v\n", rerr)
 			break
 		}
-		_ = handled
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Dot-commands are handled immediately and never join pending SQL.
+		if strings.HasPrefix(trimmed, ".") {
+			if a.dotCommand(ctx, trimmed, rl.Stdout()) {
+				break
+			}
+			continue
+		}
+		// Accumulate SQL until a terminating semicolon.
+		pending.WriteString(" ")
+		pending.WriteString(line)
+		if !strings.HasSuffix(trimmed, ";") {
+			continue
+		}
+		q := strings.TrimSpace(pending.String())
+		pending.Reset()
+		q = strings.TrimSuffix(q, ";")
+		if q != "" {
+			a.runQueryInto(ctx, q, a.replExplain, true, rl.Stdout(), rl.Stderr())
+		}
 	}
-	_ = saveHistory(r.history)
 	return 0
+}
+
+// replContPrompt is shown while a multi-line statement is being accumulated.
+const replContPrompt = "   ...> "
+
+// replCompleter builds a readline.AutoCompleter that completes dot-commands
+// and registered source names against the current word.
+func (a *App) replCompleter() readline.AutoCompleter {
+	return &replCompleter{cands: a.completions()}
+}
+
+// replCompleter implements readline.AutoCompleter. Do returns candidate runes
+// for the word under the cursor and an offset (0 = replace from word start).
+type replCompleter struct {
+	cands []string
+}
+
+func (c *replCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	start := pos
+	for start > 0 && !isWordBreak(line[start-1]) {
+		start--
+	}
+	prefix := strings.ToLower(string(line[start:pos]))
+	if prefix == "" {
+		return nil, 0
+	}
+	var matches [][]rune
+	for _, cand := range c.cands {
+		if strings.HasPrefix(strings.ToLower(cand), prefix) {
+			matches = append(matches, []rune(cand))
+		}
+	}
+	return matches, start
+}
+
+// isWordBreak reports whether r delimits words for completion.
+func isWordBreak(r rune) bool {
+	switch r {
+	case ' ', '\t', ',', '(', ')', ';':
+		return true
+	}
+	return false
 }
 
 // replBatch reads whole lines from r (non-interactive), handling dot-commands
 // and accumulating SQL until a semicolon, then running each statement.
 func (a *App) replBatch(ctx context.Context, r io.Reader) int {
-	br := newLineReader(r)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var buf strings.Builder
 	for {
 		fmt.Fprint(a.Out, replPrompt)
-		line, ok := br.readLine()
-		if !ok {
+		if !sc.Scan() {
 			break
 		}
+		line := sc.Text()
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, ".") {
 			if quit := a.dotCommand(ctx, trimmed, a.Out); quit {
@@ -110,39 +170,11 @@ func (a *App) replBatch(ctx context.Context, r io.Reader) int {
 			buf.Reset()
 			q = strings.TrimSuffix(q, ";")
 			if q != "" {
-				a.runQuery(ctx, q, a.replExplain, true)
+				a.runQueryInto(ctx, q, a.replExplain, true, a.Out, a.Err)
 			}
 		}
 	}
 	return 0
-}
-
-// handleReplLine processes a single input line within the interactive editor.
-// It returns handled=true if the line was consumed as a dot-command or a
-// completed SQL statement, and quit=true if the user asked to exit.
-func (a *App) handleReplLine(ctx context.Context, line string, r *lineEditor) (handled, quit bool, err error) {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return true, false, nil
-	}
-	if strings.HasPrefix(trimmed, ".") {
-		q := a.dotCommand(ctx, trimmed, r.out)
-		return true, q, nil
-	}
-	// Accumulate SQL until a terminating semicolon.
-	r.pending.WriteString(" ")
-	r.pending.WriteString(line)
-	if !strings.HasSuffix(trimmed, ";") {
-		return true, false, nil
-	}
-	q := strings.TrimSpace(r.pending.String())
-	r.pending.Reset()
-	q = strings.TrimSuffix(q, ";")
-	if q == "" {
-		return true, false, nil
-	}
-	a.runQuery(ctx, q, a.replExplain, true)
-	return true, false, nil
 }
 
 // dotCommand executes a REPL meta-command beginning with ".". It returns true
@@ -306,80 +338,12 @@ Type a SQL query ending with ; to run it. Multi-line input is supported.`
 
 // ---- history persistence -----------------------------------------------------
 
-func loadHistory() ([]string, error) {
+// historyPath returns the on-disk path for REPL history. readline manages the
+// file itself when HistoryFile is set, so we only need to name it.
+func historyPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return ""
 	}
-	b, err := os.ReadFile(filepath.Join(home, historyFile))
-	if err != nil {
-		return nil, err
-	}
-	var lines []string
-	for _, l := range strings.Split(string(b), "\n") {
-		if l != "" {
-			lines = append(lines, l)
-		}
-	}
-	return lines, nil
-}
-
-func saveHistory(lines []string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	// Cap history length.
-	if len(lines) > 1000 {
-		lines = lines[len(lines)-1000:]
-	}
-	return os.WriteFile(filepath.Join(home, historyFile), []byte(strings.Join(lines, "\n")), 0o600)
-}
-
-// ---- minimal line reader (non-interactive) -----------------------------------
-
-type simpleReader struct {
-	r   *strings.Reader
-	src io.Reader
-	eof bool
-	buf []byte
-}
-
-func newLineReader(r io.Reader) *simpleReader {
-	return &simpleReader{src: r}
-}
-
-func (s *simpleReader) readLine() (string, bool) {
-	if s.eof {
-		return "", false
-	}
-	for {
-		i := -1
-		for idx, b := range s.buf {
-			if b == '\n' {
-				i = idx
-				break
-			}
-		}
-		if i >= 0 {
-			line := string(s.buf[:i])
-			s.buf = s.buf[i+1:]
-			return strings.TrimRight(line, "\r"), true
-		}
-		tmp := make([]byte, 4096)
-		n, err := s.src.Read(tmp)
-		if n > 0 {
-			s.buf = append(s.buf, tmp[:n]...)
-		}
-		if err != nil {
-			if len(s.buf) > 0 {
-				line := string(s.buf)
-				s.buf = nil
-				s.eof = true
-				return strings.TrimRight(line, "\r"), true
-			}
-			s.eof = true
-			return "", false
-		}
-	}
+	return filepath.Join(home, historyFile)
 }

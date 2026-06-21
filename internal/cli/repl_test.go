@@ -5,59 +5,46 @@ import (
 	"testing"
 )
 
-func TestLineEditorCompletion(t *testing.T) {
-	e := newLineEditor(nil, &strings.Builder{}, []string{
+func TestReplCompleter(t *testing.T) {
+	c := &replCompleter{cands: []string{
 		".tables", ".schema", ".help", ".quit", "customers", "orders",
-	})
-	// Type "cus" then complete -> should expand to "customers".
-	e.buf = []rune("cus")
-	e.pos = 3
-	e.complete()
-	if got := string(e.buf); got != "customers" {
-		t.Errorf("complete(cus) = %q, want customers", got)
+	}}
+	// "cus" should complete to "customers".
+	matches, offset := c.Do([]rune("cus"), 3)
+	if offset != 0 {
+		t.Errorf("offset = %d, want 0", offset)
 	}
-	if e.pos != len("customers") {
-		t.Errorf("complete pos = %d, want %d", e.pos, len("customers"))
+	if len(matches) != 1 || string(matches[0]) != "customers" {
+		t.Errorf("matches = %v, want [customers]", matches)
 	}
 }
 
-func TestLineEditorCompletionCommonPrefix(t *testing.T) {
-	e := newLineEditor(nil, &strings.Builder{}, []string{
-		".tables", ".schema", ".help",
-	})
-	// Type "." then complete -> ambiguous; extend to longest common prefix ".".
-	e.buf = []rune(".")
-	e.pos = 1
-	e.complete()
-	// All candidates share "." prefix only; no further extension, but no
-	// error either. The buffer should remain "." (hint printed to out).
-	if got := string(e.buf); got != "." {
-		t.Errorf("complete(.) = %q, want .", got)
+func TestReplCompleterWordBoundary(t *testing.T) {
+	c := &replCompleter{cands: []string{"customers", "orders"}}
+	// "FROM cus" — the word starts after the space; offset should point at it.
+	line := []rune("FROM cus")
+	matches, offset := c.Do(line, len(line))
+	if offset != 5 { // index of 'c' in "cus"
+		t.Errorf("offset = %d, want 5", offset)
+	}
+	if len(matches) != 1 || string(matches[0]) != "customers" {
+		t.Errorf("matches = %v, want [customers]", matches)
 	}
 }
 
-func TestLineEditorCompletionWordBoundary(t *testing.T) {
-	e := newLineEditor(nil, &strings.Builder{}, []string{"customers", "orders"})
-	// "FROM cus" should complete the word "cus" -> "customers".
-	e.buf = []rune("FROM cus")
-	e.pos = len("FROM cus")
-	e.complete()
-	if got := string(e.buf); got != "FROM customers" {
-		t.Errorf("complete(FROM cus) = %q, want 'FROM customers'", got)
+func TestReplCompleterNoMatch(t *testing.T) {
+	c := &replCompleter{cands: []string{".tables", "orders"}}
+	matches, _ := c.Do([]rune("xyz"), 3)
+	if matches != nil {
+		t.Errorf("matches = %v, want nil", matches)
 	}
 }
 
-func TestCommonPrefix(t *testing.T) {
-	cases := []struct{ a, b, want string }{
-		{"abc", "abd", "ab"},
-		{"hello", "help", "hel"},
-		{"x", "y", ""},
-		{"abc", "abc", "abc"},
-	}
-	for _, c := range cases {
-		if got := commonPrefix(c.a, c.b); got != c.want {
-			t.Errorf("commonPrefix(%q,%q) = %q, want %q", c.a, c.b, got, c.want)
-		}
+func TestReplCompleterEmptyPrefix(t *testing.T) {
+	c := &replCompleter{cands: []string{".tables"}}
+	matches, _ := c.Do([]rune(""), 0)
+	if matches != nil {
+		t.Errorf("matches = %v, want nil for empty prefix", matches)
 	}
 }
 
@@ -78,8 +65,6 @@ func TestReplBatch(t *testing.T) {
 	app := NewApp()
 	app.Out = &strings.Builder{}
 	app.Err = &strings.Builder{}
-	// Register a trivial source so .tables has output.
-	// (No config loaded; .tables should report no sources gracefully.)
 	in := strings.NewReader(".tables\nSELECT 1+1 AS two;\n.quit\n")
 	code := app.replBatch(nil, in)
 	if code != 0 {
@@ -89,6 +74,22 @@ func TestReplBatch(t *testing.T) {
 	if !strings.Contains(out, "no sources") {
 		t.Errorf("expected 'no sources' in output, got: %s", out)
 	}
+	if !strings.Contains(out, "2") {
+		t.Errorf("expected query result 2 in output, got: %s", out)
+	}
+}
+
+func TestReplBatchMultiline(t *testing.T) {
+	// A SQL statement split across multiple lines, terminated by ';'.
+	app := NewApp()
+	app.Out = &strings.Builder{}
+	app.Err = &strings.Builder{}
+	in := strings.NewReader("SELECT 1+1\n  AS two;\n.quit\n")
+	code := app.replBatch(nil, in)
+	if code != 0 {
+		t.Errorf("replBatch code = %d, want 0", code)
+	}
+	out := app.Out.(*strings.Builder).String()
 	if !strings.Contains(out, "2") {
 		t.Errorf("expected query result 2 in output, got: %s", out)
 	}

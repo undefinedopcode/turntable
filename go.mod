@@ -3,7 +3,7 @@ module github.com/april/octoparser
 go 1.26.3
 
 require (
-	golang.org/x/term v0.44.0
+	github.com/chzyer/readline v1.5.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0
 )
