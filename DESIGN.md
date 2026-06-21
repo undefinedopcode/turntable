@@ -73,7 +73,7 @@ engine.
                 └───────────────────────────────────────────────┘
 
   Connectors (plugin-style, registered at startup):
-  json | csv | yaml | sql-db | (future) cloudwatch | prometheus | http | ...
+  json | csv | yaml | excel | sql-db | (future) cloudwatch | prometheus | http | ...
 ```
 
 ### Component responsibilities
@@ -130,6 +130,7 @@ and address a source directly:
 ```sql
 SELECT * FROM json:./users.json            -- file connector shorthand
 SELECT * FROM csv:./events.csv  AS e
+SELECT * FROM excel:./report.xlsx sheet=Q1  -- excel sheet (v0.3)
 JOIN  sql:postgres://.../orders o ON o.uid = e.user_id
 ```
 
@@ -183,7 +184,7 @@ type RowIterator interface {
   applies them itself. This keeps connectors simple (they may implement zero
   pushdown and still be correct) while letting capable connectors (SQL DBs)
   push everything down for efficiency.
-- File connectors (json/csv/yaml) typically push down only `Columns` and `Limit`.
+- File connectors (json/csv/yaml/excel) typically push down only `Columns` and `Limit`.
 
 ### Schema
 

@@ -20,6 +20,16 @@ sources:
     connector: yaml
     path: ./examples/data/products.yaml
 
+  # Excel workbook: sheet="*" registers every sheet under its own name (v0.3).
+  regions:
+    connector: excel
+    path: ./examples/data/regions.xlsx
+    sheet: regions
+  quarters:
+    connector: excel
+    path: ./examples/data/regions.xlsx
+    sheet: quarters
+
   # SQL database, credentials via env var interpolation (v0.2).
   warehouse:
     connector: sql

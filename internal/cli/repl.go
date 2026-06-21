@@ -324,42 +324,47 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 	}
 	src := config.Source{}
 
-	// Shorthand: "<connector>:<path>" as a single token.
-	if len(rest) == 1 {
-		spec := rest[0]
-		i := strings.Index(spec, ":")
-		if i <= 0 {
-			return nil, fmt.Errorf("expected <connector>:<path> or <connector> k=v ...")
-		}
-		src.Connector = spec[:i]
-		src.Path = spec[i+1:]
+	// The first token may be a "<connector>:<path>" shorthand (e.g.
+	// "csv:./data.csv") or a bare connector name followed by k=v options.
+	// Detect the shorthand by a colon that isn't part of a k=v pair (i.e. no
+	// '=' after the colon in the same token) and a known file connector.
+	first := rest[0]
+	if i := strings.Index(first, ":"); i > 0 && !strings.Contains(first, "=") {
+		src.Connector = first[:i]
+		src.Path = first[i+1:]
+		rest = rest[1:]
 	} else {
-		src.Connector = rest[0]
-		for _, kv := range rest[1:] {
-			eq := strings.Index(kv, "=")
-			if eq <= 0 {
-				return nil, fmt.Errorf("bad option %q (expected key=value)", kv)
+		src.Connector = first
+		rest = rest[1:]
+	}
+	for _, kv := range rest {
+		eq := strings.Index(kv, "=")
+		if eq <= 0 {
+			return nil, fmt.Errorf("bad option %q (expected key=value)", kv)
+		}
+		key, val := kv[:eq], kv[eq+1:]
+		switch strings.ToLower(key) {
+		case "path":
+			src.Path = val
+		case "driver":
+			src.Driver = val
+		case "dsn":
+			src.DSN = val
+		case "table":
+			src.Table = val
+		case "sheet":
+			src.Sheet = val
+		case "delimiter":
+			src.Delimiter = val
+		default:
+			if src.Options == nil {
+				src.Options = map[string]any{}
 			}
-			key, val := kv[:eq], kv[eq+1:]
-			switch strings.ToLower(key) {
-			case "path":
-				src.Path = val
-			case "driver":
-				src.Driver = val
-			case "dsn":
-				src.DSN = val
-			case "table":
-				src.Table = val
-			case "delimiter":
-				src.Delimiter = val
-			default:
-				if src.Options == nil {
-					src.Options = map[string]any{}
-				}
-				src.Options[key] = val
-			}
+			src.Options[key] = val
 		}
 	}
+
+	// The "sql" connector always needs driver+dsn; everything else needs path.
 
 	// The "sql" connector always needs driver+dsn; everything else needs path.
 	if src.Connector == "sql" {

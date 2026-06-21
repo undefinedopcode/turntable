@@ -13,6 +13,7 @@ import (
 	"github.com/april/octoparser/internal/config"
 	"github.com/april/octoparser/internal/connector"
 	"github.com/april/octoparser/internal/connector/connectors/csvc"
+	"github.com/april/octoparser/internal/connector/connectors/excelc"
 	"github.com/april/octoparser/internal/connector/connectors/jsonc"
 	"github.com/april/octoparser/internal/connector/connectors/sqlc"
 	"github.com/april/octoparser/internal/connector/connectors/yamlc"
@@ -47,6 +48,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(jsonc.New())
 	_ = reg.RegisterConnector(csvc.New())
 	_ = reg.RegisterConnector(yamlc.New())
+	_ = reg.RegisterConnector(excelc.New())
 	_ = reg.RegisterConnector(sqlc.New())
 	return &App{
 		Out:    os.Stdout,
@@ -97,6 +99,9 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 	if src.Delimiter != "" {
 		opts["delimiter"] = src.Delimiter
 	}
+	if src.Sheet != "" {
+		opts["sheet"] = src.Sheet
+	}
 	for k, v := range src.Options {
 		opts[k] = v
 	}
@@ -131,11 +136,44 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 		}
 		return []string{name}, nil
 	}
+	// Excel wildcard: sheet="*" expands to every worksheet in the workbook.
+	if src.Connector == "excel" && src.Sheet == "*" {
+		return a.expandExcelSheets(ctx, name, src.Path, opts)
+	}
 	ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
 	if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
 		return nil, err
 	}
 	return []string{name}, nil
+}
+
+// expandExcelSheets enumerates the worksheets in an Excel workbook and
+// registers each one under its own sheet name (with a name prefix on
+// collision), mirroring expandSQLTables.
+func (a *App) expandExcelSheets(ctx context.Context, name, path string, opts map[string]any) ([]string, error) {
+	if path == "" {
+		return nil, fmt.Errorf("source %q requires path", name)
+	}
+	ec := excelc.New()
+	datasets, err := ec.DatasetsFor(ctx, connector.Dataset{Source: path, Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, excelc.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: workbook has no sheets", name)
+	}
+	return registered, nil
 }
 
 // expandSQLTables enumerates the tables in a SQL database and registers each

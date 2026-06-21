@@ -1,9 +1,10 @@
 # OctoParser
 
-Query heterogeneous data sources — JSON, CSV, YAML, SQL databases, and (later)
-CloudWatch, Prometheus, REST APIs — using a single SQL-style query language.
+Query heterogeneous data sources — JSON, CSV, YAML, Excel, SQL databases, and
+(later) CloudWatch, Prometheus, REST APIs — using a single SQL-style query
+language.
 
-> **Status:** v0.3. JSON, CSV, YAML, and SQL database connectors are
+> **Status:** v0.3. JSON, CSV, YAML, Excel, and SQL database connectors are
 > implemented, with predicate/limit/order pushdown into SQL databases via
 > `database/sql`. Cross-source joins work (e.g. join a Postgres table against a
 > CSV file). v0.3 adds a `CASE WHEN`/`CAST`/`EXTRACT` expression layer, a richer
@@ -155,6 +156,35 @@ A `table: "*"` source enumerates every user table in the database (via
 and registers each one under its own name — so a multi-table DB becomes a set
 of independently queryable sources without listing them by hand.
 
+### Excel workbooks
+
+The `excel` connector (backed by [xuri/excelize](https://github.com/qax-os/excelize))
+reads `.xlsx` files. Each worksheet is a dataset: the first row is the header
+and column types are inferred (int, float, bool, time, string). Use the `sheet`
+option to pick a sheet, or `sheet: "*"` to register every sheet:
+
+```yaml
+sources:
+  report:
+    connector: excel
+    path: ./data/report.xlsx
+    sheet: Q1                # a specific sheet
+  workbook:
+    connector: excel
+    path: ./data/report.xlsx
+    sheet: "*"               # register every sheet under its own name
+```
+
+```bash
+# inline (uses the first sheet)
+octoparser 'SELECT * FROM excel:./data/report.xlsx LIMIT 5'
+
+# in the REPL — register one sheet, or all of them
+octo> .use q1 excel:./data/report.xlsx sheet=Q1
+octo> .use wb excel:./data/report.xlsx sheet=*
+registered 3 tables: summary, Q1, Q2
+```
+
 ## Layout
 
 ```
@@ -165,7 +195,7 @@ internal/sql         lexer, parser, AST
 internal/plan        resolution, validation, pushdown
 internal/engine      types, rows, operator pipeline
 internal/connector   Connector interface + Registry
-internal/connector/connectors/{jsonc,csvc,yamlc,sqlc}
+internal/connector/connectors/{jsonc,csvc,yamlc,excelc,sqlc}
 internal/render       output formatters
 internal/config       octoparser.yaml loader
 examples/             sample config, data, and run.sh demo script

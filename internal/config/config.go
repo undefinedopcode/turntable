@@ -26,6 +26,7 @@ type Source struct {
 	DSN       string         `yaml:"dsn,omitempty"`
 	Driver    string         `yaml:"driver,omitempty"`
 	Table     string         `yaml:"table,omitempty"`
+	Sheet     string         `yaml:"sheet,omitempty"`
 	Delimiter string         `yaml:"delimiter,omitempty"`
 	Options   map[string]any `yaml:"options,omitempty"`
 }
@@ -70,6 +71,7 @@ func Parse(data []byte) (*File, error) {
 		src.DSN = interpolate(src.DSN)
 		src.Driver = interpolate(src.Driver)
 		src.Table = interpolate(src.Table)
+		src.Sheet = interpolate(src.Sheet)
 		f.Sources[name] = src
 	}
 	return &f, nil

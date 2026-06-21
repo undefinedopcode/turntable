@@ -28,8 +28,8 @@ run() {
 FILTER=""
 if [[ $# -gt 0 ]]; then
     FILTER="$1"
-    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 13 ]]; then
-        echo "Usage: $0 [1-13]" >&2
+    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 15 ]]; then
+        echo "Usage: $0 [1-15]" >&2
         exit 1
     fi
 fi
@@ -72,3 +72,9 @@ run 12 "EXTRACT + date functions" \
 
 run 13 "FROM-less scratch + string functions" \
     'SELECT 1 + 1 AS two, LEFT("octoparser", 4) AS prefix, POSITION("parse" IN "octoparser") AS pos, INITCAP("hello world") AS shout'
+
+run 14 "Excel workbook (single sheet)" \
+    'SELECT region, manager, target FROM regions ORDER BY target DESC'
+
+run 15 "Excel workbook (second sheet, bool filter)" \
+    'SELECT quarter, revenue FROM quarters WHERE active = true ORDER BY revenue DESC'
