@@ -5,6 +5,8 @@ package config
 import (
 	"fmt"
 	"os"
+
+	"gopkg.in/yaml.v3"
 )
 
 // File is the top-level config structure.
@@ -20,7 +22,7 @@ type Source struct {
 	DSN       string         `yaml:"dsn,omitempty"`
 	Driver    string         `yaml:"driver,omitempty"`
 	Delimiter string         `yaml:"delimiter,omitempty"`
-	Options   map[string]any `yaml:",inline"`
+	Options   map[string]any `yaml:"options,omitempty"`
 }
 
 // Defaults holds default CLI behavior overrides.
@@ -31,8 +33,7 @@ type Defaults struct {
 
 // Load reads a config file from path. If path is empty and no default file
 // exists, an empty config is returned (sources resolved via flags/qualified
-// refs). The actual YAML parsing is implemented in v0.1 once a YAML dependency
-// is chosen; this skeleton returns a descriptive error so callers know.
+// refs).
 func Load(path string) (*File, error) {
 	if path == "" {
 		// default location
@@ -46,10 +47,17 @@ func Load(path string) (*File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
-	return parse(data)
+	return Parse(data)
 }
 
-// parse is a stub; real YAML parsing lands in v0.1.
-func parse(data []byte) (*File, error) {
-	return nil, fmt.Errorf("config parsing not yet implemented (v0.1); got %d bytes", len(data))
+// Parse decodes YAML config bytes.
+func Parse(data []byte) (*File, error) {
+	var f File
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if f.Sources == nil {
+		f.Sources = map[string]Source{}
+	}
+	return &f, nil
 }

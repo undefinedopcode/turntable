@@ -7,6 +7,7 @@ type Statement interface{ stmtNode() }
 
 // SelectStmt is a SELECT query.
 type SelectStmt struct {
+	Distinct bool
 	Items  SelectList
 	From   TableRef
 	Joins  []Join

@@ -77,6 +77,10 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 		return nil, err
 	}
 	s := &SelectStmt{}
+	if p.kw("DISTINCT") {
+		s.Distinct = true
+		p.advance()
+	}
 
 	// optional DISTINCT handled in v0.1
 	items, err := p.parseSelectList()
@@ -376,7 +380,76 @@ func (p *Parser) parseCompare() (Expr, error) {
 			return &BinaryOp{Op: t.Value, Left: left, Right: right}, nil
 		}
 	}
-	// IN / BETWEEN / LIKE / IS NULL handled in v0.1
+	// IS [NOT] NULL
+	if p.kw("IS") {
+		p.advance()
+		neg := false
+		if p.kw("NOT") {
+			neg = true
+			p.advance()
+		}
+		if err := p.expectKW("NULL"); err != nil {
+			return nil, err
+		}
+		return &IsNullExpr{Expr: left, Negate: neg}, nil
+	}
+	// [NOT] IN / BETWEEN / LIKE
+	neg := false
+	if p.kw("NOT") {
+		// only if followed by IN/BETWEEN/LIKE
+		if p.peek().Kind == TKKeyword && (strings.EqualFold(p.peek().Value, "IN") || strings.EqualFold(p.peek().Value, "BETWEEN") || strings.EqualFold(p.peek().Value, "LIKE")) {
+			neg = true
+			p.advance()
+		}
+	}
+	if p.kw("IN") {
+		p.advance()
+		if err := p.expectOp("("); err != nil {
+			return nil, err
+		}
+		var list []Expr
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, e)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+		if err := p.expectOp(")"); err != nil {
+			return nil, err
+		}
+		return &InExpr{Expr: left, List: list, Negate: neg}, nil
+	}
+	if p.kw("BETWEEN") {
+		p.advance()
+		lo, err := p.parseAdd()
+		if err != nil {
+			return nil, err
+		}
+		// SQL allows `BETWEEN x AND y` — but AND is also boolean AND. Since we
+		// are in parseCompare (below parseAnd), `AND` here terminates parseAdd,
+		// so we consume the AND keyword explicitly.
+		if err := p.expectKW("AND"); err != nil {
+			return nil, err
+		}
+		hi, err := p.parseAdd()
+		if err != nil {
+			return nil, err
+		}
+		return &BetweenExpr{Expr: left, Low: lo, High: hi, Negate: neg}, nil
+	}
+	if p.kw("LIKE") {
+		p.advance()
+		pat, err := p.parseAdd()
+		if err != nil {
+			return nil, err
+		}
+		return &LikeExpr{Expr: left, Pat: pat, Negate: neg}, nil
+	}
 	return left, nil
 }
 

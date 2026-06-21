@@ -2,37 +2,19 @@ package engine
 
 import (
 	"context"
-	"fmt"
 )
 
-// Execute runs a logical plan node and returns a RowIterator. The plan types
-// live in internal/plan to avoid a cycle; Execute accepts the concrete root
-// via the Executer interface implemented there. This package's ops.go holds
-// the operator implementations (filter/project/join/agg/sort/limit) used to
-// compose the execution pipeline.
-//
-// The skeleton wires only a passthrough; full operators land in v0.1.
-
-// PassthroughIter wraps a child iterator unchanged (used by the skeleton).
-type PassthroughIter struct {
-	inner RowIterator
-}
-
-func NewPassthroughIter(inner RowIterator) *PassthroughIter {
-	return &PassthroughIter{inner: inner}
-}
-
-func (p *PassthroughIter) Next() (Row, bool, error) { return p.inner.Next() }
-func (p *PassthroughIter) Close() error             { return p.inner.Close() }
-
 // Materialize reads all rows from an iterator into a slice. Useful for small
-// datasets and for tests. Respects context cancellation.
+// datasets and for tests. Respects context cancellation; a nil context is
+// treated as non-cancellable.
 func Materialize(ctx context.Context, it RowIterator) ([]Row, error) {
 	defer it.Close()
 	var out []Row
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
 		r, ok, err := it.Next()
 		if err != nil {
@@ -46,7 +28,55 @@ func Materialize(ctx context.Context, it RowIterator) ([]Row, error) {
 	return out, nil
 }
 
-// Run is a placeholder entrypoint; the real engine is implemented in v0.1.
-func Run(ctx context.Context, plan any) (RowIterator, error) {
-	return nil, fmt.Errorf("engine.Run not yet implemented (v0.1)")
+// SchemaResolver builds a Resolver for a schema. The alias, when non-empty,
+// must match a registered alias; unqualified names match any column. When
+// multiple columns share a name, the first match wins. (The planner should
+// reject ambiguous unqualified references.)
+func SchemaResolver(schema Schema, alias string) Resolver {
+	return func(qualifier, name string) int {
+		for i, c := range schema.Columns {
+			if qualifier != "" {
+				// qualified: match alias + column name
+				if equalFold(qualifier, alias) && equalFold(c.Name, name) {
+					return i
+				}
+				continue
+			}
+			if equalFold(c.Name, name) {
+				return i
+			}
+		}
+		return -1
+	}
+}
+
+// JoinResolver builds a Resolver for a joined (combined) schema. The qualifier
+// is matched against leftAlias (columns [0, leftWidth)) or rightAlias (columns
+// [leftWidth, end)). Unqualified names match the first column with that name.
+func JoinResolver(schema Schema, leftAlias string, leftWidth int, rightAlias string) Resolver {
+	return func(qualifier, name string) int {
+		if qualifier != "" {
+			if equalFold(qualifier, leftAlias) {
+				for i := 0; i < leftWidth && i < len(schema.Columns); i++ {
+					if equalFold(schema.Columns[i].Name, name) {
+						return i
+					}
+				}
+			}
+			if equalFold(qualifier, rightAlias) {
+				for i := leftWidth; i < len(schema.Columns); i++ {
+					if equalFold(schema.Columns[i].Name, name) {
+						return i
+					}
+				}
+			}
+			return -1
+		}
+		for i, c := range schema.Columns {
+			if equalFold(c.Name, name) {
+				return i
+			}
+		}
+		return -1
+	}
 }

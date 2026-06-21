@@ -2,8 +2,12 @@
 package render
 
 import (
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/april/octoparser/internal/engine"
 )
@@ -28,17 +32,239 @@ type Renderer interface {
 // New returns a Renderer for the given format.
 func New(f Format) (Renderer, error) {
 	switch f {
-	case FormatTable, FormatCSV, FormatJSON, FormatNDJSON, FormatYAML, FormatRaw:
-		// Concrete renderers land in v0.1; return a stub for now.
-		return stubRenderer{}, nil
+	case FormatTable:
+		return tableRenderer{}, nil
+	case FormatCSV:
+		return csvRenderer{}, nil
+	case FormatJSON:
+		return jsonRenderer{}, nil
+	case FormatNDJSON:
+		return ndjsonRenderer{}, nil
+	case FormatYAML:
+		return yamlRenderer{}, nil
+	case FormatRaw:
+		return rawRenderer{}, nil
 	}
 	return nil, fmt.Errorf("unknown output format %q", f)
 }
 
-type stubRenderer struct{}
+// colNames returns the schema's column names.
+func colNames(schema engine.Schema) []string {
+	names := make([]string, len(schema.Columns))
+	for i, c := range schema.Columns {
+		names[i] = c.Name
+	}
+	return names
+}
 
-func (stubRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
-	_, err := fmt.Fprintf(w, "(rendering not yet implemented; got %d rows)\n", len(rows))
-	_ = schema
-	return err
+// valString converts a Value to its display string for table/raw output.
+func valString(v engine.Value) string {
+	if v.IsNull() {
+		return ""
+	}
+	if v.Type == engine.TypeAny {
+		b, _ := json.Marshal(v.V)
+		return string(b)
+	}
+	return engine.FormatValue(v)
+}
+
+// ---- table ------------------------------------------------------------------
+
+type tableRenderer struct{}
+
+func (tableRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	names := colNames(schema)
+	if len(names) == 0 && len(rows) == 0 {
+		return nil
+	}
+	// Compute column widths from headers and cell values.
+	widths := make([]int, len(names))
+	for i, n := range names {
+		widths[i] = utf8.RuneCountInString(n)
+	}
+	cellStrs := make([][]string, len(rows))
+	for r, row := range rows {
+		cellStrs[r] = make([]string, len(names))
+		for c := 0; c < len(names); c++ {
+			var s string
+			if c < len(row.Values) {
+				s = valString(row.Values[c])
+			}
+			cellStrs[r][c] = s
+			if l := utf8.RuneCountInString(s); l > widths[c] {
+				widths[c] = l
+			}
+		}
+	}
+	// Header.
+	writeRow(w, names, widths)
+	writeSep(w, widths)
+	for _, cells := range cellStrs {
+		writeRow(w, cells, widths)
+	}
+	return nil
+}
+
+func writeRow(w io.Writer, cells []string, widths []int) {
+	var b strings.Builder
+	for i, c := range cells {
+		if i > 0 {
+			b.WriteString(" | ")
+		}
+		b.WriteString(c)
+		if pad := widths[i] - utf8.RuneCountInString(c); pad > 0 {
+			b.WriteString(strings.Repeat(" ", pad))
+		}
+	}
+	b.WriteString("\n")
+	fmt.Fprint(w, b.String())
+}
+
+func writeSep(w io.Writer, widths []int) {
+	var b strings.Builder
+	for i, wd := range widths {
+		if i > 0 {
+			b.WriteString("-+-")
+		}
+		b.WriteString(strings.Repeat("-", wd))
+	}
+	b.WriteString("\n")
+	fmt.Fprint(w, b.String())
+}
+
+// ---- csv --------------------------------------------------------------------
+
+type csvRenderer struct{}
+
+func (csvRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	names := colNames(schema)
+	if err := cw.Write(names); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		rec := make([]string, len(names))
+		for i := 0; i < len(names); i++ {
+			if i < len(row.Values) {
+				rec[i] = valString(row.Values[i])
+			}
+		}
+		if err := cw.Write(rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---- json -------------------------------------------------------------------
+
+type jsonRenderer struct{}
+
+func (jsonRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	names := colNames(schema)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		obj := map[string]any{}
+		for i, name := range names {
+			if i < len(row.Values) {
+				obj[name] = jsonValue(row.Values[i])
+			}
+		}
+		out = append(out, obj)
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// ---- ndjson -----------------------------------------------------------------
+
+type ndjsonRenderer struct{}
+
+func (ndjsonRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	names := colNames(schema)
+	enc := json.NewEncoder(w)
+	for _, row := range rows {
+		obj := map[string]any{}
+		for i, name := range names {
+			if i < len(row.Values) {
+				obj[name] = jsonValue(row.Values[i])
+			}
+		}
+		if err := enc.Encode(obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// jsonValue converts an engine.Value to a JSON-encodable Go value. NULL maps
+// to nil so json emits `null`.
+func jsonValue(v engine.Value) any {
+	if v.IsNull() {
+		return nil
+	}
+	switch v.Type {
+	case engine.TypeAny:
+		return v.V
+	}
+	return v.V
+}
+
+// ---- yaml -------------------------------------------------------------------
+
+type yamlRenderer struct{}
+
+func (yamlRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	names := colNames(schema)
+	// Emit a YAML sequence of mappings, mirroring ndjson.
+	for _, row := range rows {
+		fmt.Fprintln(w, "-")
+		for i, name := range names {
+			if i < len(row.Values) {
+				fmt.Fprintf(w, "  %s: %s\n", yamlKey(name), yamlScalar(row.Values[i]))
+			}
+		}
+	}
+	return nil
+}
+
+func yamlKey(s string) string {
+	// simple quoting for keys with special chars; otherwise bare
+	if strings.ContainsAny(s, ":#{}[],&*!|>'\"%@`") {
+		return fmt.Sprintf("%q", s)
+	}
+	return s
+}
+
+func yamlScalar(v engine.Value) string {
+	if v.IsNull() {
+		return "null"
+	}
+	if v.Type == engine.TypeAny {
+		b, _ := json.Marshal(v.V)
+		return string(b)
+	}
+	return engine.FormatValue(v)
+}
+
+// ---- raw --------------------------------------------------------------------
+
+type rawRenderer struct{}
+
+func (rawRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) error {
+	for _, row := range rows {
+		var b strings.Builder
+		for i, v := range row.Values {
+			if i > 0 {
+				b.WriteString("\t")
+			}
+			b.WriteString(valString(v))
+		}
+		b.WriteString("\n")
+		fmt.Fprint(w, b.String())
+	}
+	return nil
 }
