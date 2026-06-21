@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestReplCompleter(t *testing.T) {
@@ -97,7 +100,7 @@ func TestReplBatchMultiline(t *testing.T) {
 
 func TestCmdUseShorthand(t *testing.T) {
 	app := NewApp()
-	if err := app.cmdUse("prod", []string{"yaml:./examples/data/products.yaml"}); err != nil {
+	if _, err := app.cmdUse("prod", []string{"yaml:./examples/data/products.yaml"}); err != nil {
 		t.Fatalf("cmdUse shorthand error: %v", err)
 	}
 	s, ok := app.Reg.Resolve("prod")
@@ -111,7 +114,7 @@ func TestCmdUseShorthand(t *testing.T) {
 
 func TestCmdUseExplicitKV(t *testing.T) {
 	app := NewApp()
-	if err := app.cmdUse("ord", []string{"csv", "path=./examples/data/orders.csv", "delimiter=,"}); err != nil {
+	if _, err := app.cmdUse("ord", []string{"csv", "path=./examples/data/orders.csv", "delimiter=,"}); err != nil {
 		t.Fatalf("cmdUse kv error: %v", err)
 	}
 	s, ok := app.Reg.Resolve("ord")
@@ -125,7 +128,7 @@ func TestCmdUseExplicitKV(t *testing.T) {
 
 func TestCmdUseSQL(t *testing.T) {
 	app := NewApp()
-	if err := app.cmdUse("inv", []string{"sql", "driver=sqlite", "dsn=./examples/data/inventory.db", "table=inventory"}); err != nil {
+	if _, err := app.cmdUse("inv", []string{"sql", "driver=sqlite", "dsn=./examples/data/inventory.db", "table=inventory"}); err != nil {
 		t.Fatalf("cmdUse sql error: %v", err)
 	}
 	s, ok := app.Reg.Resolve("inv")
@@ -134,6 +137,46 @@ func TestCmdUseSQL(t *testing.T) {
 	}
 	if s.Conn.Name() != "sql" {
 		t.Errorf("connector = %q, want sql", s.Conn.Name())
+	}
+}
+
+func TestCmdUseSQLAllTables(t *testing.T) {
+	// A wildcard table= "*" expands a SQL source to every user table in the DB.
+	// Use an in-memory shared SQLite DB seeded with two tables so the test
+	// is self-contained (no dependency on example file paths).
+	dsn := "file:cmduse_alltables?mode=memory&cache=shared"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	for _, ddl := range []string{
+		`CREATE TABLE alpha (id INTEGER PRIMARY KEY, v TEXT)`,
+		`CREATE TABLE beta (id INTEGER PRIMARY KEY, n INTEGER)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatalf("exec %q: %v", ddl, err)
+		}
+	}
+
+	app := NewApp()
+	names, err := app.cmdUse("db", []string{"sql", "driver=sqlite", "dsn=" + dsn, "table=*"})
+	if err != nil {
+		t.Fatalf("cmdUse sql-all error: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("registered %v, want 2 tables", names)
+	}
+	// Each table should be registered under its own name.
+	for _, want := range []string{"alpha", "beta"} {
+		s, ok := app.Reg.Resolve(want)
+		if !ok {
+			t.Errorf("table %q not registered; got %v", want, names)
+			continue
+		}
+		if s.Conn.Name() != "sql" {
+			t.Errorf("%s connector = %q, want sql", want, s.Conn.Name())
+		}
 	}
 }
 
@@ -151,7 +194,7 @@ func TestCmdUseErrors(t *testing.T) {
 		{"bad-option", []string{"x", "csv", "noequals"}},
 	}
 	for _, c := range cases {
-		if err := app.cmdUse(c.name, c.args); err == nil {
+		if _, err := app.cmdUse(c.name, c.args); err == nil {
 			t.Errorf("cmdUse(%q, %v) expected error, got nil", c.name, c.args)
 		}
 	}
@@ -159,10 +202,10 @@ func TestCmdUseErrors(t *testing.T) {
 
 func TestCmdUseDuplicate(t *testing.T) {
 	app := NewApp()
-	if err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err != nil {
+	if _, err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err != nil {
 		t.Fatalf("first cmdUse error: %v", err)
 	}
-	if err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err == nil {
+	if _, err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err == nil {
 		t.Error("second cmdUse expected duplicate error, got nil")
 	}
 }

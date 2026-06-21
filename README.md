@@ -95,6 +95,19 @@ shorthand (e.g. `.use sales csv:./data/sales.csv`) or explicit `key=value`
 options (e.g. `.use inv sql driver=sqlite dsn=./x.db table=inventory`); the
 source is then queryable by name just like a config-declared source.
 
+For a SQL database, set `table=*` to register **every** user table in the
+database at once, each queryable by its own name:
+
+```
+octo> .use db sql driver=sqlite dsn=./inventory.db table=*
+registered 3 tables: events, metrics, users
+octo> SELECT name FROM users LIMIT 2;
+octo> SELECT count(*) FROM events;
+```
+
+This also works in the config file (`table: "*"`) — useful for pointing at a
+whole database without listing each table.
+
 ### Streaming and safety flags
 
 ```bash
@@ -124,6 +137,11 @@ sources:
     driver: sqlite
     dsn: "./examples/data/inventory.db"
     table: inventory           # optional; defaults to the source name
+  analytics:
+    connector: sql
+    driver: postgres
+    dsn: "postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:5432/analytics"
+    table: "*"                  # wildcard: register every user table in the DB
 ```
 
 The `sql` connector discovers schema via `PRAGMA table_info` (SQLite),
@@ -131,6 +149,11 @@ The `sql` connector discovers schema via `PRAGMA table_info` (SQLite),
 pushes down `WHERE`, `ORDER BY`, and `LIMIT` into the database. Unsupported
 predicates (e.g. scalar functions like `LOWER(name)`) are not pushed and are
 applied in memory by the engine instead.
+
+A `table: "*"` source enumerates every user table in the database (via
+`PRAGMA table_list` / `information_schema.tables`, filtering out system tables)
+and registers each one under its own name — so a multi-table DB becomes a set
+of independently queryable sources without listing them by hand.
 
 ## Layout
 

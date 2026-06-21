@@ -197,12 +197,16 @@ func (a *App) dotCommand(ctx context.Context, line string, out io.Writer) bool {
 			fmt.Fprintln(out, "usage: .use <name> <connector>:<path>   |   .use <name> <connector> k=v ...")
 			fmt.Fprintln(out, "  e.g. .use sales csv:./data/sales.csv")
 			fmt.Fprintln(out, "       .use inv sql driver=sqlite dsn=./inventory.db table=inventory")
+			fmt.Fprintln(out, "       .use db sql driver=sqlite dsn=./inventory.db table=*   (all tables)")
 			break
 		}
-		if err := a.cmdUse(args[1], args[2:]); err != nil {
+		names, err := a.cmdUse(args[1], args[2:])
+		if err != nil {
 			fmt.Fprintf(out, ".use: %v\n", err)
+		} else if len(names) == 1 {
+			fmt.Fprintf(out, "registered %s\n", names[0])
 		} else {
-			fmt.Fprintf(out, "registered %s\n", args[1])
+			fmt.Fprintf(out, "registered %d tables: %s\n", len(names), strings.Join(names, ", "))
 		}
 	case ".schema":
 		name := ""
@@ -314,9 +318,9 @@ func (a *App) cmdSchema(ctx context.Context, name string, out io.Writer) {
 // In the explicit form, recognized keys are path, driver, dsn, table, and
 // delimiter; any other key is passed through as a connector option. Connector
 // names match those registered in the config (csv, json, yaml, sql).
-func (a *App) cmdUse(name string, rest []string) error {
+func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 	if len(rest) == 0 {
-		return fmt.Errorf("missing connector spec")
+		return nil, fmt.Errorf("missing connector spec")
 	}
 	src := config.Source{}
 
@@ -325,7 +329,7 @@ func (a *App) cmdUse(name string, rest []string) error {
 		spec := rest[0]
 		i := strings.Index(spec, ":")
 		if i <= 0 {
-			return fmt.Errorf("expected <connector>:<path> or <connector> k=v ...")
+			return nil, fmt.Errorf("expected <connector>:<path> or <connector> k=v ...")
 		}
 		src.Connector = spec[:i]
 		src.Path = spec[i+1:]
@@ -334,7 +338,7 @@ func (a *App) cmdUse(name string, rest []string) error {
 		for _, kv := range rest[1:] {
 			eq := strings.Index(kv, "=")
 			if eq <= 0 {
-				return fmt.Errorf("bad option %q (expected key=value)", kv)
+				return nil, fmt.Errorf("bad option %q (expected key=value)", kv)
 			}
 			key, val := kv[:eq], kv[eq+1:]
 			switch strings.ToLower(key) {
@@ -360,12 +364,16 @@ func (a *App) cmdUse(name string, rest []string) error {
 	// The "sql" connector always needs driver+dsn; everything else needs path.
 	if src.Connector == "sql" {
 		if src.Driver == "" || src.DSN == "" {
-			return fmt.Errorf("sql source needs driver=... and dsn=...")
+			return nil, fmt.Errorf("sql source needs driver=... and dsn=...")
 		}
 	} else if src.Path == "" {
-		return fmt.Errorf("%s source needs path=...", src.Connector)
+		return nil, fmt.Errorf("%s source needs path=...", src.Connector)
 	}
-	return a.registerSource(name, src)
+	names, err := a.registerSourceExpand(context.Background(), name, src)
+	if err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 // connectorName returns the connector's short prefix for display.

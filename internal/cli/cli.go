@@ -71,10 +71,27 @@ func (a *App) registerSources(cfg *config.File) {
 // registerSource binds one logical name to a connector + Dataset. It returns
 // an error (not printed) so callers — config loading and the .use REPL
 // command — can decide how to surface failures.
+//
+// For SQL sources, a missing or "*" table expands to every user table in the
+// database, each registered under its own table name.
 func (a *App) registerSource(name string, src config.Source) error {
+	names, err := a.registerSourceExpand(context.Background(), name, src)
+	if err != nil {
+		return err
+	}
+	if len(names) > 1 {
+		fmt.Fprintf(a.Err, "source %q expanded to %d tables: %s\n", name, len(names), strings.Join(names, ", "))
+	}
+	return nil
+}
+
+// registerSourceExpand does the work of registerSource and returns the logical
+// names that were registered (one for a normal source, many for a wildcard
+// SQL source). Splitting it out makes the expansion result testable.
+func (a *App) registerSourceExpand(ctx context.Context, name string, src config.Source) ([]string, error) {
 	conn := a.Reg.Connector(src.Connector)
 	if conn == nil {
-		return fmt.Errorf("source %q uses unknown connector %q", name, src.Connector)
+		return nil, fmt.Errorf("source %q uses unknown connector %q", name, src.Connector)
 	}
 	opts := map[string]any{}
 	if src.Delimiter != "" {
@@ -86,14 +103,20 @@ func (a *App) registerSource(name string, src config.Source) error {
 	// Build a dataset: file connectors use Path; sql connector uses DSN/driver/table.
 	if src.Connector == "sql" {
 		if src.Driver == "" {
-			return fmt.Errorf("source %q requires driver", name)
+			return nil, fmt.Errorf("source %q requires driver", name)
 		}
 		if src.DSN == "" {
-			return fmt.Errorf("source %q requires dsn", name)
+			return nil, fmt.Errorf("source %q requires dsn", name)
 		}
-		// The table name defaults to the logical source name when "table"
-		// is not specified, so `FROM <name>` resolves to a table of the
-		// same name in the database.
+		opts["driver"] = src.Driver
+		opts["dsn"] = src.DSN
+
+		// An explicit wildcard table ("*") expands to every user table in the
+		// database. An omitted table keeps the legacy lazy single-source
+		// behavior (the source name is used as the table at query time).
+		if src.Table == "*" {
+			return a.expandSQLTables(ctx, name, opts)
+		}
 		table := src.Table
 		if table == "" {
 			table = name
@@ -103,14 +126,43 @@ func (a *App) registerSource(name string, src config.Source) error {
 			Source:  table,
 			Options: opts,
 		}
-		ds.Options["driver"] = src.Driver
-		ds.Options["dsn"] = src.DSN
-		// SQL sources need their own connector instance (it carries no
-		// per-source state, but RegisterSource rejects duplicate names).
-		return a.Reg.RegisterSource(name, sqlc.New(), ds)
+		if err := a.Reg.RegisterSource(name, sqlc.New(), ds); err != nil {
+			return nil, err
+		}
+		return []string{name}, nil
 	}
 	ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
-	return a.Reg.RegisterSource(name, conn, ds)
+	if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
+		return nil, err
+	}
+	return []string{name}, nil
+}
+
+// expandSQLTables enumerates the tables in a SQL database and registers each
+// one. The logical name defaults to the table name; if a name is already taken
+// it is prefixed with the source name to avoid collisions.
+func (a *App) expandSQLTables(ctx context.Context, name string, opts map[string]any) ([]string, error) {
+	sc := sqlc.New()
+	datasets, err := sc.DatasetsFor(ctx, connector.Dataset{Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		// Prefer the bare table name; fall back to name_table on collision.
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, sqlc.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: database has no user tables", name)
+	}
+	return registered, nil
 }
 
 // Run parses the given args (excluding the program name) and runs the

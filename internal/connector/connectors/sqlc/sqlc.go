@@ -22,8 +22,134 @@ func New() *Connector { return &Connector{} }
 
 func (Connector) Name() string { return "sql" }
 
+// Datasets enumerates the user tables in the database described by the
+// dataset's options (driver, dsn). It is used to expand a SQL source that
+// omits a table name into one dataset per table.
+//
+// Discovery is dialect-aware: SQLite uses PRAGMA table_list (falling back to
+// sqlite_master when unavailable), while Postgres/MySQL use
+// information_schema.tables. System tables (sqlite_*) are filtered out.
 func (Connector) Datasets(ctx context.Context) ([]connector.Dataset, error) {
-	return nil, nil
+	return nil, fmt.Errorf("Datasets requires a dataset (driver/dsn) — use DatasetsFor")
+}
+
+// DatasetsFor enumerates tables in the database identified by ds.Options
+// (driver + dsn). It returns one Dataset per user table, carrying the same
+// options so each can be scanned independently.
+func (Connector) DatasetsFor(ctx context.Context, ds connector.Dataset) ([]connector.Dataset, error) {
+	driver := stringOpt(ds.Options, "driver")
+	dsn := stringOpt(ds.Options, "dsn")
+	if dsn == "" {
+		return nil, fmt.Errorf("sql connector requires dsn option")
+	}
+	if driver == "" {
+		driver = "sqlite"
+	}
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", driver, err)
+	}
+	defer db.Close()
+
+	names, err := listTables(ctx, db, driver)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]connector.Dataset, 0, len(names))
+	for _, n := range names {
+		// Each dataset shares the connection options but names a specific table.
+		opts := map[string]any{}
+		for k, v := range ds.Options {
+			opts[k] = v
+		}
+		d := connector.Dataset{Name: n, Source: n, Options: opts}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// listTables returns user table names in the database, filtering out system
+// tables. It tries, in order: SQLite PRAGMA table_list, information_schema, and
+// sqlite_master.
+func listTables(ctx context.Context, db *sql.DB, driver string) ([]string, error) {
+	// SQLite: PRAGMA table_list returns (schema, name, type, ncol, wr, strict).
+	if rows, err := db.QueryContext(ctx, "PRAGMA table_list"); err == nil {
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			cols, _ := rows.Columns()
+			dest := make([]sql.NullString, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range dest {
+				ptrs[i] = &dest[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				return nil, err
+			}
+			// name is the 2nd column; type is the 3rd.
+			name := dest[1].String
+			kind := ""
+			if len(dest) > 2 {
+				kind = dest[2].String
+			}
+			if strings.HasPrefix(name, "sqlite_") {
+				continue
+			}
+			// Include tables and views.
+			if kind == "" || strings.EqualFold(kind, "table") || strings.EqualFold(kind, "view") {
+				names = append(names, name)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if names != nil {
+			return names, nil
+		}
+	}
+
+	// Postgres / MySQL / anything with information_schema.
+	query := `SELECT table_name FROM information_schema.tables
+		  WHERE table_schema NOT IN ('pg_catalog','information_schema')
+		    AND table_name NOT LIKE 'sqlite_%'
+		  ORDER BY table_name`
+	if rows, err := db.QueryContext(ctx, query); err == nil {
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var n sql.NullString
+			if err := rows.Scan(&n); err != nil {
+				return nil, err
+			}
+			if n.Valid && !strings.HasPrefix(n.String, "sqlite_") {
+				names = append(names, n.String)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if names != nil {
+			return names, nil
+		}
+	}
+
+	// SQLite fallback: sqlite_master.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		return nil, fmt.Errorf("could not list tables: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n sql.NullString
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		if n.Valid {
+			names = append(names, n.String)
+		}
+	}
+	return names, rows.Err()
 }
 
 // Resolve discovers the schema for a dataset. The dataset name is treated as a
