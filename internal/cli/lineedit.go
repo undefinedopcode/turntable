@@ -283,3 +283,45 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// crlfWriter wraps an io.Writer and rewrites every bare '\n' as "\r\n". In raw
+// terminal mode the TTY does not perform on-output LF→CRLF translation, so a
+// plain newline only moves the cursor down one row without returning to column
+// 0. Routing all interactive output through this writer fixes that for every
+// fmt.Fprint/Fprintln/Fprintf call and for the renderers without touching them.
+type crlfWriter struct {
+	w       io.Writer
+	lastCR  bool // tracks whether the previous byte was '\r' (to avoid doubling)
+}
+
+func (c *crlfWriter) Write(p []byte) (int, error) {
+	// Fast path: no newlines, pass through unchanged.
+	if !hasByte(p, '\n') {
+		n, err := c.w.Write(p)
+		if err == nil {
+			c.lastCR = len(p) > 0 && p[len(p)-1] == '\r'
+		}
+		return n, err
+	}
+	var out []byte
+	for _, b := range p {
+		if b == '\n' && !c.lastCR {
+			out = append(out, '\r')
+		}
+		out = append(out, b)
+		c.lastCR = b == '\r'
+	}
+	if _, err := c.w.Write(out); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func hasByte(p []byte, b byte) bool {
+	for _, x := range p {
+		if x == b {
+			return true
+		}
+	}
+	return false
+}

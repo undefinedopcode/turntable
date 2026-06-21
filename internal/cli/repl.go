@@ -40,8 +40,18 @@ func (a *App) repl(ctx context.Context) int {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), old)
 
-	fmt.Fprint(a.Out, replBanner())
-	r := newLineEditor(os.Stdin, a.Out, a.completions())
+	// In raw mode the terminal does not translate \n to a carriage return, so
+	// every newline must be written as \r\n. Wrap the output and error writers
+	// once and route all interactive output (prompts, results, errors, row
+	// counts) through them. Both stdout and stderr share the same TTY.
+	out := &crlfWriter{w: a.Out}
+	errw := &crlfWriter{w: a.Err}
+	savedOut, savedErr := a.Out, a.Err
+	a.Out, a.Err = out, errw
+	defer func() { a.Out, a.Err = savedOut, savedErr }()
+
+	fmt.Fprint(out, replBanner())
+	r := newLineEditor(os.Stdin, out, a.completions())
 	r.history = hist
 
 	for {
