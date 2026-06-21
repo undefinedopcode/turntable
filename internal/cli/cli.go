@@ -62,52 +62,55 @@ func NewApp() *App {
 // names are reported but skipped (non-fatal) so qualified refs still work.
 func (a *App) registerSources(cfg *config.File) {
 	for name, src := range cfg.Sources {
-		conn := a.Reg.Connector(src.Connector)
-		if conn == nil {
-			fmt.Fprintf(a.Err, "warning: source %q uses unknown connector %q\n", name, src.Connector)
-			continue
-		}
-		opts := map[string]any{}
-		if src.Delimiter != "" {
-			opts["delimiter"] = src.Delimiter
-		}
-		for k, v := range src.Options {
-			opts[k] = v
-		}
-		// Build a dataset: file connectors use Path; sql connector uses DSN/driver/table.
-		if src.Connector == "sql" {
-			if src.Driver == "" {
-				fmt.Fprintf(a.Err, "warning: source %q requires driver\n", name)
-				continue
-			}
-			if src.DSN == "" {
-				fmt.Fprintf(a.Err, "warning: source %q requires dsn\n", name)
-				continue
-			}
-			// The table name defaults to the logical source name when "table"
-			// is not specified, so `FROM <name>` resolves to a table of the
-			// same name in the database.
-			table := src.Table
-			if table == "" {
-				table = name
-			}
-			ds := connector.Dataset{
-				Name:   table,
-				Source: table,
-				Options: opts,
-			}
-			ds.Options["driver"] = src.Driver
-			ds.Options["dsn"] = src.DSN
-			if err := a.Reg.RegisterSource(name, sqlc.New(), ds); err != nil {
-				fmt.Fprintf(a.Err, "warning: %v\n", err)
-			}
-			continue
-		}
-		ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
-		if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
+		if err := a.registerSource(name, src); err != nil {
 			fmt.Fprintf(a.Err, "warning: %v\n", err)
 		}
 	}
+}
+
+// registerSource binds one logical name to a connector + Dataset. It returns
+// an error (not printed) so callers — config loading and the .use REPL
+// command — can decide how to surface failures.
+func (a *App) registerSource(name string, src config.Source) error {
+	conn := a.Reg.Connector(src.Connector)
+	if conn == nil {
+		return fmt.Errorf("source %q uses unknown connector %q", name, src.Connector)
+	}
+	opts := map[string]any{}
+	if src.Delimiter != "" {
+		opts["delimiter"] = src.Delimiter
+	}
+	for k, v := range src.Options {
+		opts[k] = v
+	}
+	// Build a dataset: file connectors use Path; sql connector uses DSN/driver/table.
+	if src.Connector == "sql" {
+		if src.Driver == "" {
+			return fmt.Errorf("source %q requires driver", name)
+		}
+		if src.DSN == "" {
+			return fmt.Errorf("source %q requires dsn", name)
+		}
+		// The table name defaults to the logical source name when "table"
+		// is not specified, so `FROM <name>` resolves to a table of the
+		// same name in the database.
+		table := src.Table
+		if table == "" {
+			table = name
+		}
+		ds := connector.Dataset{
+			Name:    table,
+			Source:  table,
+			Options: opts,
+		}
+		ds.Options["driver"] = src.Driver
+		ds.Options["dsn"] = src.DSN
+		// SQL sources need their own connector instance (it carries no
+		// per-source state, but RegisterSource rejects duplicate names).
+		return a.Reg.RegisterSource(name, sqlc.New(), ds)
+	}
+	ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
+	return a.Reg.RegisterSource(name, conn, ds)
 }
 
 // Run parses the given args (excluding the program name) and runs the

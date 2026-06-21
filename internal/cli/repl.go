@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/april/octoparser/internal/config"
 	"github.com/april/octoparser/internal/connector"
 	"github.com/april/octoparser/internal/render"
 	"github.com/chzyer/readline"
@@ -191,6 +192,18 @@ func (a *App) dotCommand(ctx context.Context, line string, out io.Writer) bool {
 		fmt.Fprintln(out, replHelp())
 	case ".tables":
 		a.cmdTables(out)
+	case ".use":
+		if len(args) < 2 {
+			fmt.Fprintln(out, "usage: .use <name> <connector>:<path>   |   .use <name> <connector> k=v ...")
+			fmt.Fprintln(out, "  e.g. .use sales csv:./data/sales.csv")
+			fmt.Fprintln(out, "       .use inv sql driver=sqlite dsn=./inventory.db table=inventory")
+			break
+		}
+		if err := a.cmdUse(args[1], args[2:]); err != nil {
+			fmt.Fprintf(out, ".use: %v\n", err)
+		} else {
+			fmt.Fprintf(out, "registered %s\n", args[1])
+		}
 	case ".schema":
 		name := ""
 		if len(args) >= 2 {
@@ -292,6 +305,69 @@ func (a *App) cmdSchema(ctx context.Context, name string, out io.Writer) {
 	}
 }
 
+// cmdUse registers a source at runtime from a REPL .use command. It accepts
+// two forms:
+//
+//	.use <name> <connector>:<path>            shorthand for file connectors
+//	.use <name> <connector> k=v k=v ...        explicit key/value options
+//
+// In the explicit form, recognized keys are path, driver, dsn, table, and
+// delimiter; any other key is passed through as a connector option. Connector
+// names match those registered in the config (csv, json, yaml, sql).
+func (a *App) cmdUse(name string, rest []string) error {
+	if len(rest) == 0 {
+		return fmt.Errorf("missing connector spec")
+	}
+	src := config.Source{}
+
+	// Shorthand: "<connector>:<path>" as a single token.
+	if len(rest) == 1 {
+		spec := rest[0]
+		i := strings.Index(spec, ":")
+		if i <= 0 {
+			return fmt.Errorf("expected <connector>:<path> or <connector> k=v ...")
+		}
+		src.Connector = spec[:i]
+		src.Path = spec[i+1:]
+	} else {
+		src.Connector = rest[0]
+		for _, kv := range rest[1:] {
+			eq := strings.Index(kv, "=")
+			if eq <= 0 {
+				return fmt.Errorf("bad option %q (expected key=value)", kv)
+			}
+			key, val := kv[:eq], kv[eq+1:]
+			switch strings.ToLower(key) {
+			case "path":
+				src.Path = val
+			case "driver":
+				src.Driver = val
+			case "dsn":
+				src.DSN = val
+			case "table":
+				src.Table = val
+			case "delimiter":
+				src.Delimiter = val
+			default:
+				if src.Options == nil {
+					src.Options = map[string]any{}
+				}
+				src.Options[key] = val
+			}
+		}
+	}
+
+	// The "sql" connector always needs driver+dsn; everything else needs path.
+	if src.Connector == "sql" {
+		if src.Driver == "" || src.DSN == "" {
+			return fmt.Errorf("sql source needs driver=... and dsn=...")
+		}
+	} else if src.Path == "" {
+		return fmt.Errorf("%s source needs path=...", src.Connector)
+	}
+	return a.registerSource(name, src)
+}
+
 // connectorName returns the connector's short prefix for display.
 func connectorName(s connector.Source) string {
 	if s.Conn != nil {
@@ -304,7 +380,7 @@ func connectorName(s connector.Source) string {
 // and registered source names.
 func (a *App) completions() []string {
 	cands := []string{
-		".help", ".tables", ".schema", ".output", ".quit", ".exit", ".explain", ".strict", ".sources",
+		".help", ".tables", ".use", ".schema", ".output", ".quit", ".exit", ".explain", ".strict", ".sources",
 	}
 	for _, s := range a.Reg.Sources() {
 		cands = append(cands, s.Name)
@@ -326,6 +402,9 @@ func onOff(b bool) string {
 func replHelp() string {
 	return `Commands:
   .tables                 list registered sources
+  .use <name> <spec>      register a source at runtime
+                          (e.g. .use sales csv:./data/sales.csv
+                                 .use inv sql driver=sqlite dsn=./x.db)
   .schema [name]          show columns for a source (or all)
   .output <fmt>           set output format (table|csv|json|ndjson|yaml|raw)
   .explain [off]          toggle explain mode

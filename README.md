@@ -79,14 +79,21 @@ completion, and dot-commands:
 octoparser -c examples/octoparser.yaml --repl
 octo> .tables
 octo> .schema customers
+octo> .use sales csv:./data/sales.csv      # register a source at runtime
+octo> .use inv sql driver=sqlite dsn=./inventory.db table=inventory
 octo> SELECT name, region FROM customers WHERE active = true LIMIT 3;
 octo> .output json
 octo> .explain
 octo> .quit
 ```
 
-Commands: `.tables`, `.schema [name]`, `.output <fmt>`, `.explain [off]`,
-`.strict [off]`, `.help`, `.quit`.
+Commands: `.tables`, `.use <name> <spec>`, `.schema [name]`, `.output <fmt>`,
+`.explain [off]`, `.strict [off]`, `.help`, `.quit`.
+
+`.use` registers a source without restarting. It takes a `connector:path`
+shorthand (e.g. `.use sales csv:./data/sales.csv`) or explicit `key=value`
+options (e.g. `.use inv sql driver=sqlite dsn=./x.db table=inventory`); the
+source is then queryable by name just like a config-declared source.
 
 ### Streaming and safety flags
 

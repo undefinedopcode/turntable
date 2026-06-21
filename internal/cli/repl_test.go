@@ -94,3 +94,75 @@ func TestReplBatchMultiline(t *testing.T) {
 		t.Errorf("expected query result 2 in output, got: %s", out)
 	}
 }
+
+func TestCmdUseShorthand(t *testing.T) {
+	app := NewApp()
+	if err := app.cmdUse("prod", []string{"yaml:./examples/data/products.yaml"}); err != nil {
+		t.Fatalf("cmdUse shorthand error: %v", err)
+	}
+	s, ok := app.Reg.Resolve("prod")
+	if !ok {
+		t.Fatal("source 'prod' not registered")
+	}
+	if s.Conn.Name() != "yaml" {
+		t.Errorf("connector = %q, want yaml", s.Conn.Name())
+	}
+}
+
+func TestCmdUseExplicitKV(t *testing.T) {
+	app := NewApp()
+	if err := app.cmdUse("ord", []string{"csv", "path=./examples/data/orders.csv", "delimiter=,"}); err != nil {
+		t.Fatalf("cmdUse kv error: %v", err)
+	}
+	s, ok := app.Reg.Resolve("ord")
+	if !ok {
+		t.Fatal("source 'ord' not registered")
+	}
+	if s.Conn.Name() != "csv" {
+		t.Errorf("connector = %q, want csv", s.Conn.Name())
+	}
+}
+
+func TestCmdUseSQL(t *testing.T) {
+	app := NewApp()
+	if err := app.cmdUse("inv", []string{"sql", "driver=sqlite", "dsn=./examples/data/inventory.db", "table=inventory"}); err != nil {
+		t.Fatalf("cmdUse sql error: %v", err)
+	}
+	s, ok := app.Reg.Resolve("inv")
+	if !ok {
+		t.Fatal("source 'inv' not registered")
+	}
+	if s.Conn.Name() != "sql" {
+		t.Errorf("connector = %q, want sql", s.Conn.Name())
+	}
+}
+
+func TestCmdUseErrors(t *testing.T) {
+	app := NewApp()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"missing-spec", []string{}},
+		{"bad-shorthand", []string{"noseparator"}},
+		{"unknown-connector", []string{"x", "frobnicate:./data.csv"}},
+		{"missing-path", []string{"x", "csv", "delimiter=,"}},
+		{"sql-missing-dsn", []string{"x", "sql", "driver=sqlite"}},
+		{"bad-option", []string{"x", "csv", "noequals"}},
+	}
+	for _, c := range cases {
+		if err := app.cmdUse(c.name, c.args); err == nil {
+			t.Errorf("cmdUse(%q, %v) expected error, got nil", c.name, c.args)
+		}
+	}
+}
+
+func TestCmdUseDuplicate(t *testing.T) {
+	app := NewApp()
+	if err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err != nil {
+		t.Fatalf("first cmdUse error: %v", err)
+	}
+	if err := app.cmdUse("dup", []string{"yaml:./examples/data/products.yaml"}); err == nil {
+		t.Error("second cmdUse expected duplicate error, got nil")
+	}
+}
