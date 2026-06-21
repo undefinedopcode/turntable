@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
 )
 
 // Connector reads JSON files.

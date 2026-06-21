@@ -24,7 +24,7 @@ func writeData(t *testing.T) string {
 		t.Fatal(err)
 	}
 	cfg := "sources:\n  users:\n    connector: json\n    path: " + filepath.Join(dir, "users.json") + "\n  orders:\n    connector: csv\n    path: " + filepath.Join(dir, "orders.csv") + "\n"
-	cfgPath := filepath.Join(dir, "octoparser.yaml")
+	cfgPath := filepath.Join(dir, "turntable.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}

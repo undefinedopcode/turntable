@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/engine"
-	oparseSQL "github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
+	oparseSQL "github.com/april/turntable/internal/sql"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; v0.2 default
 )
 
@@ -544,7 +544,7 @@ func scanValue(raw any, t engine.Type) engine.Value {
 
 // ---- predicate / expression pushdown -----------------------------------------
 
-// translateExpr converts an OctoParser expression into a SQL string that can
+// translateExpr converts a Turntable expression into a SQL string that can
 // be sent to the remote database. It returns ok=false for expressions we choose
 // not to push (functions, subqueries, etc.).
 func translateExpr(e oparseSQL.Expr) (string, bool) {

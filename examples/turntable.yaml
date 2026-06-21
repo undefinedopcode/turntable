@@ -1,6 +1,6 @@
-# Example OctoParser configuration.
+# Example Turntable configuration.
 # Run from this directory with:
-#   octoparser -c examples/octoparser.yaml 'SELECT * FROM customers'
+#   turntable -c examples/turntable.yaml 'SELECT * FROM customers'
 # See DESIGN.md §10 for the full config schema.
 
 sources:

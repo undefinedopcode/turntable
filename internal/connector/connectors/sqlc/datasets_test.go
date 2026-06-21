@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/april/octoparser/internal/connector"
+	"github.com/april/turntable/internal/connector"
 	_ "modernc.org/sqlite"
 )
 

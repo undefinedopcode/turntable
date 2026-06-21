@@ -8,8 +8,8 @@ package connector
 import (
 	"context"
 
-	"github.com/april/octoparser/internal/engine"
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/sql"
 )
 
 // Connector is the extension surface for any queryable source.

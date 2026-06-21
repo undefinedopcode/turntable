@@ -1,4 +1,4 @@
-module github.com/april/octoparser
+module github.com/april/turntable
 
 go 1.26.3
 

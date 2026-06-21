@@ -1,4 +1,4 @@
-// Command octoparser queries heterogeneous data sources with an SQL-style
+// Command turntable queries heterogeneous data sources with an SQL-style
 // language. See DESIGN.md for the architecture and supported dialect.
 package main
 
@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/april/octoparser/internal/cli"
+	"github.com/april/turntable/internal/cli"
 )
 
 func main() {

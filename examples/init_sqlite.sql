@@ -1,4 +1,4 @@
--- examples/init_sqlite.sql — seed the SQLite demo database used by octoparser.yaml.
+-- examples/init_sqlite.sql — seed the SQLite demo database used by turntable.yaml.
 -- Run: sqlite3 examples/data/inventory.db < examples/init_sqlite.sql
 
 DROP TABLE IF EXISTS inventory;

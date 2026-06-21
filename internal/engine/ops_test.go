@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/sql"
 )
 
 func TestFilterIter(t *testing.T) {

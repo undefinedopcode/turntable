@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/sql"
 )
 
 // Resolver maps a column reference (qualifier+name) to a position in a row.

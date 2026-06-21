@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/engine"
 )
 
 func testSchema() engine.Schema {

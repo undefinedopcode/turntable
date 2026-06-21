@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/sql"
 )
 
 // ---- Filter -----------------------------------------------------------------

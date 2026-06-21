@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/engine"
 )
 
 // Format selects an output renderer.

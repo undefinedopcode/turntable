@@ -1,4 +1,4 @@
-// Package sql implements the lexer, parser, and AST for the OctoParser SQL
+// Package sql implements the lexer, parser, and AST for the Turntable SQL
 // dialect (see DESIGN.md §4). This file holds the lexer.
 package sql
 

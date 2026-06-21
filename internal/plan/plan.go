@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/engine"
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/sql"
 )
 
 // Plan is a validated, executable logical plan.

@@ -10,17 +10,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/april/octoparser/internal/config"
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/connector/connectors/csvc"
-	"github.com/april/octoparser/internal/connector/connectors/excelc"
-	"github.com/april/octoparser/internal/connector/connectors/jsonc"
-	"github.com/april/octoparser/internal/connector/connectors/sqlc"
-	"github.com/april/octoparser/internal/connector/connectors/yamlc"
-	"github.com/april/octoparser/internal/engine"
-	"github.com/april/octoparser/internal/plan"
-	"github.com/april/octoparser/internal/render"
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/config"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/connector/connectors/csvc"
+	"github.com/april/turntable/internal/connector/connectors/excelc"
+	"github.com/april/turntable/internal/connector/connectors/jsonc"
+	"github.com/april/turntable/internal/connector/connectors/sqlc"
+	"github.com/april/turntable/internal/connector/connectors/yamlc"
+	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/plan"
+	"github.com/april/turntable/internal/render"
+	"github.com/april/turntable/internal/sql"
 )
 
 // App holds CLI state shared across invocations / REPL lines.
@@ -206,7 +206,7 @@ func (a *App) expandSQLTables(ctx context.Context, name string, opts map[string]
 // Run parses the given args (excluding the program name) and runs the
 // appropriate mode. It returns the process exit code.
 func (a *App) Run(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("octoparser", flag.ContinueOnError)
+	fs := flag.NewFlagSet("turntable", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	var (
 		configPath string
@@ -218,7 +218,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		maxRows    int
 		strict     bool
 	)
-	fs.StringVar(&configPath, "config", "", "path to octoparser.yaml")
+	fs.StringVar(&configPath, "config", "", "path to turntable.yaml")
 	fs.StringVar(&configPath, "c", "", "short for --config")
 	fs.StringVar(&file, "f", "", "read query from file")
 	fs.StringVar(&output, "output", "", "output format")
@@ -266,7 +266,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	default:
 		rest := fs.Args()
 		if len(rest) == 0 {
-			fmt.Fprintln(a.Err, "usage: octoparser [flags] <query>")
+			fmt.Fprintln(a.Err, "usage: turntable [flags] <query>")
 			fs.PrintDefaults()
 			return 1
 		}

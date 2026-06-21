@@ -6,13 +6,13 @@ import (
 )
 
 func TestParseInterpolation(t *testing.T) {
-	os.Setenv("OCTOPARSER_PGUSER", "alice")
-	os.Setenv("OCTOPARSER_PGPASSWORD", "s3cr3t")
-	os.Setenv("OCTOPARSER_PGHOST", "db.example.com")
+	os.Setenv("TURNTABLE_PGUSER", "alice")
+	os.Setenv("TURNTABLE_PGPASSWORD", "s3cr3t")
+	os.Setenv("TURNTABLE_PGHOST", "db.example.com")
 	defer func() {
-		os.Unsetenv("OCTOPARSER_PGUSER")
-		os.Unsetenv("OCTOPARSER_PGPASSWORD")
-		os.Unsetenv("OCTOPARSER_PGHOST")
+		os.Unsetenv("TURNTABLE_PGUSER")
+		os.Unsetenv("TURNTABLE_PGPASSWORD")
+		os.Unsetenv("TURNTABLE_PGHOST")
 	}()
 
 	src := `

@@ -1,4 +1,4 @@
-# OctoParser
+# Turntable
 
 Query heterogeneous data sources — JSON, CSV, YAML, Excel, SQL databases, and
 (later) CloudWatch, Prometheus, REST APIs — using a single SQL-style query
@@ -15,27 +15,27 @@ language.
 ## Install
 
 ```bash
-go build ./cmd/octoparser
+go build ./cmd/turntable
 ```
 
 ## Usage
 
 ```bash
-# Query a registered source (see examples/octoparser.yaml)
-octoparser 'SELECT region, COUNT(*) AS n FROM sales
+# Query a registered source (see examples/turntable.yaml)
+turntable 'SELECT region, COUNT(*) AS n FROM sales
             WHERE amount > 100 GROUP BY region ORDER BY n DESC LIMIT 10'
 
 # Qualified inline source (no config needed)
-octoparser 'SELECT * FROM csv:./events.csv LIMIT 5'
+turntable 'SELECT * FROM csv:./events.csv LIMIT 5'
 
 # Explain the plan (pushdown per connector) instead of running
-octoparser --explain 'SELECT * FROM users'
+turntable --explain 'SELECT * FROM users'
 
 # Choose an output format
-octoparser -o json 'SELECT * FROM users'
+turntable -o json 'SELECT * FROM users'
 
 # Query a SQL database with pushdown (WHERE/ORDER BY/LIMIT sent to the DB)
-octoparser -c examples/octoparser.yaml \
+turntable -c examples/turntable.yaml \
   'SELECT id, item, qty, price FROM inventory WHERE qty > 20 ORDER BY price DESC LIMIT 5'
 ```
 
@@ -55,7 +55,7 @@ SELECT CAST(amount AS int) AS dollars FROM orders
 SELECT order_id, EXTRACT(MONTH FROM placed_at) AS month FROM orders
 
 -- substring search (1-based; 0 if not found)
-SELECT POSITION('parse' IN 'octoparser') AS pos
+SELECT POSITION('parse' IN 'turntable') AS pos
 ```
 
 ### Built-in functions
@@ -73,19 +73,19 @@ Beyond the v0.1/v0.2 set (`COALESCE`, `LOWER/UPPER`, `LENGTH`, `SUBSTR`,
 
 ### REPL
 
-Interactive mode with line editing, history (`~/.octoparser_history`), tab
+Interactive mode with line editing, history (`~/.turntable_history`), tab
 completion, and dot-commands:
 
 ```bash
-octoparser -c examples/octoparser.yaml --repl
-octo> .tables
-octo> .schema customers
-octo> .use sales csv:./data/sales.csv      # register a source at runtime
-octo> .use inv sql driver=sqlite dsn=./inventory.db table=inventory
-octo> SELECT name, region FROM customers WHERE active = true LIMIT 3;
-octo> .output json
-octo> .explain
-octo> .quit
+turntable -c examples/turntable.yaml --repl
+turntable> .tables
+turntable> .schema customers
+turntable> .use sales csv:./data/sales.csv      # register a source at runtime
+turntable> .use inv sql driver=sqlite dsn=./inventory.db table=inventory
+turntable> SELECT name, region FROM customers WHERE active = true LIMIT 3;
+turntable> .output json
+turntable> .explain
+turntable> .quit
 ```
 
 Commands: `.tables`, `.use <name> <spec>`, `.schema [name]`, `.output <fmt>`,
@@ -100,10 +100,10 @@ For a SQL database, set `table=*` to register **every** user table in the
 database at once, each queryable by its own name:
 
 ```
-octo> .use db sql driver=sqlite dsn=./inventory.db table=*
+turntable> .use db sql driver=sqlite dsn=./inventory.db table=*
 registered 3 tables: events, metrics, users
-octo> SELECT name FROM users LIMIT 2;
-octo> SELECT count(*) FROM events;
+turntable> SELECT name FROM users LIMIT 2;
+turntable> SELECT count(*) FROM events;
 ```
 
 This also works in the config file (`table: "*"`) — useful for pointing at a
@@ -113,18 +113,18 @@ whole database without listing each table.
 
 ```bash
 # Stream rows as produced (csv/json/ndjson/yaml/raw) — bounded memory
-octoparser -o ndjson 'SELECT * FROM big_table'
+turntable -o ndjson 'SELECT * FROM big_table'
 
 # Cap rows rendered as a safety guard
-octoparser --max-rows 100 'SELECT * FROM huge_table'
+turntable --max-rows 100 'SELECT * FROM huge_table'
 
 # Strict mode: type-coercion failures are hard errors instead of NULL
-octoparser --strict 'SELECT CAST(amount AS int) FROM orders'
+turntable --strict 'SELECT CAST(amount AS int) FROM orders'
 ```
 
 ### SQL database sources
 
-Declare a SQL source in `octoparser.yaml`. Credentials may be interpolated from
+Declare a SQL source in `turntable.yaml`. Credentials may be interpolated from
 environment variables (`${VAR}`, `${VAR:-default}`):
 
 ```yaml
@@ -177,11 +177,11 @@ sources:
 
 ```bash
 # inline (uses the first sheet)
-octoparser 'SELECT * FROM excel:./data/report.xlsx LIMIT 5'
+turntable 'SELECT * FROM excel:./data/report.xlsx LIMIT 5'
 
 # in the REPL — register one sheet, or all of them
-octo> .use q1 excel:./data/report.xlsx sheet=Q1
-octo> .use wb excel:./data/report.xlsx sheet=*
+turntable> .use q1 excel:./data/report.xlsx sheet=Q1
+turntable> .use wb excel:./data/report.xlsx sheet=*
 registered 3 tables: summary, Q1, Q2
 ```
 
@@ -189,7 +189,7 @@ registered 3 tables: summary, Q1, Q2
 
 ```
 DESIGN.md            Architecture and SQL dialect
-cmd/octoparser/      CLI entrypoint
+cmd/turntable/      CLI entrypoint
 internal/cli         flag handling, wiring, REPL
 internal/sql         lexer, parser, AST
 internal/plan        resolution, validation, pushdown
@@ -197,7 +197,7 @@ internal/engine      types, rows, operator pipeline
 internal/connector   Connector interface + Registry
 internal/connector/connectors/{jsonc,csvc,yamlc,excelc,sqlc}
 internal/render       output formatters
-internal/config       octoparser.yaml loader
+internal/config       turntable.yaml loader
 examples/             sample config, data, and run.sh demo script
 ```
 

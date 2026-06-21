@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# examples/run.sh — demonstrate octoparser with the example data files.
+# examples/run.sh — demonstrate turntable with the example data files.
 # Usage: ./examples/run.sh [QUERY_INDEX]
 #   With no arguments, runs all demo queries.
 #   With an index (1-10), runs only that query.
@@ -7,8 +7,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OCTOPARSER="go run $ROOT/cmd/octoparser"
-CONFIG="$ROOT/examples/octoparser.yaml"
+TURNTABLE="go run $ROOT/cmd/turntable"
+CONFIG="$ROOT/examples/turntable.yaml"
 
 run() {
     local num="$1"
@@ -21,7 +21,7 @@ run() {
     fi
 
     echo "=== $num. $desc ==="
-    $OCTOPARSER -c "$CONFIG" "$@"
+    $TURNTABLE -c "$CONFIG" "$@"
     echo
 }
 
@@ -71,7 +71,7 @@ run 12 "EXTRACT + date functions" \
     'SELECT o.order_id, EXTRACT(MONTH FROM o.placed_at) AS month, STRFTIME("%Y-%m", o.placed_at) AS ym, DATE_TRUNC("month", o.placed_at) AS trunc FROM orders o LIMIT 3'
 
 run 13 "FROM-less scratch + string functions" \
-    'SELECT 1 + 1 AS two, LEFT("octoparser", 4) AS prefix, POSITION("parse" IN "octoparser") AS pos, INITCAP("hello world") AS shout'
+    'SELECT 1 + 1 AS two, LEFT("turntable", 4) AS prefix, POSITION("parse" IN "turntable") AS pos, INITCAP("hello world") AS shout'
 
 run 14 "Excel workbook (single sheet)" \
     'SELECT region, manager, target FROM regions ORDER BY target DESC'

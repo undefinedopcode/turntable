@@ -1,11 +1,11 @@
-# OctoParser — Design Document
+# Turntable — Design Document
 
 ## 1. Overview
 
-OctoParser is a command-line tool that lets you query **heterogeneous, independent
+Turntable is a command-line tool that lets you query **heterogeneous, independent
 data sources** using a familiar **SQL-style query language**. Instead of writing
  bespoke scripts to parse JSON, slice CSVs, hit a database, or pull metrics from
-an API, you write one SQL query and OctoParser routes each referenced "table" to
+an API, you write one SQL query and Turntable routes each referenced "table" to
 the appropriate **connector**, retrieves the data, and executes the relational
 operations (filter, project, join, aggregate, sort) in a unified in-memory
 engine.
@@ -205,7 +205,7 @@ type Column struct {
 
 ### Registry & profiles
 
-- At startup the CLI builds a **Registry** from a config file (`octoparser.yaml`)
+- At startup the CLI builds a **Registry** from a config file (`turntable.yaml`)
   and CLI flags. The config declares named sources, e.g.:
 
   ```yaml
@@ -266,16 +266,16 @@ Limit
 ## 7. CLI
 
 ```
-octoparser [flags] <query>
-octoparser -f query.sql
-octoparser --repl            # interactive mode with history + completion
+turntable [flags] <query>
+turntable -f query.sql
+turntable --repl            # interactive mode with history + completion
 ```
 
 Flags:
 
 | Flag                     | Purpose                                                      |
 |--------------------------|--------------------------------------------------------------|
-| `-c, --config <path>`    | Profile/sources config (default `./octoparser.yaml`).        |
+| `-c, --config <path>`    | Profile/sources config (default `./turntable.yaml`).        |
 | `-o, --output <fmt>`     | `table` (default), `csv`, `json`, `ndjson`, `yaml`, `raw`.   |
 | `--header / --no-header` | Toggle header row for csv/table output.                      |
 | `-s, --source <n=spec>` | Declare/override a source inline, e.g. `-s logs=yaml:./x`. |
@@ -291,17 +291,17 @@ Exit codes: `0` success with rows, `2` success zero rows, `1` error
 
 ```bash
 # Simple CSV query
-octoparser 'SELECT region, COUNT(*) AS n FROM sales WHERE amount > 100
+turntable 'SELECT region, COUNT(*) AS n FROM sales WHERE amount > 100
             GROUP BY region ORDER BY n DESC LIMIT 10'
 
 # Cross-source join: CSV orders + JSON users
-octoparser 'SELECT u.name, COUNT(o.id) AS orders
+turntable 'SELECT u.name, COUNT(o.id) AS orders
             FROM csv:./orders.csv o
             JOIN users u ON u.id = o.user_id
             GROUP BY u.name'
 
 # Query a Postgres table, filter and project in-DB (pushdown)
-octoparser -c prod.yaml 'SELECT * FROM warehouse.public.events
+turntable -c prod.yaml 'SELECT * FROM warehouse.public.events
             WHERE ts > NOW() - INTERVAL 1 DAY ORDER BY ts DESC LIMIT 50'
 ```
 
@@ -310,12 +310,12 @@ octoparser -c prod.yaml 'SELECT * FROM warehouse.public.events
 ## 8. Project Layout
 
 ```
-octoparser/
+turntable/
 ├── DESIGN.md
 ├── README.md
 ├── go.mod
 ├── cmd/
-│   └── octoparser/
+│   └── turntable/
 │       └── main.go              # CLI entrypoint, flag parsing, dispatch
 ├── internal/
 │   ├── cli/                     # flag handling, repl, output wiring
@@ -345,10 +345,10 @@ octoparser/
 │   ├── render/
 │   │   └── render.go            # table/csv/json/ndjson/yaml renderers
 │   └── config/
-│       └── config.go            # load/validate octoparser.yaml
+│       └── config.go            # load/validate turntable.yaml
 ├── pkg/                         # (later) public, stable APIs for plugin authors
 └── examples/
-    └── octoparser.yaml
+    └── turntable.yaml
 ```
 
 The `internal/` boundary keeps the implementation details private in v1. Once
@@ -375,14 +375,14 @@ connectors, all following the same contract:
 - **Git** — expose commits/diff stats/files as queryable tables.
 
 Connectors may ship as separate Go modules and register via
-`init()` + a plugin import in `cmd/octoparser/main.go` (compile-time plugins),
+`init()` + a plugin import in `cmd/turntable/main.go` (compile-time plugins),
 with a runtime plugin mechanism (e.g. Yaegi or RPC) considered later.
 
 ---
 
 ## 10. Configuration
 
-`octoparser.yaml` (or via `--config`):
+`turntable.yaml` (or via `--config`):
 
 ```yaml
 sources:

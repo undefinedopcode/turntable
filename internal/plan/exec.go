@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
 )
 
 // Exec converts a Plan's root Node into an engine.RowIterator, threading the

@@ -13,8 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
 )
 
 type Connector struct{}

@@ -10,21 +10,21 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/april/octoparser/internal/config"
-	"github.com/april/octoparser/internal/connector"
-	"github.com/april/octoparser/internal/render"
+	"github.com/april/turntable/internal/config"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/render"
 	"github.com/chzyer/readline"
 )
 
 // historyFile is the path used to persist REPL line history.
-const historyFile = ".octoparser_history"
+const historyFile = ".turntable_history"
 
 // replPrompt is printed before each input line.
-const replPrompt = "octo> "
+const replPrompt = "turntable> "
 
 // runREPL drives the interactive read-eval-print loop. It returns the process
 // exit code. When stdin is not a TTY it falls back to a simple line reader so
-// piped input still works (e.g. `echo 'SELECT 1' | octoparser --repl`).
+// piped input still works (e.g. `echo 'SELECT 1' | turntable --repl`).
 func (a *App) repl(ctx context.Context) int {
 	if !readline.IsTerminal(int(os.Stdin.Fd())) {
 		return a.replBatch(ctx, os.Stdin)
@@ -402,7 +402,7 @@ func (a *App) completions() []string {
 }
 
 func replBanner() string {
-	return "octoparser REPL — type .help for commands, .quit to exit\n"
+	return "turntable REPL — type .help for commands, .quit to exit\n"
 }
 
 func onOff(b bool) string {

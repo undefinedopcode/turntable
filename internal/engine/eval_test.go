@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/april/octoparser/internal/sql"
+	"github.com/april/turntable/internal/sql"
 )
 
 func TestCompareNumerics(t *testing.T) {

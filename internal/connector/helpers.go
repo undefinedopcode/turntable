@@ -3,7 +3,7 @@ package connector
 import (
 	"time"
 
-	"github.com/april/octoparser/internal/engine"
+	"github.com/april/turntable/internal/engine"
 )
 
 // FromAny converts an arbitrary Go value (as produced by JSON/YAML decoders)

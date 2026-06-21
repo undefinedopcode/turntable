@@ -1,5 +1,5 @@
-// Package config loads and validates the OctoParser source configuration
-// (octoparser.yaml). The config declares named sources mapping to connectors.
+// Package config loads and validates the Turntable source configuration
+// (turntable.yaml). The config declares named sources mapping to connectors.
 package config
 
 import (
@@ -43,8 +43,8 @@ type Defaults struct {
 func Load(path string) (*File, error) {
 	if path == "" {
 		// default location
-		if _, err := os.Stat("octoparser.yaml"); err == nil {
-			path = "octoparser.yaml"
+		if _, err := os.Stat("turntable.yaml"); err == nil {
+			path = "turntable.yaml"
 		} else {
 			return &File{Sources: map[string]Source{}}, nil
 		}
@@ -82,7 +82,7 @@ func interpolate(s string) string {
 	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
 		inner := match[2 : len(match)-1]
 		var key, def string
-		if i := os.Getenv("OCTOPARSER_" + inner); i != "" {
+		if i := os.Getenv("TURNTABLE_" + inner); i != "" {
 			return i
 		}
 		if pos := 0; pos >= 0 {
