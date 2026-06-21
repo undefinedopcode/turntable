@@ -417,10 +417,12 @@ defaults:
 - Renderers: `table`, `csv`, `json`, `ndjson`.
 - Config file + CLI flags; `--explain`.
 
-**v0.2 — SQL databases & pushdown**
+**v0.2 — SQL databases & pushdown** ✅
 - `sql` connector over `database/sql` with predicate/limit/order pushdown.
-- Schema discovery; qualified `db.schema.table` refs.
-- `CASE WHEN`, richer string/time functions, `EXTRACT`.
+- Schema discovery (`PRAGMA table_info`, `information_schema`, `DESCRIBE`);
+  qualified `db.schema.table` refs.
+- `${ENV_VAR}` interpolation in config DSNs.
+- (Deferred to v0.3) `CASE WHEN`, richer string/time functions, `EXTRACT`.
 
 **v0.3 — Ergonomics**
 - REPL with history, completion, `.tables` / `.schema <name>` introspection.

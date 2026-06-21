@@ -2,7 +2,7 @@
 # examples/run.sh — demonstrate octoparser with the example data files.
 # Usage: ./examples/run.sh [QUERY_INDEX]
 #   With no arguments, runs all demo queries.
-#   With an index (1-9), runs only that query.
+#   With an index (1-10), runs only that query.
 
 set -euo pipefail
 
@@ -28,8 +28,8 @@ run() {
 FILTER=""
 if [[ $# -gt 0 ]]; then
     FILTER="$1"
-    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 9 ]]; then
-        echo "Usage: $0 [1-9]" >&2
+    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 10 ]]; then
+        echo "Usage: $0 [1-10]" >&2
         exit 1
     fi
 fi
@@ -59,4 +59,7 @@ run 8 "LIKE + IN" \
     "SELECT name, region FROM customers WHERE name LIKE '%e%' AND region IN ('west', 'south') ORDER BY name"
 
 run 9 "explain" \
-    --explain 'SELECT name FROM customers WHERE region = "west"'
+    --explain 'SELECT name, region FROM customers WHERE region = "west"'
+
+run 10 "SQL database (pushdown)" \
+    'SELECT id, item, qty, price FROM inventory WHERE qty > 20 ORDER BY price DESC LIMIT 5'

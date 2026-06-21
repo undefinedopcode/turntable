@@ -6,6 +6,9 @@
 octoparser.local.yaml
 /data/
 
+# generated SQLite demo database (run examples/init_sqlite.sql to recreate)
+examples/data/*.db
+
 # go
 vendor/
 *.test

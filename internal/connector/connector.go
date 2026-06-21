@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/april/octoparser/internal/engine"
+	"github.com/april/octoparser/internal/sql"
 )
 
 // Connector is the extension surface for any queryable source.
@@ -59,11 +60,10 @@ type OrderTerm struct {
 	Desc   bool
 }
 
-// Expr is a minimal expression marker for pushed-down predicates. The real
-// expression AST lives in internal/sql/ast; connectors that want to interpret
-// predicates will accept that concrete type via a type assertion. Keeping this
-// interface here avoids an import cycle between connector and sql.
-type Expr interface{ exprNode() }
+// Expr is the pushdown predicate AST. It is an alias for the parser's Expr so
+// connectors that understand predicates can work with it directly, while
+// connectors that do not can leave Predicate nil.
+type Expr = sql.Expr
 
 // ScanResponse describes what the connector actually applied, so the engine
 // can compute and apply the residual operators itself.

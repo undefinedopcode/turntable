@@ -327,6 +327,17 @@ func (p *Parser) parseInt() (int, error) {
 
 // parseExpr is a placeholder that parses primary expressions and binary ops
 // with minimal precedence. Full precedence climbing arrives in v0.1.
+// ParseExpr lexes and parses a standalone expression (useful for tests and
+// pushdown translators).
+func ParseExpr(src string) (Expr, error) {
+	toks, err := Lex(src)
+	if err != nil {
+		return nil, err
+	}
+	p := NewParser(toks)
+	return p.parseExpr()
+}
+
 func (p *Parser) parseExpr() (Expr, error) {
 	return p.parseOr()
 }

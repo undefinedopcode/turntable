@@ -14,6 +14,7 @@ import (
 	"github.com/april/octoparser/internal/connector"
 	"github.com/april/octoparser/internal/connector/connectors/csvc"
 	"github.com/april/octoparser/internal/connector/connectors/jsonc"
+	"github.com/april/octoparser/internal/connector/connectors/sqlc"
 	"github.com/april/octoparser/internal/connector/connectors/yamlc"
 	"github.com/april/octoparser/internal/engine"
 	"github.com/april/octoparser/internal/plan"
@@ -36,6 +37,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(jsonc.New())
 	_ = reg.RegisterConnector(csvc.New())
 	_ = reg.RegisterConnector(yamlc.New())
+	_ = reg.RegisterConnector(sqlc.New())
 	return &App{
 		Out:    os.Stdout,
 		Err:    os.Stderr,
@@ -62,12 +64,36 @@ func (a *App) registerSources(cfg *config.File) {
 		for k, v := range src.Options {
 			opts[k] = v
 		}
-		// Build a dataset: file connectors use Path; sql connector uses DSN.
-		source := src.Path
+		// Build a dataset: file connectors use Path; sql connector uses DSN/driver/table.
 		if src.Connector == "sql" {
-			source = src.DSN
+			if src.Driver == "" {
+				fmt.Fprintf(a.Err, "warning: source %q requires driver\n", name)
+				continue
+			}
+			if src.DSN == "" {
+				fmt.Fprintf(a.Err, "warning: source %q requires dsn\n", name)
+				continue
+			}
+			// The table name defaults to the logical source name when "table"
+			// is not specified, so `FROM <name>` resolves to a table of the
+			// same name in the database.
+			table := src.Table
+			if table == "" {
+				table = name
+			}
+			ds := connector.Dataset{
+				Name:   table,
+				Source: table,
+				Options: opts,
+			}
+			ds.Options["driver"] = src.Driver
+			ds.Options["dsn"] = src.DSN
+			if err := a.Reg.RegisterSource(name, sqlc.New(), ds); err != nil {
+				fmt.Fprintf(a.Err, "warning: %v\n", err)
+			}
+			continue
 		}
-		ds := connector.Dataset{Name: name, Source: source, Options: opts}
+		ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
 		if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
 			fmt.Fprintf(a.Err, "warning: %v\n", err)
 		}

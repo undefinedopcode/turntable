@@ -26,6 +26,13 @@ sources:
     driver: postgres
     dsn: "postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:5432/analytics?sslmode=require"
 
+  # In-memory SQLite example table (v0.2). Load it with examples/init_sqlite.sql.
+  inventory:
+    connector: sql
+    driver: sqlite
+    dsn: "./examples/data/inventory.db"
+    table: inventory
+
 defaults:
   output: table
   max-rows: 1000000
