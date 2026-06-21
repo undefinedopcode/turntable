@@ -62,15 +62,16 @@ func Lex(src string) ([]Token, error) {
 			}
 			continue
 		}
-		// string literal '...'
-		if c == '\'' {
+		// string literal '...' or "..."
+		if c == '\'' || c == '"' {
+			quote := c
 			start := i
 			i++
 			var b strings.Builder
 			for i < n {
-				if src[i] == '\'' {
-					if i+1 < n && src[i+1] == '\'' { // escaped ''
-						b.WriteByte('\'')
+				if src[i] == quote {
+					if i+1 < n && src[i+1] == quote { // escaped '' or ""
+						b.WriteByte(quote)
 						i += 2
 						continue
 					}

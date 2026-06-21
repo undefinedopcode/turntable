@@ -1,17 +1,24 @@
 # Example OctoParser configuration.
-# Copy to ./octoparser.yaml and edit. See DESIGN.md §10.
+# Run from this directory with:
+#   octoparser -c examples/octoparser.yaml 'SELECT * FROM customers'
+# See DESIGN.md §10 for the full config schema.
 
 sources:
-  # JSON file exposed as the logical name "users".
-  users:
+  # JSON file (array of objects) exposed as the logical name "customers".
+  customers:
     connector: json
-    path: ./data/users.json
+    path: ./examples/data/customers.json
 
-  # CSV file with an explicit delimiter.
-  sales:
+  # CSV file with type inference, exposed as "orders".
+  orders:
     connector: csv
-    path: ./data/sales.csv
+    path: ./examples/data/orders.csv
     delimiter: ","
+
+  # YAML file (sequence of mappings) exposed as "products".
+  products:
+    connector: yaml
+    path: ./examples/data/products.yaml
 
   # SQL database, credentials via env var interpolation (v0.2).
   warehouse:

@@ -1,0 +1,35 @@
+- id: 201
+  sku: MUG-001
+  name: Ceramic Mug
+  category: kitchen
+  price: 29.99
+  in_stock: 250
+  tags: ["gift", "home"]
+- id: 202
+  sku: LAMP-001
+  name: Desk Lamp
+  category: furniture
+  price: 149.00
+  in_stock: 42
+  tags: ["office", "lighting"]
+- id: 203
+  sku: NOTE-001
+  name: Notebook Pack
+  category: stationery
+  price: 44.75
+  in_stock: 800
+  tags: ["office", "paper"]
+- id: 204
+  sku: PEN-001
+  name: Gel Pen Set
+  category: stationery
+  price: 15.25
+  in_stock: 1200
+  tags: ["office", "writing"]
+- id: 205
+  sku: CHAIR-001
+  name: Office Chair
+  category: furniture
+  price: 199.00
+  in_stock: 18
+  tags: ["office", "seating"]

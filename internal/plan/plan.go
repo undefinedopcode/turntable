@@ -55,8 +55,7 @@ type Join struct {
 	LeftKey  engine.KeyExtractor
 	RightKey engine.KeyExtractor
 	Schema   engine.Schema
-	LeftAlias, RightAlias string
-	LeftWidth int // number of columns contributed by the left side
+	Aliases  []engine.AliasRange // all contributing aliases in the combined schema
 }
 
 // Aggregate groups rows.
@@ -185,25 +184,30 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
+	aliases := []engine.AliasRange{
+		{Alias: leftAlias, Start: 0, End: len(leftSchema.Columns)},
+	}
 	schema := leftSchema
 	for _, j := range stmt.Joins {
 		rightNode, rightSchema, rightAlias, err := bc.buildTableRef(j.Ref)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		lk, rk, err := bc.splitJoinKeys(j.On, leftSchema, leftAlias, rightSchema, rightAlias)
+		lk, rk, err := bc.splitJoinKeys(j.On, schema, aliases, rightSchema, rightAlias)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
 		combined := engine.Schema{Columns: append(append([]engine.Column{}, schema.Columns...), rightSchema.Columns...)}
+		aliases = append(aliases, engine.AliasRange{
+			Alias: rightAlias, Start: len(schema.Columns), End: len(combined.Columns),
+		})
 		leftNode = &Join{
 			Kind: j.Kind, Left: leftNode, Right: rightNode,
 			LeftKey: lk, RightKey: rk, Schema: combined,
-			LeftAlias: leftAlias, RightAlias: rightAlias,
-			LeftWidth: len(schema.Columns),
+			Aliases: aliases,
 		}
 		schema = combined
-		leftAlias = "" // after a join the combined side has no single alias
+		leftAlias = "" // only the first join split uses explicit left/right aliases
 	}
 	return leftNode, schema, nil
 }
@@ -231,15 +235,16 @@ func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string,
 	return &Scan{Source: src, Schema: schema, Alias: alias}, schema, alias, nil
 }
 
-// splitJoinKeys takes an ON expression of the form left.col = right.col and
-// returns two KeyExtractor closures that read the join key from each side's
-// rows. It resolves each ColRef against the appropriate side schema.
-func (bc *buildCtx) splitJoinKeys(on sql.Expr, leftSchema engine.Schema, leftAlias string, rightSchema engine.Schema, rightAlias string) (engine.KeyExtractor, engine.KeyExtractor, error) {
+// splitJoinKeys takes an ON expression of the form a.x = b.y and returns two
+// KeyExtractor closures. The left side is the already-combined relation (with
+// aliases), the right side is the new table being joined. Key indices are into
+// the combined schema on that side.
+func (bc *buildCtx) splitJoinKeys(on sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (engine.KeyExtractor, engine.KeyExtractor, error) {
 	bin, ok := on.(*sql.BinaryOp)
 	if !ok || bin.Op != "=" {
 		return nil, nil, fmt.Errorf("JOIN ON must be a single equality a.x = b.y (compound predicates not yet supported)")
 	}
-	lIdx, rIdx, err := bc.classifyJoinOperands(bin.Left, bin.Right, leftSchema, leftAlias, rightSchema, rightAlias)
+	lIdx, rIdx, err := bc.classifyJoinOperands(bin.Left, bin.Right, leftSchema, leftAliases, rightSchema, rightAlias)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -260,9 +265,9 @@ func (bc *buildCtx) splitJoinKeys(on sql.Expr, leftSchema engine.Schema, leftAli
 
 // classifyJoinOperands determines which operand belongs to which side and
 // returns the left-side column index and right-side column index.
-func (bc *buildCtx) classifyJoinOperands(a, b sql.Expr, leftSchema engine.Schema, leftAlias string, rightSchema engine.Schema, rightAlias string) (int, int, error) {
-	ai, aSide := bc.colSide(a, leftSchema, leftAlias, rightSchema, rightAlias)
-	bi, bSide := bc.colSide(b, leftSchema, leftAlias, rightSchema, rightAlias)
+func (bc *buildCtx) classifyJoinOperands(a, b sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (int, int, error) {
+	ai, aSide := bc.colSide(a, leftSchema, leftAliases, rightSchema, rightAlias)
+	bi, bSide := bc.colSide(b, leftSchema, leftAliases, rightSchema, rightAlias)
 	// Assign: one must be left, the other right.
 	var lIdx, rIdx int = -1, -1
 	switch {
@@ -276,18 +281,24 @@ func (bc *buildCtx) classifyJoinOperands(a, b sql.Expr, leftSchema engine.Schema
 	return lIdx, rIdx, nil
 }
 
-// colSide resolves a ColRef to a column index on either the left or right
-// schema, returning (index, "left"/"right"). Unqualified refs are matched
-// against whichever side contains the column.
-func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAlias string, rightSchema engine.Schema, rightAlias string) (int, string) {
+// colSide resolves a ColRef to a column index on either the left (combined)
+// side or the right side, returning (index, "left"/"right"). Unqualified refs
+// match against whichever side contains the column.
+func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (int, string) {
 	cr, ok := expr.(*sql.ColRef)
 	if !ok {
 		return -1, ""
 	}
 	if cr.Qualifier != "" {
-		if strings.EqualFold(cr.Qualifier, leftAlias) {
-			if i := leftSchema.Index(cr.Name); i >= 0 {
-				return i, "left"
+		// Try the left combined side's aliases first.
+		for _, ar := range leftAliases {
+			if !strings.EqualFold(cr.Qualifier, ar.Alias) {
+				continue
+			}
+			for i := ar.Start; i < ar.End && i < len(leftSchema.Columns); i++ {
+				if strings.EqualFold(leftSchema.Columns[i].Name, cr.Name) {
+					return i, "left"
+				}
 			}
 		}
 		if strings.EqualFold(cr.Qualifier, rightAlias) {
@@ -306,42 +317,44 @@ func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAlias s
 	return -1, ""
 }
 
-// buildAggregate constructs the Aggregate node and its output schema
-// (group keys followed by aggregate columns).
+// buildAggregate constructs the Aggregate node and its output schema. In
+// v0.1 the aggregate output schema mirrors the SELECT list: non-aggregate
+// select items become group keys (in select-list order) and aggregate items
+// become aggregate output columns. This lets SELECT aliases like
+// `p.name AS product` flow through correctly.
 func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, engine.Schema, error) {
+	var keys []sql.Expr
 	var aggs []engine.AggSpec
 	var outCols []engine.Column
-	// Group key columns first.
-	for _, ke := range stmt.GroupBy {
-		name := inferExprName(ke)
-		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
-	}
-	// Then aggregates derived from the select list.
+
 	for _, it := range stmt.Items.Items {
 		if it.Star {
 			return nil, engine.Schema{}, fmt.Errorf("SELECT * not valid with aggregation; name columns explicitly")
 		}
 		fc, ok := it.Expr.(*sql.FuncCall)
-		if !ok || !engine.IsAggregate(fc.Name) {
-			// Non-aggregate column in an aggregate query must be a group key.
-			// We don't enforce that here strictly in v0.1; we treat it as a
-			// group key expression. (Full validation deferred.)
+		if ok && engine.IsAggregate(fc.Name) {
+			var arg sql.Expr
+			if len(fc.Args) == 1 {
+				arg = fc.Args[0]
+			}
+			name := it.As
+			if name == "" {
+				name = inferExprName(it.Expr)
+			}
+			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name})
+			outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 			continue
-		}
-		var arg sql.Expr
-		if len(fc.Args) == 1 {
-			arg = fc.Args[0]
 		}
 		name := it.As
 		if name == "" {
 			name = inferExprName(it.Expr)
 		}
-		aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name})
+		keys = append(keys, it.Expr)
 		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
 	aggSchema := engine.Schema{Columns: outCols}
 	node := &Aggregate{
-		Child: base, Keys: stmt.GroupBy, Aggs: aggs, Having: stmt.Having, Schema: aggSchema,
+		Child: base, Keys: keys, Aggs: aggs, Having: stmt.Having, Schema: aggSchema,
 	}
 	return node, aggSchema, nil
 }

@@ -28,6 +28,14 @@ func Materialize(ctx context.Context, it RowIterator) ([]Row, error) {
 	return out, nil
 }
 
+// AliasRange maps a table alias to the half-open [Start, End) interval of
+// columns it contributes within a combined (joined) schema.
+type AliasRange struct {
+	Alias string
+	Start int
+	End   int
+}
+
 // SchemaResolver builds a Resolver for a schema. The alias, when non-empty,
 // must match a registered alias; unqualified names match any column. When
 // multiple columns share a name, the first match wins. (The planner should
@@ -50,21 +58,17 @@ func SchemaResolver(schema Schema, alias string) Resolver {
 	}
 }
 
-// JoinResolver builds a Resolver for a joined (combined) schema. The qualifier
-// is matched against leftAlias (columns [0, leftWidth)) or rightAlias (columns
-// [leftWidth, end)). Unqualified names match the first column with that name.
-func JoinResolver(schema Schema, leftAlias string, leftWidth int, rightAlias string) Resolver {
+// JoinResolver builds a Resolver for a joined (combined) schema. Each
+// contributing alias has a column range. Unqualified names match the first
+// column with that name across the whole combined schema.
+func JoinResolver(schema Schema, aliases []AliasRange) Resolver {
 	return func(qualifier, name string) int {
 		if qualifier != "" {
-			if equalFold(qualifier, leftAlias) {
-				for i := 0; i < leftWidth && i < len(schema.Columns); i++ {
-					if equalFold(schema.Columns[i].Name, name) {
-						return i
-					}
+			for _, ar := range aliases {
+				if !equalFold(qualifier, ar.Alias) {
+					continue
 				}
-			}
-			if equalFold(qualifier, rightAlias) {
-				for i := leftWidth; i < len(schema.Columns); i++ {
+				for i := ar.Start; i < ar.End && i < len(schema.Columns); i++ {
 					if equalFold(schema.Columns[i].Name, name) {
 						return i
 					}

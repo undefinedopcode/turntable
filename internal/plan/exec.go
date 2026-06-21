@@ -77,17 +77,14 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry) (engine.R
 }
 
 // resolverFor returns the appropriate engine.Resolver for reading columns from
-// the output of a child node. For a Join it uses JoinResolver (so qualified
-// refs like u.name resolve to the correct side); for a Scan it uses the
-// table's alias; otherwise it uses an unqualified name resolver.
-//
-// Single-child operators (Filter/Sort/Limit/Project/Distinct) pass through
-// their child's schema unchanged, so we walk down to the first Join/Scan to
-// recover the alias metadata.
+// the output of a child node. For a Join it uses JoinResolver over all
+// contributing alias ranges so qualified refs resolve even after multi-way
+// joins. For a Scan it uses the table's alias; otherwise an unqualified
+// resolver.
 func resolverFor(child Node, schema engine.Schema) engine.Resolver {
 	base := baseRelation(child)
 	if j, ok := base.(*Join); ok {
-		return engine.JoinResolver(schema, j.LeftAlias, j.LeftWidth, j.RightAlias)
+		return engine.JoinResolver(schema, j.Aliases)
 	}
 	if s, ok := base.(*Scan); ok {
 		return engine.SchemaResolver(schema, s.Alias)
