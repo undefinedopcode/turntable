@@ -1,9 +1,9 @@
 # binaries
-/octoparser
+/turntable
 /bin/
 
 # local config / data
-octoparser.local.yaml
+turntable.local.yaml
 /data/
 
 # generated SQLite demo database (run examples/init_sqlite.sql to recreate)
