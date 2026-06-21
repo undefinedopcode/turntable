@@ -19,6 +19,10 @@ type Resolver func(qualifier, name string) int
 type Evaluator struct {
 	Resolve Resolver
 	Funcs   *FuncRegistry
+
+	// Strict, when true, makes type-coercion failures return errors instead of
+	// NULL. Driven by the CLI --strict flag.
+	Strict bool
 }
 
 // Eval evaluates a single expression to a Value.
@@ -108,7 +112,29 @@ func (e Evaluator) Eval(expr sql.Expr, row Row) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return Cast(v, ex.Type)
+		return castWithMode(v, ex.Type, e.Strict)
+
+	case *sql.ExtractExpr:
+		v, err := e.Eval(ex.Source, row)
+		if err != nil {
+			return Value{}, err
+		}
+		return extractField(v, ex.Field)
+
+	case *sql.PositionExpr:
+		sub, err := e.Eval(ex.Substr, row)
+		if err != nil {
+			return Value{}, err
+		}
+		str, err := e.Eval(ex.Str, row)
+		if err != nil {
+			return Value{}, err
+		}
+		if sub.IsNull() || str.IsNull() {
+			return Null(), nil
+		}
+		idx := strings.Index(str.AsString(), sub.AsString())
+		return IntVal(int64(idx + 1)), nil // 1-based; 0 if not found
 	}
 	return Value{}, fmt.Errorf("unsupported expression %T", expr)
 }
@@ -345,20 +371,40 @@ func colName(q, n string) string {
 	return q + "." + n
 }
 
-// Cast converts v to the named SQL type. Supported: int, float, string,
-// bool, time. Unrecognized types return an error.
+// Cast converts v to the named SQL type. Supported: int, float, string, bool,
+// time. Unrecognized types return an error. A NULL input yields NULL. Coercion
+// failures yield NULL (lenient); use castWithMode(v, t, true) for strict errors.
 func Cast(v Value, typ string) (Value, error) {
+	return castWithMode(v, typ, false)
+}
+
+// castWithMode is the strict-aware implementation of Cast. When strict is true,
+// a value that cannot be coerced to the target type produces an error rather
+// than NULL.
+func castWithMode(v Value, typ string, strict bool) (Value, error) {
+	if v.IsNull() {
+		return Null(), nil
+	}
+	coerceErr := func(msg string) (Value, error) {
+		if strict {
+			return Value{}, fmt.Errorf("CAST: %s", msg)
+		}
+		return Null(), nil
+	}
 	switch strings.ToLower(typ) {
 	case "int", "integer", "bigint":
-		n, ok := v.AsInt()
-		if !ok {
-			return Null(), nil
+		if n, ok := v.AsInt(); ok {
+			return IntVal(n), nil
 		}
-		return IntVal(n), nil
+		// Truncate floats toward zero (SQL CAST semantics).
+		if f, ok := v.AsFloat(); ok {
+			return IntVal(int64(f)), nil
+		}
+		return coerceErr(fmt.Sprintf("cannot cast %s to int", v.Type))
 	case "float", "real", "double":
 		f, ok := v.AsFloat()
 		if !ok {
-			return Null(), nil
+			return coerceErr(fmt.Sprintf("cannot cast %s to float", v.Type))
 		}
 		return FloatVal(f), nil
 	case "string", "text", "varchar":
@@ -366,14 +412,17 @@ func Cast(v Value, typ string) (Value, error) {
 	case "bool", "boolean":
 		b, ok := v.AsBool()
 		if !ok {
-			return Null(), nil
+			return coerceErr(fmt.Sprintf("cannot cast %s to bool", v.Type))
 		}
 		return BoolVal(b), nil
 	case "time", "timestamp", "datetime":
+		if v.Type == TypeTime {
+			return v, nil
+		}
 		s := v.AsString()
 		t, err := parseTime(s)
 		if err != nil {
-			return Null(), nil
+			return coerceErr(fmt.Sprintf("cannot parse %q as time", s))
 		}
 		return TimeVal(t), nil
 	}
@@ -395,4 +444,63 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("could not parse time %q", s)
+}
+
+// asTime coerces a Value to a time.Time. Strings are parsed; time values pass
+// through. Returns ok=false if not coercible.
+func asTime(v Value) (time.Time, bool) {
+	if v.IsNull() {
+		return time.Time{}, false
+	}
+	if v.Type == TypeTime {
+		return v.V.(time.Time), true
+	}
+	t, err := parseTime(v.AsString())
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// extractField implements EXTRACT(field FROM source). NULL source yields NULL.
+// Numeric sources are interpreted as epoch seconds when the field is EPOCH.
+func extractField(v Value, field string) (Value, error) {
+	if v.IsNull() {
+		return Null(), nil
+	}
+	field = strings.ToUpper(field)
+	// Allow EXTRACT(EPOCH FROM <number>) to interpret as unix seconds.
+	if field == "EPOCH" {
+		if t, ok := asTime(v); ok {
+			return FloatVal(float64(t.UnixNano()) / 1e9), nil
+		}
+		if f, ok := v.AsFloat(); ok {
+			return FloatVal(f), nil
+		}
+		return Null(), nil
+	}
+	t, ok := asTime(v)
+	if !ok {
+		return Null(), nil
+	}
+	switch field {
+	case "YEAR":
+		return IntVal(int64(t.Year())), nil
+	case "MONTH":
+		return IntVal(int64(t.Month())), nil
+	case "DAY":
+		return IntVal(int64(t.Day())), nil
+	case "HOUR":
+		return IntVal(int64(t.Hour())), nil
+	case "MINUTE":
+		return IntVal(int64(t.Minute())), nil
+	case "SECOND":
+		return FloatVal(float64(t.Second()) + float64(t.Nanosecond())/1e9), nil
+	case "DOW":
+		// 0=Sunday .. 6=Saturday (Postgres-style is 0=Sunday).
+		return IntVal(int64(t.Weekday())), nil
+	case "DOY":
+		return IntVal(int64(t.YearDay())), nil
+	}
+	return Value{}, fmt.Errorf("unknown EXTRACT field %q", field)
 }

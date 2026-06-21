@@ -3,11 +3,13 @@
 Query heterogeneous data sources — JSON, CSV, YAML, SQL databases, and (later)
 CloudWatch, Prometheus, REST APIs — using a single SQL-style query language.
 
-> **Status:** v0.2. JSON, CSV, YAML, and SQL database connectors are
+> **Status:** v0.3. JSON, CSV, YAML, and SQL database connectors are
 > implemented, with predicate/limit/order pushdown into SQL databases via
 > `database/sql`. Cross-source joins work (e.g. join a Postgres table against a
-> CSV file). See [DESIGN.md](./DESIGN.md) for the architecture, supported
-> dialect, and roadmap.
+> CSV file). v0.3 adds a `CASE WHEN`/`CAST`/`EXTRACT` expression layer, a richer
+> string/time function library, an interactive REPL, streaming result rendering
+> (bounded memory), and a `--strict` mode. See [DESIGN.md](./DESIGN.md) for the
+> architecture, supported dialect, and roadmap.
 
 ## Install
 
@@ -34,6 +36,69 @@ octoparser -o json 'SELECT * FROM users'
 # Query a SQL database with pushdown (WHERE/ORDER BY/LIMIT sent to the DB)
 octoparser -c examples/octoparser.yaml \
   'SELECT id, item, qty, price FROM inventory WHERE qty > 20 ORDER BY price DESC LIMIT 5'
+```
+
+### Expressions: CASE, CAST, EXTRACT
+
+The v0.3 expression layer adds SQL-standard conditionals and date parts:
+
+```sql
+-- conditional logic
+SELECT name, CASE WHEN active THEN 'active' ELSE 'inactive' END AS status
+FROM customers
+
+-- type conversion (int, float, string, bool, time)
+SELECT CAST(amount AS int) AS dollars FROM orders
+
+-- date parts: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH
+SELECT order_id, EXTRACT(MONTH FROM placed_at) AS month FROM orders
+
+-- substring search (1-based; 0 if not found)
+SELECT POSITION('parse' IN 'octoparser') AS pos
+```
+
+### Built-in functions
+
+Beyond the v0.1/v0.2 set (`COALESCE`, `LOWER/UPPER`, `LENGTH`, `SUBSTR`,
+`TRIM/LTRIM/RTRIM`, `CONCAT`, `ABS`, `ROUND`, `FLOOR`, `CEIL`, `REPLACE`,
+`NOW`), v0.3 adds:
+
+- **String:** `LEFT`, `RIGHT`, `POSITION`/`STRPOS`, `SPLIT_PART`,
+  `REGEXP_REPLACE`, `REGEXP_MATCHES`, `REPEAT`, `REVERSE`, `INITCAP`,
+  `LPAD`, `RPAD`
+- **Time:** `EXTRACT`, `DATE_TRUNC`, `DATE_ADD`, `AGE`, `TO_TIMESTAMP`,
+  `DATE`, `STRFTIME` (strftime `%Y/%m/%d` specifiers or Go layouts),
+  `CURRENT_DATE`
+
+### REPL
+
+Interactive mode with line editing, history (`~/.octoparser_history`), tab
+completion, and dot-commands:
+
+```bash
+octoparser -c examples/octoparser.yaml --repl
+octo> .tables
+octo> .schema customers
+octo> SELECT name, region FROM customers WHERE active = true LIMIT 3;
+octo> .output json
+octo> .explain
+octo> .quit
+```
+
+Commands: `.tables`, `.schema [name]`, `.output <fmt>`, `.explain [off]`,
+`.strict [off]`, `.help`, `.quit`.
+
+### Streaming and safety flags
+
+```bash
+# Stream rows as produced (csv/json/ndjson/yaml/raw) — bounded memory
+octoparser -o ndjson 'SELECT * FROM big_table'
+
+# Cap rows rendered as a safety guard
+octoparser --max-rows 100 'SELECT * FROM huge_table'
+
+# Strict mode: type-coercion failures are hard errors instead of NULL
+octoparser --strict 'SELECT CAST(amount AS int) FROM orders'
 ```
 
 ### SQL database sources

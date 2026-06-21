@@ -29,6 +29,16 @@ type App struct {
 	Reg    *connector.Registry
 	Output render.Format
 	Funcs  *engine.FuncRegistry
+
+	// replExplain is toggled by the .explain dot-command in the REPL.
+	replExplain bool
+
+	// maxRows caps the number of rows rendered (0 = unlimited). Acts as a
+	// safety guard against accidentally dumping huge result sets.
+	maxRows int
+
+	// strict makes type-coercion failures hard errors instead of NULL.
+	strict bool
 }
 
 // NewApp builds an App with all built-in connectors registered.
@@ -112,6 +122,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		repl       bool
 		explain    bool
 		quiet      bool
+		maxRows    int
+		strict     bool
 	)
 	fs.StringVar(&configPath, "config", "", "path to octoparser.yaml")
 	fs.StringVar(&configPath, "c", "", "short for --config")
@@ -121,6 +133,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs.BoolVar(&repl, "repl", false, "interactive mode")
 	fs.BoolVar(&explain, "explain", false, "print plan instead of running")
 	fs.BoolVar(&quiet, "quiet", false, "suppress metadata")
+	fs.IntVar(&maxRows, "max-rows", 0, "cap rows rendered (0 = unlimited)")
+	fs.BoolVar(&strict, "strict", false, "hard errors for type coercion failures")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -128,6 +142,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if output != "" {
 		a.Output = render.Format(output)
 	}
+	a.maxRows = maxRows
+	a.strict = strict
 
 	// Load config and register named sources.
 	cfg, err := config.Load(configPath)
@@ -173,7 +189,7 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 		fmt.Fprintf(a.Err, "parse error: %v\n", err)
 		return 1
 	}
-	p, err := plan.Build(ctx, stmt.(*sql.SelectStmt), a.Reg)
+	p, err := plan.Build(ctx, stmt.(*sql.SelectStmt), a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		fmt.Fprintf(a.Err, "plan error: %v\n", err)
 		return 1
@@ -189,31 +205,68 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 		fmt.Fprintf(a.Err, "exec error: %v\n", err)
 		return 1
 	}
-	rows, err := engine.Materialize(ctx, it)
-	if err != nil {
-		fmt.Fprintf(a.Err, "exec error: %v\n", err)
-		return 1
+
+	// Table format needs all rows up front (for column widths); other formats
+	// stream row-by-row to keep memory bounded.
+	if a.Output == render.FormatTable {
+		rows, err := engine.Materialize(ctx, it)
+		if err != nil {
+			fmt.Fprintf(a.Err, "exec error: %v\n", err)
+			return 1
+		}
+		if a.maxRows > 0 && len(rows) > a.maxRows {
+			rows = rows[:a.maxRows]
+		}
+		r, err := render.New(a.Output)
+		if err != nil {
+			fmt.Fprintf(a.Err, "%v\n", err)
+			return 1
+		}
+		if err := r.Render(a.Out, schema, rows); err != nil {
+			fmt.Fprintf(a.Err, "render error: %v\n", err)
+			return 1
+		}
+		if !quiet && len(rows) > 0 {
+			fmt.Fprintf(a.Err, "(%d rows)\n", len(rows))
+		}
+		return 0
 	}
 
-	r, err := render.New(a.Output)
+	sr, err := render.NewStream(a.Output)
 	if err != nil {
-		fmt.Fprintf(a.Err, "%v\n", err)
-		return 1
+		// Fall back to materialize if streaming isn't supported.
+		rows, merr := engine.Materialize(ctx, it)
+		if merr != nil {
+			fmt.Fprintf(a.Err, "exec error: %v\n", merr)
+			return 1
+		}
+		r, rerr := render.New(a.Output)
+		if rerr != nil {
+			fmt.Fprintf(a.Err, "%v\n", rerr)
+			return 1
+		}
+		if err := r.Render(a.Out, schema, rows); err != nil {
+			fmt.Fprintf(a.Err, "render error: %v\n", err)
+			return 1
+		}
+		if !quiet && len(rows) > 0 {
+			fmt.Fprintf(a.Err, "(%d rows)\n", len(rows))
+		}
+		return 0
 	}
-	if err := r.Render(a.Out, schema, rows); err != nil {
+	cappedIt := it
+	if a.maxRows > 0 {
+		cappedIt = engine.NewLimitIter(it, &a.maxRows, 0)
+	}
+	n, err := sr.RenderStream(a.Out, schema, cappedIt)
+	if err != nil {
 		fmt.Fprintf(a.Err, "render error: %v\n", err)
 		return 1
 	}
-	if !quiet && len(rows) > 0 {
-		fmt.Fprintf(a.Err, "(%d rows)\n", len(rows))
+	if !quiet && n > 0 {
+		fmt.Fprintf(a.Err, "(%d rows)\n", n)
 	}
 	return 0
-}
-
-func (a *App) repl(ctx context.Context) int {
-	// TODO(v0.3): full REPL with history + completion.
-	fmt.Fprintln(a.Err, "REPL not yet implemented (v0.3)")
-	return 1
 }
 
 // formatPlan renders a plan tree as indented text for --explain.
@@ -222,6 +275,8 @@ func formatPlan(n plan.Node, depth int) string {
 	switch node := n.(type) {
 	case *plan.Scan:
 		return indent + "Scan " + node.Source.Name
+	case *plan.NoFrom:
+		return indent + "NoFrom"
 	case *plan.Filter:
 		return indent + "Filter\n" + formatPlan(node.Child, depth+1)
 	case *plan.Project:

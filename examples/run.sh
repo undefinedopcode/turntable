@@ -28,8 +28,8 @@ run() {
 FILTER=""
 if [[ $# -gt 0 ]]; then
     FILTER="$1"
-    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 10 ]]; then
-        echo "Usage: $0 [1-10]" >&2
+    if [[ ! "$FILTER" =~ ^[0-9]+$ || "$FILTER" -lt 1 || "$FILTER" -gt 13 ]]; then
+        echo "Usage: $0 [1-13]" >&2
         exit 1
     fi
 fi
@@ -63,3 +63,12 @@ run 9 "explain" \
 
 run 10 "SQL database (pushdown)" \
     'SELECT id, item, qty, price FROM inventory WHERE qty > 20 ORDER BY price DESC LIMIT 5'
+
+run 11 "CASE WHEN expression" \
+    'SELECT c.name, CASE WHEN c.active THEN "active" ELSE "inactive" END AS status FROM customers c LIMIT 4'
+
+run 12 "EXTRACT + date functions" \
+    'SELECT o.order_id, EXTRACT(MONTH FROM o.placed_at) AS month, STRFTIME("%Y-%m", o.placed_at) AS ym, DATE_TRUNC("month", o.placed_at) AS trunc FROM orders o LIMIT 3'
+
+run 13 "FROM-less scratch + string functions" \
+    'SELECT 1 + 1 AS two, LEFT("octoparser", 4) AS prefix, POSITION("parse" IN "octoparser") AS pos, INITCAP("hello world") AS shout'

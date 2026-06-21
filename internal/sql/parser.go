@@ -89,15 +89,18 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 	}
 	s.Items = SelectList{Items: items}
 
-	if !p.kw("FROM") {
-		return nil, p.errf("expected FROM")
+	// FROM is optional: "SELECT 1+1" yields a single row over a synthetic
+	// empty relation (useful in the REPL for scratch expressions).
+	if p.kw("FROM") {
+		p.advance()
+		from, err := p.parseTableRef()
+		if err != nil {
+			return nil, err
+		}
+		s.From = from
+	} else {
+		s.NoFrom = true
 	}
-	p.advance()
-	from, err := p.parseTableRef()
-	if err != nil {
-		return nil, err
-	}
-	s.From = from
 
 	// JOINs
 	for p.kw("INNER") || p.kw("LEFT") || p.kw("JOIN") {
@@ -205,7 +208,7 @@ func (p *Parser) parseSelectList() ([]SelectItem, error) {
 			if p.kw("AS") {
 				p.advance()
 				t := p.advance()
-				if t.Kind != TKIdent {
+				if t.Kind != TKIdent && t.Kind != TKKeyword {
 					return nil, p.errf("expected alias after AS")
 				}
 				item.As = t.Value
@@ -519,6 +522,14 @@ func (p *Parser) parsePrimary() (Expr, error) {
 	case p.kw("NULL"):
 		p.advance()
 		return &LitNull{}, nil
+	case p.kw("CASE"):
+		return p.parseCase()
+	case p.kw("CAST"):
+		return p.parseCast()
+	case p.kw("EXTRACT"):
+		return p.parseExtract()
+	case p.kw("POSITION"):
+		return p.parsePosition()
 	case p.op("("):
 		p.advance()
 		e, err := p.parseExpr()
@@ -571,8 +582,149 @@ func (p *Parser) parsePrimary() (Expr, error) {
 
 func isFuncKW(s string) bool {
 	switch s {
-	case "COUNT", "SUM", "AVG", "MIN", "MAX", "CAST", "COALESCE":
+	case "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE",
+		"LEFT", "RIGHT":
 		return true
 	}
 	return false
+}
+
+// parseCase parses a CASE expression. Two SQL forms are supported:
+//
+//	CASE WHEN cond THEN val [WHEN ...] [ELSE val] END
+//	CASE expr WHEN val THEN val [WHEN ...] [ELSE val] END   (simple form)
+//
+// The simple form desugars to WHEN (expr = val) comparisons.
+func (p *Parser) parseCase() (Expr, error) {
+	p.advance() // CASE
+	ce := &CaseExpr{}
+
+	// Optional simple-form subject: CASE <expr> WHEN ...
+	var subject Expr
+	if !p.kw("WHEN") {
+		s, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		subject = s
+	}
+
+	for p.kw("WHEN") {
+		p.advance()
+		cond, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if subject != nil {
+			// simple form: cond is the comparison value; build subject = cond
+			cond = &BinaryOp{Op: "=", Left: subject, Right: cond}
+		}
+		if err := p.expectKW("THEN"); err != nil {
+			return nil, err
+		}
+		then, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		ce.Whens = append(ce.Whens, CaseWhen{Cond: cond, Then: then})
+	}
+
+	if p.kw("ELSE") {
+		p.advance()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		ce.Else = e
+	}
+	if err := p.expectKW("END"); err != nil {
+		return nil, err
+	}
+	return ce, nil
+}
+
+// parseCast parses CAST(expr AS type). The type name is an identifier or
+// keyword (e.g. INT, TIMESTAMP) optionally parenthesized with a size, which
+// we accept and ignore (e.g. VARCHAR(255)).
+func (p *Parser) parseCast() (Expr, error) {
+	p.advance() // CAST
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	e, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKW("AS"); err != nil {
+		return nil, err
+	}
+	t := p.cur()
+	if t.Kind != TKIdent && t.Kind != TKKeyword {
+		return nil, p.errf("expected type name after AS, got %q", t.Value)
+	}
+	p.advance()
+	// Optional (n) or (n, m) size spec, e.g. VARCHAR(255) / DECIMAL(10,2).
+	if p.op("(") {
+		p.advance()
+		for !p.op(")") && !p.atEOF() {
+			p.advance()
+		}
+		if err := p.expectOp(")"); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return &CastExpr{Expr: e, Type: t.Value}, nil
+}
+
+// parseExtract parses EXTRACT(field FROM source). Field is one of the date-part
+// keywords (YEAR, MONTH, ... EPOCH). The closing paren is required.
+func (p *Parser) parseExtract() (Expr, error) {
+	p.advance() // EXTRACT
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	field := p.cur()
+	if field.Kind != TKIdent && field.Kind != TKKeyword {
+		return nil, p.errf("expected date field in EXTRACT, got %q", field.Value)
+	}
+	p.advance()
+	if err := p.expectKW("FROM"); err != nil {
+		return nil, err
+	}
+	src, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return &ExtractExpr{Field: field.Value, Source: src}, nil
+}
+
+// parsePosition parses POSITION(substr IN str).
+func (p *Parser) parsePosition() (Expr, error) {
+	p.advance() // POSITION
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	// Parse the substring at add-level precedence so the IN keyword isn't
+	// consumed as part of an IN-list predicate.
+	sub, err := p.parseAdd()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKW("IN"); err != nil {
+		return nil, err
+	}
+	str, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return &PositionExpr{Substr: sub, Str: str}, nil
 }

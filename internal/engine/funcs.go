@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +57,29 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("REPLACE", funcReplace)
 	r.Register("NOW", funcNow)
 	r.Register("CURRENT_TIMESTAMP", funcNow)
+
+	// v0.3 string functions.
+	r.Register("LEFT", funcLeft)
+	r.Register("RIGHT", funcRight)
+	r.Register("STRPOS", funcStrpos)
+	r.Register("INSTR", funcStrpos)
+	r.Register("SPLIT_PART", funcSplitPart)
+	r.Register("REGEXP_REPLACE", funcRegexpReplace)
+	r.Register("REGEXP_MATCHES", funcRegexpMatches)
+	r.Register("REPEAT", funcRepeat)
+	r.Register("REVERSE", funcReverse)
+	r.Register("INITCAP", funcInitcap)
+	r.Register("LPAD", funcLpad)
+	r.Register("RPAD", funcRpad)
+
+	// v0.3 time functions.
+	r.Register("DATE_TRUNC", funcDateTrunc)
+	r.Register("DATE_ADD", funcDateAdd)
+	r.Register("AGE", funcAge)
+	r.Register("TO_TIMESTAMP", funcToTimestamp)
+	r.Register("DATE", funcDate)
+	r.Register("STRFTIME", funcStrftime)
+	r.Register("CURRENT_DATE", funcCurrentDate)
 }
 
 func funcCoalesce(args []Value) (Value, error) {
@@ -279,6 +304,453 @@ func funcNow(args []Value) (Value, error) {
 		return Value{}, fmt.Errorf("NOW expects 0 args")
 	}
 	return TimeVal(time.Now()), nil
+}
+
+// ---- v0.3 string functions ---------------------------------------------------
+
+func funcLeft(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("LEFT expects 2 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[1].AsInt()
+	if !ok {
+		return Value{}, fmt.Errorf("LEFT length must be integer")
+	}
+	s := []rune(args[0].AsString())
+	if n < 0 {
+		// Negative n counts from the end: LEFT(s, -2) = s[:len-2].
+		if -n >= int64(len(s)) {
+			return StringVal(""), nil
+		}
+		return StringVal(string(s[:int64(len(s))+n])), nil
+	}
+	if n > int64(len(s)) {
+		n = int64(len(s))
+	}
+	return StringVal(string(s[:n])), nil
+}
+
+func funcRight(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("RIGHT expects 2 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[1].AsInt()
+	if !ok {
+		return Value{}, fmt.Errorf("RIGHT length must be integer")
+	}
+	s := []rune(args[0].AsString())
+	if n < 0 {
+		if -n >= int64(len(s)) {
+			return StringVal(""), nil
+		}
+		return StringVal(string(s[-n:])), nil
+	}
+	if n > int64(len(s)) {
+		n = int64(len(s))
+	}
+	return StringVal(string(s[int64(len(s))-n:])), nil
+}
+
+func funcStrpos(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("STRPOS expects 2 args")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	idx := strings.Index(args[0].AsString(), args[1].AsString())
+	return IntVal(int64(idx + 1)), nil
+}
+
+func funcSplitPart(args []Value) (Value, error) {
+	if len(args) != 3 {
+		return Value{}, fmt.Errorf("SPLIT_PART expects 3 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[2].AsInt()
+	if !ok {
+		return Value{}, fmt.Errorf("SPLIT_PART part must be integer")
+	}
+	parts := strings.Split(args[0].AsString(), args[1].AsString())
+	if n < 1 || n > int64(len(parts)) {
+		return StringVal(""), nil
+	}
+	return StringVal(parts[n-1]), nil
+}
+
+func funcRegexpReplace(args []Value) (Value, error) {
+	if len(args) < 3 || len(args) > 4 {
+		return Value{}, fmt.Errorf("REGEXP_REPLACE expects 3 or 4 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	re, err := regexp.Compile(args[1].AsString())
+	if err != nil {
+		return Value{}, fmt.Errorf("REGEXP_REPLACE: %v", err)
+	}
+	repl := args[2].AsString()
+	global := len(args) == 4 && strings.Contains(args[3].AsString(), "g")
+	src := args[0].AsString()
+	if global {
+		return StringVal(re.ReplaceAllString(src, repl)), nil
+	}
+	// Single replacement: replace only the first match.
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		return StringVal(src), nil
+	}
+	return StringVal(src[:loc[0]] + repl + src[loc[1]:]), nil
+}
+
+func funcRegexpMatches(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("REGEXP_MATCHES expects 2 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	re, err := regexp.Compile(args[1].AsString())
+	if err != nil {
+		return Value{}, fmt.Errorf("REGEXP_MATCHES: %v", err)
+	}
+	m := re.FindStringSubmatch(args[0].AsString())
+	if m == nil {
+		return Null(), nil
+	}
+	// Return the first capture group, or the whole match if none.
+	if len(m) > 1 {
+		return StringVal(m[1]), nil
+	}
+	return StringVal(m[0]), nil
+}
+
+func funcRepeat(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("REPEAT expects 2 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[1].AsInt()
+	if !ok || n < 0 {
+		return Value{}, fmt.Errorf("REPEAT count must be non-negative integer")
+	}
+	return StringVal(strings.Repeat(args[0].AsString(), int(n))), nil
+}
+
+func funcReverse(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("REVERSE expects 1 arg")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	r := []rune(args[0].AsString())
+	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return StringVal(string(r)), nil
+}
+
+func funcInitcap(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("INITCAP expects 1 arg")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	// Capitalize the first letter of each whitespace-delimited word.
+	return StringVal(strings.Title(strings.ToLower(args[0].AsString()))), nil
+}
+
+func padString(s string, n int64, pad string, left bool) string {
+	r := []rune(s)
+	if int64(len(r)) >= n {
+		if left {
+			return string(r[:n])
+		}
+		return string(r[int64(len(r))-n:])
+	}
+	need := n - int64(len(r))
+	pr := []rune(pad)
+	if len(pr) == 0 {
+		pr = []rune(" ")
+	}
+	fill := strings.Repeat(string(pr), int(need/int64(len(pr)))+1)
+	fillRunes := []rune(fill)[:need]
+	if left {
+		return string(fillRunes) + string(r)
+	}
+	return string(r) + string(fillRunes)
+}
+
+func funcLpad(args []Value) (Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("LPAD expects 2 or 3 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[1].AsInt()
+	if !ok {
+		return Value{}, fmt.Errorf("LPAD length must be integer")
+	}
+	pad := " "
+	if len(args) == 3 && !args[2].IsNull() {
+		pad = args[2].AsString()
+	}
+	return StringVal(padString(args[0].AsString(), n, pad, true)), nil
+}
+
+func funcRpad(args []Value) (Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("RPAD expects 2 or 3 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	n, ok := args[1].AsInt()
+	if !ok {
+		return Value{}, fmt.Errorf("RPAD length must be integer")
+	}
+	pad := " "
+	if len(args) == 3 && !args[2].IsNull() {
+		pad = args[2].AsString()
+	}
+	return StringVal(padString(args[0].AsString(), n, pad, false)), nil
+}
+
+// ---- v0.3 time functions -----------------------------------------------------
+
+// asTimeVal coerces a Value to a time.Time, returning a Null Value on failure.
+func asTimeVal(v Value) (time.Time, bool) {
+	if v.IsNull() {
+		return time.Time{}, false
+	}
+	if v.Type == TypeTime {
+		return v.V.(time.Time), true
+	}
+	// Try parsing the string, then unix seconds.
+	s := strings.TrimSpace(v.AsString())
+	if t, err := parseTime(s); err == nil {
+		return t, true
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return time.Unix(n, 0), true
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return time.Unix(int64(f), int64((f-float64(int64(f)))*1e9)), true
+	}
+	return time.Time{}, false
+}
+
+// parseInterval parses a Postgres-style interval literal given as a string
+// like "1 day", "3 hours", "30 minutes". Returns the duration. Units: second(s),
+// minute(s), hour(s), day(s), week(s), month(s, 30d), year(s, 365d).
+func parseInterval(s string) (time.Duration, error) {
+	parts := strings.Fields(strings.TrimSpace(s))
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("empty interval")
+	}
+	// Accept either "N unit" pairs or a single number (seconds).
+	if len(parts) == 1 {
+		if f, err := strconv.ParseFloat(parts[0], 64); err == nil {
+			return time.Duration(f * float64(time.Second)), nil
+		}
+		return 0, fmt.Errorf("bad interval %q", s)
+	}
+	n, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad interval amount %q", parts[0])
+	}
+	unit := strings.ToLower(strings.TrimSuffix(parts[1], "s"))
+	switch unit {
+	case "second":
+		return time.Duration(n * float64(time.Second)), nil
+	case "minute":
+		return time.Duration(n * float64(time.Minute)), nil
+	case "hour":
+		return time.Duration(n * float64(time.Hour)), nil
+	case "day":
+		return time.Duration(n * float64(24 * time.Hour)), nil
+	case "week":
+		return time.Duration(n * float64(7 * 24 * time.Hour)), nil
+	case "month":
+		return time.Duration(n * float64(30 * 24 * time.Hour)), nil
+	case "year":
+		return time.Duration(n * float64(365 * 24 * time.Hour)), nil
+	}
+	return 0, fmt.Errorf("unknown interval unit %q", parts[1])
+}
+
+func funcDateTrunc(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("DATE_TRUNC expects 2 args")
+	}
+	if args[1].IsNull() {
+		return Null(), nil
+	}
+	unit := strings.ToLower(args[0].AsString())
+	t, ok := asTimeVal(args[1])
+	if !ok {
+		return Null(), nil
+	}
+	switch unit {
+	case "year":
+		return TimeVal(time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location())), nil
+	case "month":
+		return TimeVal(time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())), nil
+	case "day":
+		return TimeVal(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())), nil
+	case "hour":
+		return TimeVal(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())), nil
+	case "minute":
+		return TimeVal(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location())), nil
+	case "second":
+		return TimeVal(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location())), nil
+	case "quarter":
+		m := ((int(t.Month())-1)/3)*3 + 1
+		return TimeVal(time.Date(t.Year(), time.Month(m), 1, 0, 0, 0, 0, t.Location())), nil
+	case "week":
+		// Truncate to Monday.
+		days := int(t.Weekday()) - 1
+		if days < 0 {
+			days = 6
+		}
+		base := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+		return TimeVal(base.AddDate(0, 0, -days)), nil
+	}
+	return Value{}, fmt.Errorf("DATE_TRUNC: unknown unit %q", unit)
+}
+
+func funcDateAdd(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("DATE_ADD expects 2 args")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	t, ok := asTimeVal(args[0])
+	if !ok {
+		return Value{}, fmt.Errorf("DATE_ADD: first arg must be a timestamp")
+	}
+	d, err := parseInterval(args[1].AsString())
+	if err != nil {
+		return Value{}, fmt.Errorf("DATE_ADD: %v", err)
+	}
+	return TimeVal(t.Add(d)), nil
+}
+
+func funcAge(args []Value) (Value, error) {
+	if len(args) == 1 {
+		if args[0].IsNull() {
+			return Null(), nil
+		}
+		t, ok := asTimeVal(args[0])
+		if !ok {
+			return Null(), nil
+		}
+		return TimeVal(t), nil
+	}
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("AGE expects 1 or 2 args")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	a, ok := asTimeVal(args[0])
+	if !ok {
+		return Null(), nil
+	}
+	b, ok := asTimeVal(args[1])
+	if !ok {
+		return Null(), nil
+	}
+	// Return the difference as a duration (TypeDuration).
+	return Value{Type: TypeDuration, V: a.Sub(b)}, nil
+}
+
+func funcToTimestamp(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("TO_TIMESTAMP expects 1 arg")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	f, ok := args[0].AsFloat()
+	if !ok {
+		return Value{}, fmt.Errorf("TO_TIMESTAMP requires numeric epoch")
+	}
+	sec := int64(f)
+	nsec := int64((f - float64(sec)) * 1e9)
+	return TimeVal(time.Unix(sec, nsec)), nil
+}
+
+func funcDate(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("DATE expects 1 arg")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	t, ok := asTimeVal(args[0])
+	if !ok {
+		return Null(), nil
+	}
+	return TimeVal(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())), nil
+}
+
+func funcStrftime(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("STRFTIME expects 2 args")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	t, ok := asTimeVal(args[1])
+	if !ok {
+		return Null(), nil
+	}
+	layout := strftimeToGo(args[0].AsString())
+	return StringVal(t.Format(layout)), nil
+}
+
+// strftimeToGo translates common strftime/%-specifiers to a Go reference layout.
+// If the string contains no % specifiers it is returned unchanged so that Go
+// reference layouts ("2006-01-02") work too.
+var strftimeRepl = strings.NewReplacer(
+	"%Y", "2006", "%y", "06",
+	"%m", "01", "%d", "02",
+	"%H", "15", "%M", "04", "%S", "05",
+	"%p", "PM", "%I", "03",
+	"%A", "Monday", "%a", "Mon",
+	"%B", "January", "%b", "Jan",
+	"%j", "002", "%z", "-0700", "%Z", "MST",
+	"%%", "%",
+)
+
+func strftimeToGo(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	return strftimeRepl.Replace(s)
+}
+
+func funcCurrentDate(args []Value) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("CURRENT_DATE expects 0 args")
+	}
+	now := time.Now()
+	return TimeVal(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())), nil
 }
 
 // IsAggregate reports whether name is a recognized aggregate function.

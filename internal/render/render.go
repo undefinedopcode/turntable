@@ -29,6 +29,13 @@ type Renderer interface {
 	Render(w io.Writer, schema engine.Schema, rows []engine.Row) error
 }
 
+// StreamRenderer writes rows from an iterator without buffering the entire
+// result set, keeping memory bounded for large results. RenderStream returns
+// the number of rows written.
+type StreamRenderer interface {
+	RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error)
+}
+
 // New returns a Renderer for the given format.
 func New(f Format) (Renderer, error) {
 	switch f {
@@ -46,6 +53,25 @@ func New(f Format) (Renderer, error) {
 		return rawRenderer{}, nil
 	}
 	return nil, fmt.Errorf("unknown output format %q", f)
+}
+
+// NewStream returns a StreamRenderer for the given format. Table format is not
+// streamable (it needs column widths up front), so it returns an error; callers
+// should fall back to materialize-then-render for table.
+func NewStream(f Format) (StreamRenderer, error) {
+	switch f {
+	case FormatCSV:
+		return csvRenderer{}, nil
+	case FormatJSON:
+		return jsonRenderer{}, nil
+	case FormatNDJSON:
+		return ndjsonRenderer{}, nil
+	case FormatYAML:
+		return yamlRenderer{}, nil
+	case FormatRaw:
+		return rawRenderer{}, nil
+	}
+	return nil, fmt.Errorf("format %q does not support streaming", f)
 }
 
 // colNames returns the schema's column names.
@@ -158,6 +184,36 @@ func (csvRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) 
 	return nil
 }
 
+func (csvRenderer) RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error) {
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	names := colNames(schema)
+	if err := cw.Write(names); err != nil {
+		return 0, err
+	}
+	n := 0
+	for {
+		row, ok, err := it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			break
+		}
+		rec := make([]string, len(names))
+		for i := 0; i < len(names); i++ {
+			if i < len(row.Values) {
+				rec[i] = valString(row.Values[i])
+			}
+		}
+		if err := cw.Write(rec); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
 // ---- json -------------------------------------------------------------------
 
 type jsonRenderer struct{}
@@ -179,6 +235,46 @@ func (jsonRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row)
 	return enc.Encode(out)
 }
 
+func (jsonRenderer) RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error) {
+	names := colNames(schema)
+	if _, err := w.Write([]byte("[\n")); err != nil {
+		return 0, err
+	}
+	n := 0
+	for {
+		row, ok, err := it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			break
+		}
+		obj := map[string]any{}
+		for i, name := range names {
+			if i < len(row.Values) {
+				obj[name] = jsonValue(row.Values[i])
+			}
+		}
+		b, err := json.Marshal(obj)
+		if err != nil {
+			return n, err
+		}
+		if n > 0 {
+			if _, err := w.Write([]byte(",\n")); err != nil {
+				return n, err
+			}
+		}
+		if _, err := w.Write(b); err != nil {
+			return n, err
+		}
+		n++
+	}
+	if _, err := w.Write([]byte("\n]\n")); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
 // ---- ndjson -----------------------------------------------------------------
 
 type ndjsonRenderer struct{}
@@ -198,6 +294,32 @@ func (ndjsonRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Ro
 		}
 	}
 	return nil
+}
+
+func (ndjsonRenderer) RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error) {
+	names := colNames(schema)
+	enc := json.NewEncoder(w)
+	n := 0
+	for {
+		row, ok, err := it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			break
+		}
+		obj := map[string]any{}
+		for i, name := range names {
+			if i < len(row.Values) {
+				obj[name] = jsonValue(row.Values[i])
+			}
+		}
+		if err := enc.Encode(obj); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // jsonValue converts an engine.Value to a JSON-encodable Go value. NULL maps
@@ -229,6 +351,28 @@ func (yamlRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row)
 		}
 	}
 	return nil
+}
+
+func (yamlRenderer) RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error) {
+	names := colNames(schema)
+	n := 0
+	for {
+		row, ok, err := it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			break
+		}
+		fmt.Fprintln(w, "-")
+		for i, name := range names {
+			if i < len(row.Values) {
+				fmt.Fprintf(w, "  %s: %s\n", yamlKey(name), yamlScalar(row.Values[i]))
+			}
+		}
+		n++
+	}
+	return n, nil
 }
 
 func yamlKey(s string) string {
@@ -267,4 +411,30 @@ func (rawRenderer) Render(w io.Writer, schema engine.Schema, rows []engine.Row) 
 		fmt.Fprint(w, b.String())
 	}
 	return nil
+}
+
+func (rawRenderer) RenderStream(w io.Writer, schema engine.Schema, it engine.RowIterator) (int, error) {
+	n := 0
+	for {
+		row, ok, err := it.Next()
+		if err != nil {
+			return n, err
+		}
+		if !ok {
+			break
+		}
+		var b strings.Builder
+		for i, v := range row.Values {
+			if i > 0 {
+				b.WriteString("\t")
+			}
+			b.WriteString(valString(v))
+		}
+		b.WriteString("\n")
+		if _, err := w.Write([]byte(b.String())); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }

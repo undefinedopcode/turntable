@@ -96,3 +96,91 @@ func TestParseInBetweenLike(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCase(t *testing.T) {
+	cases := []string{
+		"SELECT CASE WHEN a > 1 THEN 'big' ELSE 'small' END AS s FROM t",
+		"SELECT CASE WHEN a > 1 THEN 'big' END FROM t",
+		"SELECT CASE a WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END FROM t",
+		"SELECT CASE WHEN a > 1 THEN CASE WHEN b > 2 THEN 'x' END ELSE 'y' END FROM t",
+	}
+	for _, q := range cases {
+		stmt, err := Parse(q)
+		if err != nil {
+			t.Errorf("Parse(%q) error: %v", q, err)
+			continue
+		}
+		s := stmt.(*SelectStmt)
+		_, ok := s.Items.Items[0].Expr.(*CaseExpr)
+		if !ok {
+			t.Errorf("Parse(%q): expected CaseExpr, got %T", q, s.Items.Items[0].Expr)
+		}
+	}
+}
+
+func TestParseCast(t *testing.T) {
+	cases := []string{
+		"SELECT CAST(a AS int) FROM t",
+		"SELECT CAST(a AS float) AS f FROM t",
+		"SELECT CAST(a AS string) FROM t",
+		"SELECT CAST(a AS timestamp) FROM t",
+		"SELECT CAST(a AS varchar(255)) FROM t",
+		"SELECT CAST(a AS decimal(10,2)) FROM t",
+	}
+	for _, q := range cases {
+		stmt, err := Parse(q)
+		if err != nil {
+			t.Errorf("Parse(%q) error: %v", q, err)
+			continue
+		}
+		s := stmt.(*SelectStmt)
+		c, ok := s.Items.Items[0].Expr.(*CastExpr)
+		if !ok {
+			t.Errorf("Parse(%q): expected CastExpr, got %T", q, s.Items.Items[0].Expr)
+			continue
+		}
+		if c.Type == "" {
+			t.Errorf("Parse(%q): empty cast type", q)
+		}
+	}
+}
+
+func TestParseNoFrom(t *testing.T) {
+	stmt, err := Parse("SELECT 1 + 1 AS two")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if !s.NoFrom {
+		t.Error("NoFrom not set for FROM-less SELECT")
+	}
+	if len(s.Items.Items) != 1 {
+		t.Fatalf("select list len = %d", len(s.Items.Items))
+	}
+}
+
+func TestParseExtract(t *testing.T) {
+	stmt, err := Parse("SELECT EXTRACT(YEAR FROM t.col) AS y FROM t")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	ex, ok := s.Items.Items[0].Expr.(*ExtractExpr)
+	if !ok {
+		t.Fatalf("expected ExtractExpr, got %T", s.Items.Items[0].Expr)
+	}
+	if ex.Field != "YEAR" {
+		t.Errorf("field = %q, want YEAR", ex.Field)
+	}
+}
+
+func TestParsePosition(t *testing.T) {
+	stmt, err := Parse("SELECT POSITION('x' IN name) AS p FROM t")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if _, ok := s.Items.Items[0].Expr.(*PositionExpr); !ok {
+		t.Fatalf("expected PositionExpr, got %T", s.Items.Items[0].Expr)
+	}
+}

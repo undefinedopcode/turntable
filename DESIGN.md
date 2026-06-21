@@ -422,12 +422,20 @@ defaults:
 - Schema discovery (`PRAGMA table_info`, `information_schema`, `DESCRIBE`);
   qualified `db.schema.table` refs.
 - `${ENV_VAR}` interpolation in config DSNs.
-- (Deferred to v0.3) `CASE WHEN`, richer string/time functions, `EXTRACT`.
+- (Done in v0.3) `CASE WHEN`, richer string/time functions, `EXTRACT`.
 
-**v0.3 — Ergonomics**
+**v0.3 — Ergonomics** ✅
 - REPL with history, completion, `.tables` / `.schema <name>` introspection.
-- Streaming/large-file handling (bounded memory via chunking for NDJSON/CSV).
-- `yaml` output; `--strict` mode improvements.
+- Streaming/large-file handling (bounded memory via row-by-row render for
+  csv/json/ndjson/yaml/raw; table buffers for column widths; `--max-rows`
+  guard).
+- `yaml` output; `--strict` mode (type-coercion failures become hard errors).
+- `CASE WHEN` (searched & simple forms), `CAST(x AS type)`,
+  `EXTRACT(field FROM src)`, `POSITION(sub IN str)`, FROM-less `SELECT <expr>`.
+- Richer scalar functions: `LEFT/RIGHT`, `SPLIT_PART`, `REGEXP_REPLACE`,
+  `REGEXP_MATCHES`, `REPEAT`, `REVERSE`, `INITCAP`, `LPAD/RPAD`,
+  `DATE_TRUNC`, `DATE_ADD`, `AGE`, `TO_TIMESTAMP`, `DATE`, `STRFTIME`,
+  `CURRENT_DATE`.
 
 **v0.4+ — Ecosystem**
 - CloudWatch logs/metrics, Prometheus, HTTP connectors.

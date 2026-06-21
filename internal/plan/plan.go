@@ -22,6 +22,8 @@ type Plan struct {
 	Root         Node
 	OutputSchema engine.Schema
 	Funcs        *engine.FuncRegistry
+	// Strict makes type-coercion failures hard errors at execution time.
+	Strict bool
 }
 
 // Node is a node in the logical plan tree.
@@ -33,6 +35,10 @@ type Scan struct {
 	Schema   engine.Schema
 	Alias    string
 }
+
+// NoFrom is a synthetic single-row, zero-column relation for "SELECT <expr>"
+// queries that have no FROM clause (e.g. scratch math in the REPL).
+type NoFrom struct{}
 
 // Filter applies a residual predicate.
 type Filter struct {
@@ -87,6 +93,7 @@ func (*Join) planNode()     {}
 func (*Aggregate) planNode() {}
 func (*Sort) planNode()     {}
 func (*Limit) planNode()    {}
+func (*NoFrom) planNode()   {}
 
 // buildCtx carries planner state down the tree.
 type buildCtx struct {
@@ -96,8 +103,8 @@ type buildCtx struct {
 }
 
 // Build resolves and validates a parsed SELECT into a Plan against the given
-// Registry.
-func Build(ctx context.Context, stmt *sql.SelectStmt, reg *connector.Registry) (*Plan, error) {
+// Registry. Options adjust planning behavior (e.g. strict mode).
+func Build(ctx context.Context, stmt *sql.SelectStmt, reg *connector.Registry, opts ...BuildOption) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("nil statement")
 	}
@@ -106,7 +113,28 @@ func Build(ctx context.Context, stmt *sql.SelectStmt, reg *connector.Registry) (
 	if err != nil {
 		return nil, err
 	}
-	return &Plan{Root: root, OutputSchema: schema, Funcs: bc.funcs}, nil
+	p := &Plan{Root: root, OutputSchema: schema, Funcs: bc.funcs}
+	for _, o := range opts {
+		o(p)
+	}
+	return p, nil
+}
+
+// BuildOption configures a Plan during Build.
+type BuildOption func(*Plan)
+
+// WithStrict enables strict (hard-error) type coercion for the plan.
+func WithStrict() BuildOption {
+	return func(p *Plan) { p.Strict = true }
+}
+
+// IfStrict returns WithStrict() when enabled is true, else nil options. A
+// convenience for call sites that always spread the result.
+func IfStrict(enabled bool) []BuildOption {
+	if enabled {
+		return []BuildOption{WithStrict()}
+	}
+	return nil
 }
 
 // buildSelect builds the plan for a SELECT, returning the root node and the
@@ -180,6 +208,11 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 // buildFrom resolves the FROM table ref and any JOINs into a base node + the
 // combined schema. Each side gets an alias (explicit or the table name).
 func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error) {
+	if stmt.NoFrom {
+		// A single row with no columns; projections evaluate against an
+		// empty row (literals/functions only, no column refs allowed).
+		return &NoFrom{}, engine.Schema{}, nil
+	}
 	leftNode, leftSchema, leftAlias, err := bc.buildTableRef(stmt.From)
 	if err != nil {
 		return nil, engine.Schema{}, err

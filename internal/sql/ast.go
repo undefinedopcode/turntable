@@ -8,15 +8,16 @@ type Statement interface{ stmtNode() }
 // SelectStmt is a SELECT query.
 type SelectStmt struct {
 	Distinct bool
-	Items  SelectList
-	From   TableRef
-	Joins  []Join
-	Where  Expr
-	GroupBy []Expr
-	Having  Expr
-	OrderBy []OrderTerm
-	Limit  *int
-	Offset *int
+	Items    SelectList
+	From     TableRef
+	NoFrom   bool // true for "SELECT <expr>" with no FROM (single synthetic row)
+	Joins    []Join
+	Where    Expr
+	GroupBy  []Expr
+	Having   Expr
+	OrderBy  []OrderTerm
+	Limit    *int
+	Offset   *int
 }
 
 func (*SelectStmt) stmtNode() {}
@@ -163,3 +164,19 @@ type CastExpr struct {
 }
 
 func (*CastExpr) exprNode() {}
+
+// EXTRACT(field FROM source), e.g. EXTRACT(YEAR FROM created_at).
+type ExtractExpr struct {
+	Field  string // YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH
+	Source Expr
+}
+
+func (*ExtractExpr) exprNode() {}
+
+// POSITION(substr IN str) returns the 1-based index of substr in str.
+type PositionExpr struct {
+	Substr Expr
+	Str    Expr
+}
+
+func (*PositionExpr) exprNode() {}

@@ -13,7 +13,7 @@ import (
 //
 // The executor returns the iterator plus the output schema of the root node.
 func Exec(ctx context.Context, p *Plan) (engine.RowIterator, engine.Schema, error) {
-	it, schema, err := execNode(ctx, p.Root, p.Funcs)
+	it, schema, err := execNode(ctx, p.Root, p.Funcs, p.Strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
@@ -21,25 +21,29 @@ func Exec(ctx context.Context, p *Plan) (engine.RowIterator, engine.Schema, erro
 }
 
 // execNode recursively executes a node, returning its iterator + output schema.
-func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry) (engine.RowIterator, engine.Schema, error) {
+func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
 	switch node := n.(type) {
 	case *Scan:
 		return execScan(ctx, node)
 
+	case *NoFrom:
+		// One empty row; a zero-column schema.
+		return engine.NewSliceIter([]engine.Row{{}}), engine.Schema{}, nil
+
 	case *Filter:
-		child, schema, err := execNode(ctx, node.Child, funcs)
+		child, schema, err := execNode(ctx, node.Child, funcs, strict)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs}
+		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
 		return engine.NewFilterIter(child, node.Predicate, eval), schema, nil
 
 	case *Project:
-		child, schema, err := execNode(ctx, node.Child, funcs)
+		child, schema, err := execNode(ctx, node.Child, funcs, strict)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs}
+		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
 		out := engine.NewProjectIter(child, node.Outputs, eval)
 		outSchema := projectOutputSchema(node.Outputs)
 		it := engine.RowIterator(out)
@@ -49,15 +53,15 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry) (engine.R
 		return it, outSchema, nil
 
 	case *Sort:
-		child, schema, err := execNode(ctx, node.Child, funcs)
+		child, schema, err := execNode(ctx, node.Child, funcs, strict)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs}
+		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
 		return engine.NewSortIter(child, node.Terms, eval), schema, nil
 
 	case *Limit:
-		child, schema, err := execNode(ctx, node.Child, funcs)
+		child, schema, err := execNode(ctx, node.Child, funcs, strict)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
@@ -68,10 +72,10 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry) (engine.R
 		return engine.NewLimitIter(child, node.Limit, off), schema, nil
 
 	case *Join:
-		return execJoin(ctx, node, funcs)
+		return execJoin(ctx, node, funcs, strict)
 
 	case *Aggregate:
-		return execAggregate(ctx, node, funcs)
+		return execAggregate(ctx, node, funcs, strict)
 	}
 	return nil, engine.Schema{}, fmt.Errorf("unknown plan node %T", n)
 }
@@ -126,12 +130,12 @@ func execScan(ctx context.Context, node *Scan) (engine.RowIterator, engine.Schem
 
 // execJoin executes a hash join: build the left iterator, stream the right,
 // and merge row values. The output schema is node.Schema.
-func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry) (engine.RowIterator, engine.Schema, error) {
-	left, _, err := execNode(ctx, node.Left, funcs)
+func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
+	left, _, err := execNode(ctx, node.Left, funcs, strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
-	right, rightSchema, err := execNode(ctx, node.Right, funcs)
+	right, rightSchema, err := execNode(ctx, node.Right, funcs, strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
@@ -143,15 +147,15 @@ func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry) (engi
 // execAggregate runs the aggregate. The group-key/agg-arg expressions are
 // evaluated against the child's output rows; HAVING is evaluated against the
 // aggregate's own output schema.
-func execAggregate(ctx context.Context, node *Aggregate, funcs *engine.FuncRegistry) (engine.RowIterator, engine.Schema, error) {
-	child, childSchema, err := execNode(ctx, node.Child, funcs)
+func execAggregate(ctx context.Context, node *Aggregate, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
+	child, childSchema, err := execNode(ctx, node.Child, funcs, strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
-	eval := engine.Evaluator{Resolve: resolverFor(node.Child, childSchema), Funcs: funcs}
+	eval := engine.Evaluator{Resolve: resolverFor(node.Child, childSchema), Funcs: funcs, Strict: strict}
 	var havingEval engine.Evaluator
 	if node.Having != nil {
-		havingEval = engine.Evaluator{Resolve: engine.SchemaResolver(node.Schema, ""), Funcs: funcs}
+		havingEval = engine.Evaluator{Resolve: engine.SchemaResolver(node.Schema, ""), Funcs: funcs, Strict: strict}
 	}
 	it := engine.NewAggregateIter(child, node.Keys, node.Aggs, node.Having, eval, havingEval, node.Schema)
 	return it, node.Schema, nil
