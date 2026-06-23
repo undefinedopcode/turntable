@@ -116,6 +116,19 @@ func TestReplBatchMultiline(t *testing.T) {
 	}
 }
 
+func TestCmdFunctions(t *testing.T) {
+	app := NewApp()
+	var buf strings.Builder
+	app.cmdFunctions(&buf)
+	out := buf.String()
+	// Lists aggregates and a sampling of scalar functions from the registry.
+	for _, want := range []string{"aggregate:", "scalar:", "COUNT", "COALESCE", "DATE_TRUNC", "REGEXP_REPLACE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf(".functions output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestCmdUseShorthand(t *testing.T) {
 	app := NewApp()
 	if _, err := app.cmdUse("prod", []string{"yaml:./examples/data/products.yaml"}); err != nil {

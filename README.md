@@ -53,7 +53,7 @@ FROM customers
 -- type conversion (int, float, string, bool, time)
 SELECT CAST(amount AS int) AS dollars FROM orders
 
--- date parts: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY, EPOCH
+-- date parts: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY
 SELECT order_id, EXTRACT(MONTH FROM placed_at) AS month FROM orders
 
 -- substring search (1-based; 0 if not found)
@@ -102,18 +102,16 @@ Not yet supported: scalar and `EXISTS` subqueries, correlated subqueries, and
 float, string, bool). In a chain mixing `UNION` and `UNION ALL`, the presence of
 any plain `UNION` deduplicates the whole result.
 
-### Built-in functions
+### SQL dialect & functions
 
-Beyond the v0.1/v0.2 set (`COALESCE`, `LOWER/UPPER`, `LENGTH`, `SUBSTR`,
-`TRIM/LTRIM/RTRIM`, `CONCAT`, `ABS`, `ROUND`, `FLOOR`, `CEIL`, `REPLACE`,
-`NOW`), v0.3 adds:
+[**DIALECT.md**](./DIALECT.md) is the full language reference — grammar, table
+references, types, operators, expressions, and every built-in function (string,
+numeric, date/time, conditional) and aggregate with signatures.
 
-- **String:** `LEFT`, `RIGHT`, `POSITION`/`STRPOS`, `SPLIT_PART`,
-  `REGEXP_REPLACE`, `REGEXP_MATCHES`, `REPEAT`, `REVERSE`, `INITCAP`,
-  `LPAD`, `RPAD`
-- **Time:** `EXTRACT`, `DATE_TRUNC`, `DATE_ADD`, `AGE`, `TO_TIMESTAMP`,
-  `DATE`, `STRFTIME` (strftime `%Y/%m/%d` specifiers or Go layouts),
-  `CURRENT_DATE`
+The library spans `COALESCE`, case/length/pad/trim/regex string functions,
+`ABS`/`ROUND`/`FLOOR`/`CEIL`, and a rich date/time set (`EXTRACT`, `DATE_TRUNC`,
+`DATE_ADD`, `AGE`, `STRFTIME`, …). For a quick live list, run `.functions` in
+the REPL.
 
 ### REPL
 
@@ -132,8 +130,8 @@ turntable> .explain
 turntable> .quit
 ```
 
-Commands: `.tables`, `.use <name> <spec>`, `.schema [name]`, `.output <fmt>`,
-`.explain [off]`, `.strict [off]`, `.help`, `.quit`.
+Commands: `.tables`, `.functions`, `.use <name> <spec>`, `.schema [name]`,
+`.output <fmt>`, `.explain [off]`, `.strict [off]`, `.help`, `.quit`.
 
 `.use` registers a source without restarting. It takes a `connector:path`
 shorthand (e.g. `.use sales csv:./data/sales.csv`) or explicit `key=value`

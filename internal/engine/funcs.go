@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,23 @@ func (r *FuncRegistry) Lookup(name string) ScalarFunc {
 // Register adds a function under an uppercased name.
 func (r *FuncRegistry) Register(name string, fn ScalarFunc) {
 	r.funcs[strings.ToUpper(name)] = fn
+}
+
+// Names returns every registered scalar function name, sorted. Aliases (e.g.
+// LEN and LENGTH) are listed individually so any callable name is discoverable.
+func (r *FuncRegistry) Names() []string {
+	out := make([]string, 0, len(r.funcs))
+	for n := range r.funcs {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Aggregates returns the supported aggregate function names. They are handled by
+// the Aggregate operator, not the scalar registry; listed here for discovery.
+func Aggregates() []string {
+	return []string{"AVG", "COUNT", "MAX", "MIN", "SUM"}
 }
 
 func (r *FuncRegistry) registerDefaults() {

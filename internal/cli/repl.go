@@ -12,6 +12,7 @@ import (
 
 	"github.com/april/turntable/internal/config"
 	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/engine"
 	"github.com/april/turntable/internal/render"
 	"github.com/chzyer/readline"
 )
@@ -192,6 +193,8 @@ func (a *App) dotCommand(ctx context.Context, line string, out io.Writer) bool {
 		fmt.Fprintln(out, replHelp())
 	case ".tables":
 		a.cmdTables(out)
+	case ".functions", ".funcs":
+		a.cmdFunctions(out)
 	case ".use":
 		if len(args) < 2 {
 			fmt.Fprintln(out, "usage: .use <name> <connector>:<path>   |   .use <name> <connector> k=v ...")
@@ -251,6 +254,33 @@ func (a *App) dotCommand(ctx context.Context, line string, out io.Writer) bool {
 }
 
 // cmdTables lists all registered logical sources.
+// cmdFunctions lists the available scalar and aggregate functions from the live
+// registry (column-wrapped). See DIALECT.md for signatures.
+func (a *App) cmdFunctions(out io.Writer) {
+	fmt.Fprintln(out, "aggregate:")
+	printWrapped(out, engine.Aggregates())
+	fmt.Fprintln(out, "scalar:")
+	printWrapped(out, a.Funcs.Names())
+	fmt.Fprintln(out, "(plus CASE, CAST, EXTRACT, POSITION — see DIALECT.md)")
+}
+
+// printWrapped prints names in aligned columns across the terminal width.
+func printWrapped(out io.Writer, names []string) {
+	const perRow = 5
+	w := 0
+	for _, n := range names {
+		if len(n) > w {
+			w = len(n)
+		}
+	}
+	for i, n := range names {
+		fmt.Fprintf(out, "  %-*s", w, n)
+		if (i+1)%perRow == 0 || i == len(names)-1 {
+			fmt.Fprintln(out)
+		}
+	}
+}
+
 func (a *App) cmdTables(out io.Writer) {
 	srcs := a.Reg.Sources()
 	if len(srcs) == 0 {
@@ -392,7 +422,7 @@ func connectorName(s connector.Source) string {
 // and registered source names.
 func (a *App) completions() []string {
 	cands := []string{
-		".help", ".tables", ".use", ".schema", ".output", ".quit", ".exit", ".explain", ".strict", ".sources",
+		".help", ".tables", ".functions", ".use", ".schema", ".output", ".quit", ".exit", ".explain", ".strict", ".sources",
 	}
 	for _, s := range a.Reg.Sources() {
 		cands = append(cands, s.Name)
@@ -426,6 +456,7 @@ func onOff(b bool) string {
 func replHelp() string {
 	return `Commands:
   .tables                 list registered sources
+  .functions | .funcs     list available SQL functions (see DIALECT.md)
   .use <name> <spec>      register a source at runtime
                           (e.g. .use sales csv:./data/sales.csv
                                  .use inv sql driver=sqlite dsn=./x.db)

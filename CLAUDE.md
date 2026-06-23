@@ -16,6 +16,12 @@ aspirational structure that does not match the tree yet (e.g. it lists
 directory — none exist; the real `plan` package is just `plan.go` + `exec.go`).
 Trust the actual source over DESIGN.md when they disagree.
 
+`DIALECT.md` is the user-facing SQL language reference (grammar, types,
+functions). When you add/change a function or dialect feature, update it — and
+the function list is also exposed live via the REPL `.functions` command
+(`FuncRegistry.Names()` + `engine.Aggregates()`), so prefer pointing users there
+over re-listing functions in prose that drifts.
+
 ## Commands
 
 ```bash
