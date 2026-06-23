@@ -5,9 +5,12 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -47,6 +50,16 @@ const defaultServeMaxRows = 5000
 // browser-based complement to the REPL: the same parse/plan/exec path, exposed
 // over HTTP as a small JSON API plus a single-page UI.
 func (a *App) serve(ctx context.Context, addr string) int {
+	// A per-session scratch directory for files uploaded through the UI. It is
+	// removed when serve() returns (process shutdown).
+	dir, err := os.MkdirTemp("", "turntable-uploads-")
+	if err != nil {
+		fmt.Fprintf(a.Err, "serve: cannot create upload dir: %v\n", err)
+		return 1
+	}
+	a.uploadDir = dir
+	defer os.RemoveAll(dir)
+
 	mux := http.NewServeMux()
 	// Serve the embedded SPA (index.html + hashed assets) at the root; the API
 	// routes below are more specific, so they take precedence in the mux.
@@ -54,6 +67,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/query", a.handleQuery)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/schema", a.handleSchema)
+	mux.HandleFunc("/api/upload", a.handleUpload)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -67,7 +81,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 		fmt.Fprintf(a.Err, "serve: cannot listen on %q: %v\n", addr, err)
 		return 1
 	}
-	fmt.Fprintf(a.Err, "turntable web UI on http://%s  — read-only queries; sources can be added at runtime (%s)\n", ln.Addr(), exposureNote(addr))
+	fmt.Fprintf(a.Err, "turntable web UI on http://%s  — read-only queries; sources can be added/uploaded at runtime (%s)\n", ln.Addr(), exposureNote(addr))
 
 	// Shut down cleanly when the process is interrupted.
 	go func() {
@@ -302,6 +316,81 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 		cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
 	}
 	writeJSON(w, map[string]any{"source": name, "columns": cols})
+}
+
+// maxUploadBytes bounds a single uploaded file (a guard, not a hard product
+// limit). Data is streamed to disk, not buffered in memory.
+const maxUploadBytes = 512 << 20 // 512 MiB
+
+// handleUpload accepts a multipart file upload, stores it in the per-session
+// upload directory, and returns the stored path. The client then registers a
+// file-connector source pointing at that path via POST /api/sources. The file
+// stays on disk only for the life of the server process.
+func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.uploadDir == "" {
+		writeJSON(w, map[string]any{"error": "uploads are not available"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "bad upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Build a safe destination name from the original (path-stripped) filename,
+	// preserving the extension; CreateTemp injects randomness for uniqueness and
+	// confines the file to uploadDir.
+	base := sanitizeFilename(filepath.Base(header.Filename))
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if stem == "" {
+		stem = "upload"
+	}
+	dst, err := os.CreateTemp(a.uploadDir, stem+"-*"+ext)
+	if err != nil {
+		writeJSON(w, map[string]any{"error": "cannot store upload: " + err.Error()})
+		return
+	}
+	defer dst.Close()
+
+	n, err := io.Copy(dst, file)
+	if err != nil {
+		os.Remove(dst.Name())
+		writeJSON(w, map[string]any{"error": "write upload: " + err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"path":     dst.Name(),
+		"filename": base,
+		"size":     n,
+	})
+}
+
+// sanitizeFilename reduces a filename to a safe set of characters, preventing
+// path traversal and odd names. It keeps letters, digits, dot, dash, underscore.
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.TrimLeft(b.String(), ".") // no leading dots (hidden/relative)
+	if out == "" {
+		return "upload"
+	}
+	return out
 }
 
 // jsonValue converts an engine.Value into a JSON-encodable Go value: NULL ->

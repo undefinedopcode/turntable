@@ -63,3 +63,22 @@ export function addSource(
 ): Promise<{ registered?: string[]; error?: string }> {
   return postJSON("/api/sources", { name, connector, fields });
 }
+
+export interface UploadResult {
+  path?: string;
+  filename?: string;
+  size?: number;
+  error?: string;
+}
+
+// uploadFile streams a file to the server's per-session scratch directory and
+// returns its stored path, for use as a file connector's `path` field.
+export async function uploadFile(file: File): Promise<UploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body: form });
+  if (!res.ok && res.status !== 200) {
+    throw new Error((await res.text()) || `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}

@@ -171,18 +171,22 @@ sources (click to expand columns or insert a name), a results table, an
 **Explain** button, and CSV export. Results are capped (per `--max-rows`,
 default 5000) and the response notes truncation.
 
-An **Add source** form in the sidebar registers a source at runtime — the
-browser equivalent of the REPL's `.use`, going through the same registration
+The **Add source** button opens a modal that registers a source at runtime —
+the browser equivalent of the REPL's `.use`, going through the same registration
 path (so wildcards like `table=*`, option routing, and validation behave
-identically). Pick a connector, give it a name, and supply the connector's
-fields as `key=value` lines (e.g. `path=/data/sales.csv`, or `driver=sqlite` +
-`dsn=...` + `table=*`). Registrations live for the life of the process; they are
-not written back to `turntable.yaml`.
+identically). The form adapts to the chosen connector: SQL shows driver/DSN/
+table, an API connector shows its URL/keys, and so on. For **file** connectors
+(CSV, JSON, YAML, Excel, Parquet) it offers a **file upload** — the file is
+streamed to a per-session scratch directory on the server and the new source
+points at it. Registrations and uploads live for the life of the process (the
+scratch directory is removed on shutdown); nothing is written back to
+`turntable.yaml`.
 
 The API: `POST /api/query` (`{"query": "...", "explain": false}` →
 `{columns, rows, count, elapsed_ms, ...}`), `GET /api/sources`,
 `POST /api/sources` (`{"name", "connector", "fields": {...}}` → `{registered}`),
-and `GET /api/schema?source=<name>`.
+`POST /api/upload` (multipart `file` → `{path, filename, size}`), and
+`GET /api/schema?source=<name>`.
 
 It binds to `localhost` by default. Queries are read-only SQL, but they — and
 runtime-added sources — run with this process's file and network access (a

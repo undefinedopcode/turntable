@@ -11,13 +11,14 @@ webui/
 ├── index.html          Vite entry
 ├── vite.config.ts      base:'./' (relative assets) + dev proxy of /api
 ├── src/
-│   ├── main.tsx        React root
-│   ├── App.tsx         layout + top-level state
-│   ├── api.ts          typed client for the /api/* endpoints
-│   ├── csv.ts          client-side CSV export
-│   ├── styles.css      dark theme
-│   └── components/     Sidebar, AddSourceForm, Editor, Results
-└── dist/               built output (committed; embedded by Go)
+│   ├── main.tsx          React root
+│   ├── App.tsx           layout + top-level state
+│   ├── api.ts            typed client for the /api/* endpoints (incl. upload)
+│   ├── connectorSpecs.ts per-connector form field specs (drives Add Source)
+│   ├── csv.ts            client-side CSV export
+│   ├── styles.css        dark theme
+│   └── components/       Sidebar, Modal, AddSourceModal, Editor, Results
+└── dist/                 built output (committed; embedded by Go)
 ```
 
 ## Develop

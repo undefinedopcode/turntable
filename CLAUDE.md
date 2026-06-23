@@ -139,8 +139,12 @@ connectors and owns flag/config handling; `repl.go` is the interactive loop
 web UI — an HTTP server exposing the same parse/plan/exec path as a JSON API.
 Endpoints: `GET/POST /api/query`, `GET /api/sources` (list) / `POST /api/sources`
 (register at runtime, the web `.use` — goes through `registerSourceExpand`, so
-wildcards and validation match), and `GET /api/schema`. Field routing for both
-`.use` and the web add-source form is shared via `applySourceField` in `cli.go`.
+wildcards and validation match), `GET /api/schema`, and `POST /api/upload`
+(multipart file → streamed to a per-session temp dir `App.uploadDir`, created in
+`serve()` and `RemoveAll`'d on shutdown; the client then registers a file source
+at the returned path). The web add-source UI is a modal whose form adapts per
+connector via `connectorSpecs.ts` (file connectors get an upload). Field routing
+for both `.use` and the web form is shared via `applySourceField` in `cli.go`.
 Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by
 default. The frontend is a **React + Vite + TypeScript** app under
 `internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via

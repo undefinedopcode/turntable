@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getSchema, listSources, type Column, type Source } from "../api";
-import { AddSourceForm } from "./AddSourceForm";
+import { AddSourceModal } from "./AddSourceModal";
 
 interface SidebarProps {
   onInsert: (text: string) => void;
@@ -10,6 +10,7 @@ interface SidebarProps {
 export function Sidebar({ onInsert, onSourceAdded }: SidebarProps) {
   const [sources, setSources] = useState<Source[] | null>(null);
   const [error, setError] = useState<string>("");
+  const [modalOpen, setModalOpen] = useState(false);
 
   const reload = () => {
     listSources()
@@ -21,8 +22,15 @@ export function Sidebar({ onInsert, onSourceAdded }: SidebarProps) {
 
   return (
     <aside>
-      <h2>Sources</h2>
-      <AddSourceForm
+      <div className="sources-head">
+        <h2>Sources</h2>
+        <button className="add-btn" onClick={() => setModalOpen(true)}>
+          + Add
+        </button>
+      </div>
+      <AddSourceModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
         onAdded={() => {
           reload();
           onSourceAdded();

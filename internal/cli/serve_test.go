@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io/fs"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -162,6 +165,103 @@ func TestAddSourceErrors(t *testing.T) {
 	}
 	if _, out := postSource(t, a, `{"name":"dup","connector":"csv","fields":{"path":"`+dir+`/a.csv"}}`); out["error"] == nil {
 		t.Error("expected error for duplicate source name")
+	}
+}
+
+func TestUploadThenRegisterAndQuery(t *testing.T) {
+	a := NewApp()
+	dir := t.TempDir()
+	a.uploadDir = dir
+
+	// Build a multipart upload of a small CSV.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "sales.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.Write([]byte("region,amount\nemea,10\namer,20\nemea,30\n"))
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	a.handleUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var up struct {
+		Path     string `json:"path"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &up); err != nil {
+		t.Fatal(err)
+	}
+	if up.Error != "" {
+		t.Fatalf("upload error: %s", up.Error)
+	}
+	// The stored file lives inside the upload dir, preserving stem+ext.
+	if filepath.Dir(up.Path) != dir {
+		t.Errorf("stored path %q not in upload dir %q", up.Path, dir)
+	}
+	if !strings.HasPrefix(filepath.Base(up.Path), "sales-") || !strings.HasSuffix(up.Path, ".csv") {
+		t.Errorf("stored name = %q, want sales-*.csv", filepath.Base(up.Path))
+	}
+	if up.Size != 38 {
+		t.Errorf("size = %d, want 38", up.Size)
+	}
+
+	// Register a csv source at the uploaded path, then query it.
+	code, out := postSource(t, a, `{"name":"sales","connector":"csv","fields":{"path":"`+up.Path+`"}}`)
+	if code != http.StatusOK || out["error"] != nil {
+		t.Fatalf("register failed: code=%d err=%v", code, out["error"])
+	}
+	resp := postQuery(t, a, `{"query":"SELECT region, SUM(amount) AS t FROM sales GROUP BY region ORDER BY t DESC"}`)
+	if resp.Error != "" {
+		t.Fatalf("query error: %s", resp.Error)
+	}
+	if resp.Count != 2 {
+		t.Fatalf("rows = %d, want 2", resp.Count)
+	}
+}
+
+func TestUploadRejectsTraversalName(t *testing.T) {
+	a := NewApp()
+	dir := t.TempDir()
+	a.uploadDir = dir
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "../../etc/passwd")
+	fw.Write([]byte("x\n1\n"))
+	mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	a.handleUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var up struct {
+		Path string `json:"path"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &up)
+	// The stored file must be directly inside the upload dir, not escaped out.
+	if filepath.Dir(up.Path) != dir {
+		t.Fatalf("path traversal: stored at %q, outside %q", up.Path, dir)
+	}
+}
+
+func TestUploadMethodNotAllowed(t *testing.T) {
+	a := NewApp()
+	a.uploadDir = t.TempDir()
+	req := httptest.NewRequest(http.MethodGet, "/api/upload", nil)
+	rec := httptest.NewRecorder()
+	a.handleUpload(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
 
