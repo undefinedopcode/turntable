@@ -45,6 +45,20 @@ func (r *Registry) RegisterConnector(c Connector) error {
 	return nil
 }
 
+// RegisterConnectorAs registers an already-constructed Connector under an
+// additional prefix (alias). This lets one connector answer to several
+// qualified-ref schemes — e.g. the http connector serving both "http" and
+// "https" URL refs.
+func (r *Registry) RegisterConnectorAs(prefix string, c Connector) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.connectors[prefix]; ok {
+		return fmt.Errorf("connector %q already registered", prefix)
+	}
+	r.connectors[prefix] = c
+	return nil
+}
+
 // Connector returns the connector registered under prefix, or nil.
 func (r *Registry) Connector(prefix string) Connector {
 	r.mu.RLock()

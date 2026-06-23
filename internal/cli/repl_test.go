@@ -8,6 +8,24 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestReplBanner(t *testing.T) {
+	b := replBanner()
+	// The banner includes the ASCII logo and the startup hint line.
+	if !strings.Contains(b, "turntable") {
+		t.Errorf("banner missing 'turntable':\n%s", b)
+	}
+	if !strings.Contains(b, ".help for commands") {
+		t.Errorf("banner missing .help hint:\n%s", b)
+	}
+	if !strings.Contains(b, ".quit to exit") {
+		t.Errorf("banner missing .quit hint:\n%s", b)
+	}
+	// The logo should span several lines (ASCII art), not a one-liner.
+	if strings.Count(b, "\n") < 5 {
+		t.Errorf("banner too short — expected ASCII art, got:\n%s", b)
+	}
+}
+
 func TestReplCompleter(t *testing.T) {
 	c := &replCompleter{cands: []string{
 		".tables", ".schema", ".help", ".quit", "customers", "orders",

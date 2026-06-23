@@ -23,6 +23,7 @@ type File struct {
 type Source struct {
 	Connector string         `yaml:"connector"`
 	Path      string         `yaml:"path,omitempty"`
+	URL       string         `yaml:"url,omitempty"`
 	DSN       string         `yaml:"dsn,omitempty"`
 	Driver    string         `yaml:"driver,omitempty"`
 	Table     string         `yaml:"table,omitempty"`
@@ -68,10 +69,18 @@ func Parse(data []byte) (*File, error) {
 	}
 	for name, src := range f.Sources {
 		src.Path = interpolate(src.Path)
+		src.URL = interpolate(src.URL)
 		src.DSN = interpolate(src.DSN)
 		src.Driver = interpolate(src.Driver)
 		src.Table = interpolate(src.Table)
 		src.Sheet = interpolate(src.Sheet)
+		// Connector options often carry secrets (API keys, tokens) that should
+		// come from the environment; interpolate any string-valued options too.
+		for k, v := range src.Options {
+			if s, ok := v.(string); ok {
+				src.Options[k] = interpolate(s)
+			}
+		}
 		f.Sources[name] = src
 	}
 	return &f, nil

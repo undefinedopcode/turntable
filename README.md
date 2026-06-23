@@ -1,16 +1,18 @@
 # Turntable
 
-Query heterogeneous data sources — JSON, CSV, YAML, Excel, SQL databases, and
-(later) CloudWatch, Prometheus, REST APIs — using a single SQL-style query
-language.
+Query heterogeneous data sources — JSON, CSV, YAML, Excel, Parquet, SQL
+databases, HTTP/REST APIs, Linear, Trello, Azure DevOps Boards, AWS CloudWatch,
+DynamoDB, and Azure Table Storage — using a single SQL-style query language.
 
-> **Status:** v0.3. JSON, CSV, YAML, Excel, and SQL database connectors are
-> implemented, with predicate/limit/order pushdown into SQL databases via
-> `database/sql`. Cross-source joins work (e.g. join a Postgres table against a
-> CSV file). v0.3 adds a `CASE WHEN`/`CAST`/`EXTRACT` expression layer, a richer
-> string/time function library, an interactive REPL, streaming result rendering
-> (bounded memory), and a `--strict` mode. See [DESIGN.md](./DESIGN.md) for the
-> architecture, supported dialect, and roadmap.
+> **Status:** v0.4. File connectors (JSON, CSV, YAML, Excel, Parquet), SQL
+> databases (with predicate/limit/order pushdown via `database/sql`), and
+> URL/API connectors (HTTP/REST, Linear's GraphQL API, CloudWatch logs &
+> metrics) are implemented. Cross-source joins work (e.g. join a Postgres table
+> against a CSV file, or a REST endpoint against a Parquet file). The expression
+> layer covers `CASE WHEN`/`CAST`/`EXTRACT`, a rich string/time function
+> library, an interactive REPL, streaming result rendering (bounded memory),
+> and a `--strict` mode. See [DESIGN.md](./DESIGN.md) for the architecture,
+> supported dialect, and roadmap.
 
 ## Install
 
@@ -57,6 +59,48 @@ SELECT order_id, EXTRACT(MONTH FROM placed_at) AS month FROM orders
 -- substring search (1-based; 0 if not found)
 SELECT POSITION('parse' IN 'turntable') AS pos
 ```
+
+### Subqueries and UNION
+
+A `FROM`-clause subquery (derived table) must be aliased; the outer query reads
+its output columns like any table — including across connectors:
+
+```sql
+SELECT region, n
+FROM (SELECT region, COUNT(*) AS n FROM sales GROUP BY region) AS g
+WHERE n > 100
+
+-- a subquery can be one side of a join
+SELECT u.name, t.total
+FROM users u
+JOIN (SELECT user_id, SUM(amount) AS total FROM csv:./orders.csv GROUP BY user_id) AS t
+  ON t.user_id = u.id
+```
+
+A `WHERE x IN (SELECT ...)` / `NOT IN (SELECT ...)` subquery is also supported.
+The subquery must be non-correlated and return a single column; it is executed
+once and folded into a value set, so it works across connectors and can even be
+pushed into a SQL source:
+
+```sql
+SELECT name FROM users
+WHERE id IN (SELECT user_id FROM csv:./orders.csv WHERE amount > 100)
+```
+
+`UNION` (deduplicated) and `UNION ALL` (kept) combine branches with matching
+column counts. A trailing `ORDER BY`/`LIMIT` applies to the whole result:
+
+```sql
+SELECT id, name FROM csv:./current.csv
+UNION ALL
+SELECT id, name FROM csv:./archive.csv
+ORDER BY name LIMIT 50
+```
+
+Not yet supported: scalar and `EXISTS` subqueries, correlated subqueries, and
+`INTERSECT`/`EXCEPT`. An `IN` subquery's column must be a scalar type (int,
+float, string, bool). In a chain mixing `UNION` and `UNION ALL`, the presence of
+any plain `UNION` deduplicates the whole result.
 
 ### Built-in functions
 
@@ -109,6 +153,41 @@ turntable> SELECT count(*) FROM events;
 This also works in the config file (`table: "*"`) — useful for pointing at a
 whole database without listing each table.
 
+### Web UI
+
+`--serve` starts a browser-based query UI — a complement to the REPL using the
+same parse/plan/exec path. It serves a single self-contained page (no external
+assets) plus a small JSON API.
+
+```bash
+turntable -c examples/turntable.yaml --serve            # http://localhost:8080
+turntable -c examples/turntable.yaml --serve --addr localhost:9000
+```
+
+The page has a SQL editor (`Ctrl`/`⌘`+`Enter` to run), a sidebar listing
+sources (click to expand columns or insert a name), a results table, an
+**Explain** button, and CSV export. Results are capped (per `--max-rows`,
+default 5000) and the response notes truncation.
+
+An **Add source** form in the sidebar registers a source at runtime — the
+browser equivalent of the REPL's `.use`, going through the same registration
+path (so wildcards like `table=*`, option routing, and validation behave
+identically). Pick a connector, give it a name, and supply the connector's
+fields as `key=value` lines (e.g. `path=/data/sales.csv`, or `driver=sqlite` +
+`dsn=...` + `table=*`). Registrations live for the life of the process; they are
+not written back to `turntable.yaml`.
+
+The API: `POST /api/query` (`{"query": "...", "explain": false}` →
+`{columns, rows, count, elapsed_ms, ...}`), `GET /api/sources`,
+`POST /api/sources` (`{"name", "connector", "fields": {...}}` → `{registered}`),
+and `GET /api/schema?source=<name>`.
+
+It binds to `localhost` by default. Queries are read-only SQL, but they — and
+runtime-added sources — run with this process's file and network access (a
+qualified ref or a new source can read local files and reach internal URLs), so
+binding to a non-local address prints a warning. Only serve on a trusted
+network.
+
 ### Streaming and safety flags
 
 ```bash
@@ -145,11 +224,22 @@ sources:
     table: "*"                  # wildcard: register every user table in the DB
 ```
 
+Three drivers are compiled in: **`sqlite`** (`modernc.org/sqlite`, pure Go),
+**`postgres`** (`github.com/lib/pq`), and **`mysql`**
+(`github.com/go-sql-driver/mysql`). The `driver` field selects which one.
+
 The `sql` connector discovers schema via `PRAGMA table_info` (SQLite),
-`information_schema.columns` (Postgres/MySQL), or `DESCRIBE` (MySQL), and
-pushes down `WHERE`, `ORDER BY`, and `LIMIT` into the database. Unsupported
-predicates (e.g. scalar functions like `LOWER(name)`) are not pushed and are
-applied in memory by the engine instead.
+`information_schema.columns` (Postgres/MySQL), or `DESCRIBE` (MySQL). For a
+single-table query the planner pushes the `WHERE` and `LIMIT` into the database
+(`ORDER BY` is applied by the engine); pushdown is a pure optimization, so the
+engine re-applies the filter and limit and the result is correct even when only
+part of the predicate is pushed. Pushdown is dialect-aware: identifiers are
+quoted with double quotes for SQLite/Postgres and backticks for MySQL, and
+discovery uses `$1`-style bind parameters for Postgres and `?` elsewhere.
+Unsupported predicates (e.g. scalar functions like `LOWER(name)`) are not pushed
+and are applied in memory by the engine instead — and the `LIMIT` is then held
+back too, so the engine still sees every matching row. Run `turntable --explain`
+to see what was pushed (e.g. `Scan inv [pushdown: predicate, limit=3]`).
 
 A `table: "*"` source enumerates every user table in the database (via
 `PRAGMA table_list` / `information_schema.tables`, filtering out system tables)
@@ -185,6 +275,233 @@ turntable> .use wb excel:./data/report.xlsx sheet=*
 registered 3 tables: summary, Q1, Q2
 ```
 
+### HTTP / REST APIs
+
+The `http` connector fetches a JSON document over HTTP(S) and exposes it as
+rows. The response may be a top-level array, a single object (one row), or an
+array nested under a dotted `path` (e.g. `data.items`). Schema is inferred from
+the records, like the JSON file connector.
+
+```yaml
+sources:
+  issues:
+    connector: http
+    url: https://api.example.com/v1/issues
+    options:
+      path: data.items          # dotted path to the array in the response
+      bearer: ${API_TOKEN}      # -> "Authorization: Bearer ..."
+      header_x_api_key: ${KEY}  # any header_<name> sets a request header
+```
+
+```bash
+# inline qualified ref — no config needed (http:// and https:// are recognized)
+turntable 'SELECT id, name FROM https://api.example.com/users.json
+            WHERE active = true ORDER BY id DESC'
+
+# in the REPL — a full URL selects the http connector
+turntable> .use feed https://api.example.com/users.json path=data.users
+turntable> SELECT name FROM feed WHERE active = true LIMIT 5;
+```
+
+Options: `url` (or the dataset source), `path`, `method` (default GET), `body`,
+`bearer`, and `header_<name>` (underscores become hyphens). Any string option
+may interpolate `${ENV_VAR}` so tokens stay out of the config file.
+
+An inline URL ref runs to the next whitespace, so query strings work
+(`https://h/items?since=2024&limit=50`); a URL containing spaces, commas, or
+parentheses must instead be registered as a source (config or `.use`), where
+options like `path` can't be confused with the URL. Inline refs carry no
+options, so auth headers need the config/`.use` form.
+
+### Parquet files
+
+The `parquet` connector reads a `.parquet` file, taking its schema from the file
+footer and streaming rows with bounded memory.
+
+```bash
+turntable 'SELECT id, amount FROM parquet:./data/orders.parquet WHERE amount > 100'
+turntable> .use orders parquet:./data/orders.parquet
+```
+
+### Linear
+
+The `linear` connector queries the [Linear](https://linear.app) GraphQL API and
+exposes a fixed set of datasets — `issues`, `teams`, `projects`, `users` —
+flattened into typed columns (issue state, assignee, team are flattened). It
+paginates automatically.
+
+```yaml
+sources:
+  issues:
+    connector: linear
+    options:
+      dataset: issues          # issues | teams | projects | users
+      api_key: ${LINEAR_API_KEY}   # personal API key (raw Authorization header)
+      # or: bearer: ${LINEAR_OAUTH_TOKEN}
+```
+
+```bash
+turntable -c turntable.yaml \
+  "SELECT identifier, title, state, assignee FROM issues
+   WHERE team = 'ENG' ORDER BY priority DESC LIMIT 20"
+```
+
+### Trello
+
+The `trello` connector queries the [Trello](https://trello.com) REST API and
+exposes a fixed set of datasets — `boards`, `lists`, `cards`, `members` —
+flattened into typed columns. Authentication uses a Trello API key and token
+(sent in the `Authorization` header, not the query string). `boards` lists your
+boards; `lists`, `cards`, and `members` are board-scoped and need a `board` id.
+
+```yaml
+sources:
+  cards:
+    connector: trello
+    options:
+      dataset: cards
+      board: ${TRELLO_BOARD_ID}
+      key: ${TRELLO_KEY}
+      token: ${TRELLO_TOKEN}
+```
+
+```bash
+turntable -c turntable.yaml \
+  "SELECT name, due, id_list FROM cards WHERE closed = false ORDER BY due"
+
+# in the REPL
+turntable> .use boards trello dataset=boards key=$KEY token=$TOKEN
+turntable> SELECT name, url FROM boards WHERE closed = false;
+```
+
+`cards` exposes `id, name, desc, closed, id_board, id_list, due, due_complete,
+url, date_last_activity, pos`. Get an API key/token at
+<https://trello.com/app-key>.
+
+### Azure DevOps Boards
+
+The `azuredevops` connector exposes a project's Boards **work items** as a
+single dataset, `work_items`, flattened into typed columns. Authentication uses
+a Personal Access Token (PAT, with *Work Items: Read* scope) over HTTP Basic
+auth. Internally it runs the two-step work-item API — a WIQL query for IDs, then
+a batch field fetch — but that is hidden behind the dataset.
+
+```yaml
+sources:
+  work_items:
+    connector: azuredevops
+    options:
+      organization: my-org
+      project: My Project
+      pat: ${AZDO_PAT}
+      type: Bug              # optional: filter the default query by work item type
+```
+
+```bash
+turntable -c turntable.yaml \
+  "SELECT id, title, state, assigned_to FROM work_items
+   WHERE state = 'Active' ORDER BY changed_date DESC LIMIT 20"
+```
+
+Columns: `id, title, work_item_type, state, assigned_to, area_path,
+iteration_path, tags, priority, created_date, changed_date`. For full control,
+pass a `wiql` option with a complete WIQL query (it must `SELECT ... FROM
+workitems`), e.g. `wiql=SELECT [System.Id] FROM workitems WHERE [System.Tags]
+CONTAINS 'release'`.
+
+### AWS CloudWatch
+
+`cloudwatchlogs` queries log groups (via `FilterLogEvents`); `cloudwatch`
+queries metrics (via `GetMetricData`). Both build the AWS client lazily from the
+`region`/`profile` options using the standard credential chain.
+
+```yaml
+sources:
+  applogs:
+    connector: cloudwatchlogs
+    options:
+      region: us-east-1
+      log_group: /aws/lambda/my-fn
+      filter: "ERROR"          # optional CloudWatch filter pattern
+  cpu:
+    connector: cloudwatch
+    options:
+      region: us-east-1
+      namespace: AWS/EC2
+      metric: CPUUtilization
+      stat: Average            # default Average
+      period: 300             # seconds
+      dim_InstanceId: i-0abc123
+```
+
+Logs expose `timestamp, message, log_stream, event_id, ingestion_time`; metrics
+expose `timestamp, namespace, metric, stat, value`. Use `start`/`end` (RFC3339
+or unix millis) to bound the time range.
+
+### DynamoDB
+
+The `dynamodb` connector exposes a DynamoDB table as rows by scanning its items.
+DynamoDB is schemaless, so the schema is inferred from a sample of items (the
+union of their attribute names, typed as `any`) — like the JSON connector.
+
+```yaml
+sources:
+  events:
+    connector: dynamodb
+    table: events            # table name; "*" registers every table in the account
+    options:
+      region: us-east-1
+      # endpoint: http://localhost:8000   # e.g. DynamoDB Local
+```
+
+```bash
+turntable -c turntable.yaml 'SELECT id, status FROM events WHERE status = '"'"'open'"'"' LIMIT 20'
+
+# in the REPL — one table, or every table in the account
+turntable> .use ev dynamodb table=events region=us-east-1
+turntable> .use db dynamodb table=* region=us-east-1
+```
+
+Scans are read-only and paginated with bounded memory. Filtering and ordering
+run in the engine (no predicate pushdown into DynamoDB yet), so a `LIMIT`
+without a `WHERE` is fetched lazily, but a `WHERE` reads the table to filter in
+memory — scope queries accordingly on large tables.
+
+### Azure Table Storage
+
+The `azuretables` connector exposes a table as rows by listing its entities.
+Like DynamoDB it is schemaless, so the schema is inferred from a sample of
+entities. Two auth methods are supported:
+
+```yaml
+sources:
+  # 1. connection string (account key / SAS / Azurite)
+  events:
+    connector: azuretables
+    table: events            # "*" registers every table in the account
+    options:
+      connection_string: ${AZURE_TABLES_CONNECTION_STRING}
+  # 2. Azure AD via DefaultAzureCredential (env, managed identity, az CLI, ...)
+  audit:
+    connector: azuretables
+    table: audit
+    options:
+      account: mystorageacct           # -> https://mystorageacct.table.core.windows.net/
+      # endpoint: http://127.0.0.1:10002/devstoreaccount1   # e.g. Azurite
+```
+
+```bash
+# in the REPL — one table, or every table in the account
+turntable> .use ev azuretables table=events connection_string=UseDevelopmentStorage=true
+turntable> .use db azuretables table=* account=mystorageacct
+```
+
+A `WHERE` predicate is translated to an OData `$filter` where Azure can express
+it (comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`); anything else (`LIKE`,
+`IS NULL`, functions) falls back to in-engine filtering. Local development can
+point `endpoint`/`connection_string` at the [Azurite](https://github.com/Azure/Azurite)
+emulator.
+
 ## Layout
 
 ```
@@ -195,7 +512,7 @@ internal/sql         lexer, parser, AST
 internal/plan        resolution, validation, pushdown
 internal/engine      types, rows, operator pipeline
 internal/connector   Connector interface + Registry
-internal/connector/connectors/{jsonc,csvc,yamlc,excelc,sqlc}
+internal/connector/connectors/{jsonc,csvc,yamlc,excelc,parquetc,sqlc,httpc,linearc,trelloc,azdevopsc,cwlogsc,cwmetricsc,dynamodbc,aztablesc}
 internal/render       output formatters
 internal/config       turntable.yaml loader
 examples/             sample config, data, and run.sh demo script

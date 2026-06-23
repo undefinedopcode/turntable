@@ -329,7 +329,12 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 	// Detect the shorthand by a colon that isn't part of a k=v pair (i.e. no
 	// '=' after the colon in the same token) and a known file connector.
 	first := rest[0]
-	if i := strings.Index(first, ":"); i > 0 && !strings.Contains(first, "=") {
+	if strings.HasPrefix(first, "http://") || strings.HasPrefix(first, "https://") {
+		// A full URL shorthand selects the http connector and keeps the scheme.
+		src.Connector = "http"
+		src.URL = first
+		rest = rest[1:]
+	} else if i := strings.Index(first, ":"); i > 0 && !strings.Contains(first, "=") {
 		src.Connector = first[:i]
 		src.Path = first[i+1:]
 		rest = rest[1:]
@@ -343,35 +348,18 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 			return nil, fmt.Errorf("bad option %q (expected key=value)", kv)
 		}
 		key, val := kv[:eq], kv[eq+1:]
-		switch strings.ToLower(key) {
-		case "path":
-			src.Path = val
-		case "driver":
-			src.Driver = val
-		case "dsn":
-			src.DSN = val
-		case "table":
-			src.Table = val
-		case "sheet":
-			src.Sheet = val
-		case "delimiter":
-			src.Delimiter = val
-		default:
-			if src.Options == nil {
-				src.Options = map[string]any{}
-			}
-			src.Options[key] = val
-		}
+		applySourceField(&src, key, val)
 	}
 
-	// The "sql" connector always needs driver+dsn; everything else needs path.
-
-	// The "sql" connector always needs driver+dsn; everything else needs path.
+	// Validate the minimum each connector family needs: "sql" needs driver+dsn,
+	// file connectors need a path, and URL/API connectors need neither (they
+	// take a url and/or option keys). Connectors do their own deeper validation
+	// at Resolve/Scan time, so unknown connectors are left to self-report.
 	if src.Connector == "sql" {
 		if src.Driver == "" || src.DSN == "" {
 			return nil, fmt.Errorf("sql source needs driver=... and dsn=...")
 		}
-	} else if src.Path == "" {
+	} else if isFileConnector(src.Connector) && src.Path == "" {
 		return nil, fmt.Errorf("%s source needs path=...", src.Connector)
 	}
 	names, err := a.registerSourceExpand(context.Background(), name, src)
@@ -379,6 +367,17 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 		return nil, err
 	}
 	return names, nil
+}
+
+// isFileConnector reports whether a connector locates its data by a local file
+// path (as opposed to a URL or API options). This governs how the .use command
+// interprets the "path" key.
+func isFileConnector(name string) bool {
+	switch name {
+	case "csv", "json", "yaml", "excel", "parquet":
+		return true
+	}
+	return false
 }
 
 // connectorName returns the connector's short prefix for display.
@@ -402,8 +401,20 @@ func (a *App) completions() []string {
 }
 
 func replBanner() string {
-	return "turntable REPL — type .help for commands, .quit to exit\n"
+	return turntableLogo + "  turntable — query anything with SQL\n" +
+		"  type .help for commands, .quit to exit\n"
 }
+
+// turntableLogo is ASCII art shown when the REPL starts: the project name in a
+// blocky figlet-style banner.
+const turntableLogo = `
+   m                           m           #      ""#
+ mm#mm  m   m   m mm  m mm   mm#mm   mmm   #mmm     #     mmm
+   #    #   #   #"  " #"  #    #    "   #  #" "#    #    #"  #
+   #    #   #   #     #   #    #    m"""#  #   #    #    #""""
+   "mm  "mm"#   #     #   #    "mm  "mm"#  ##m#"    "mm  "#mm"
+
+`
 
 func onOff(b bool) string {
 	if b {

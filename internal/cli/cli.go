@@ -12,10 +12,19 @@ import (
 
 	"github.com/april/turntable/internal/config"
 	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/connector/connectors/azdevopsc"
+	"github.com/april/turntable/internal/connector/connectors/aztablesc"
 	"github.com/april/turntable/internal/connector/connectors/csvc"
+	"github.com/april/turntable/internal/connector/connectors/cwlogsc"
+	"github.com/april/turntable/internal/connector/connectors/cwmetricsc"
+	"github.com/april/turntable/internal/connector/connectors/dynamodbc"
 	"github.com/april/turntable/internal/connector/connectors/excelc"
+	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
+	"github.com/april/turntable/internal/connector/connectors/linearc"
+	"github.com/april/turntable/internal/connector/connectors/parquetc"
 	"github.com/april/turntable/internal/connector/connectors/sqlc"
+	"github.com/april/turntable/internal/connector/connectors/trelloc"
 	"github.com/april/turntable/internal/connector/connectors/yamlc"
 	"github.com/april/turntable/internal/engine"
 	"github.com/april/turntable/internal/plan"
@@ -50,6 +59,17 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(yamlc.New())
 	_ = reg.RegisterConnector(excelc.New())
 	_ = reg.RegisterConnector(sqlc.New())
+	httpConn := httpc.New()
+	_ = reg.RegisterConnector(httpConn)
+	_ = reg.RegisterConnectorAs("https", httpConn) // https:// URL refs use the same connector
+	_ = reg.RegisterConnector(linearc.New())
+	_ = reg.RegisterConnector(parquetc.New())
+	_ = reg.RegisterConnector(cwlogsc.New())
+	_ = reg.RegisterConnector(cwmetricsc.New())
+	_ = reg.RegisterConnector(dynamodbc.New())
+	_ = reg.RegisterConnector(aztablesc.New())
+	_ = reg.RegisterConnector(trelloc.New())
+	_ = reg.RegisterConnector(azdevopsc.New())
 	return &App{
 		Out:    os.Stdout,
 		Err:    os.Stderr,
@@ -87,6 +107,43 @@ func (a *App) registerSource(name string, src config.Source) error {
 	return nil
 }
 
+// applySourceField routes one key=value pair onto a config.Source, mapping the
+// well-known keys to typed fields and everything else into Options. "path" is a
+// file path for file connectors but a connector option (e.g. http's JSON
+// pointer) for everyone else, so src.Connector must be set first. Shared by the
+// REPL .use command and the web UI's add-source endpoint.
+func applySourceField(src *config.Source, key, val string) {
+	switch strings.ToLower(key) {
+	case "path":
+		if isFileConnector(src.Connector) {
+			src.Path = val
+			return
+		}
+	case "url":
+		src.URL = val
+		return
+	case "driver":
+		src.Driver = val
+		return
+	case "dsn":
+		src.DSN = val
+		return
+	case "table":
+		src.Table = val
+		return
+	case "sheet":
+		src.Sheet = val
+		return
+	case "delimiter":
+		src.Delimiter = val
+		return
+	}
+	if src.Options == nil {
+		src.Options = map[string]any{}
+	}
+	src.Options[key] = val
+}
+
 // registerSourceExpand does the work of registerSource and returns the logical
 // names that were registered (one for a normal source, many for a wildcard
 // SQL source). Splitting it out makes the expansion result testable.
@@ -101,6 +158,9 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 	}
 	if src.Sheet != "" {
 		opts["sheet"] = src.Sheet
+	}
+	if src.URL != "" {
+		opts["url"] = src.URL
 	}
 	for k, v := range src.Options {
 		opts[k] = v
@@ -140,7 +200,35 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 	if src.Connector == "excel" && src.Sheet == "*" {
 		return a.expandExcelSheets(ctx, name, src.Path, opts)
 	}
-	ds := connector.Dataset{Name: name, Source: src.Path, Options: opts}
+	// DynamoDB / Azure Tables: table names a table; table="*" expands to every
+	// table in the account, each registered under its own name.
+	if src.Connector == "dynamodb" || src.Connector == "azuretables" {
+		if src.Table == "*" {
+			if src.Connector == "dynamodb" {
+				return a.expandDynamoTables(ctx, name, opts)
+			}
+			return a.expandAzureTables(ctx, name, opts)
+		}
+		table := src.Table
+		if table == "" {
+			table = name
+		}
+		opts["table"] = table
+		ds := connector.Dataset{Name: table, Source: table, Options: opts}
+		if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
+			return nil, err
+		}
+		return []string{name}, nil
+	}
+	// File connectors locate data by Path; URL/API connectors (http, linear,
+	// cloudwatch*) locate it by URL or rely purely on options. Source carries
+	// whichever locator is present so the connector can read it from
+	// ds.Source as well as ds.Options.
+	locator := src.Path
+	if locator == "" {
+		locator = src.URL
+	}
+	ds := connector.Dataset{Name: name, Source: locator, Options: opts}
 	if err := a.Reg.RegisterSource(name, conn, ds); err != nil {
 		return nil, err
 	}
@@ -172,6 +260,57 @@ func (a *App) expandExcelSheets(ctx context.Context, name, path string, opts map
 	}
 	if len(registered) == 0 {
 		return nil, fmt.Errorf("source %q: workbook has no sheets", name)
+	}
+	return registered, nil
+}
+
+// expandDynamoTables enumerates the tables in a DynamoDB account and registers
+// each one under its own table name (prefixed with the source name on
+// collision), mirroring expandSQLTables.
+func (a *App) expandDynamoTables(ctx context.Context, name string, opts map[string]any) ([]string, error) {
+	dc := dynamodbc.New()
+	datasets, err := dc.DatasetsFor(ctx, connector.Dataset{Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, dynamodbc.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: account has no DynamoDB tables", name)
+	}
+	return registered, nil
+}
+
+// expandAzureTables enumerates the tables in an Azure Storage account and
+// registers each one under its own table name (prefixed with the source name on
+// collision), mirroring expandDynamoTables.
+func (a *App) expandAzureTables(ctx context.Context, name string, opts map[string]any) ([]string, error) {
+	datasets, err := aztablesc.New().DatasetsFor(ctx, connector.Dataset{Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, aztablesc.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: account has no tables", name)
 	}
 	return registered, nil
 }
@@ -217,6 +356,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		quiet      bool
 		maxRows    int
 		strict     bool
+		serve      bool
+		addr       string
 	)
 	fs.StringVar(&configPath, "config", "", "path to turntable.yaml")
 	fs.StringVar(&configPath, "c", "", "short for --config")
@@ -228,6 +369,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs.BoolVar(&quiet, "quiet", false, "suppress metadata")
 	fs.IntVar(&maxRows, "max-rows", 0, "cap rows rendered (0 = unlimited)")
 	fs.BoolVar(&strict, "strict", false, "hard errors for type coercion failures")
+	fs.BoolVar(&serve, "serve", false, "serve the web query UI instead of running a query")
+	fs.StringVar(&addr, "addr", "localhost:8080", "address for --serve (host:port)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -247,6 +390,10 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	a.registerSources(cfg)
 	if cfg.Defaults.Output != "" && output == "" {
 		a.Output = render.Format(cfg.Defaults.Output)
+	}
+
+	if serve {
+		return a.serve(ctx, addr)
 	}
 
 	if repl {
@@ -289,7 +436,7 @@ func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet boo
 		fmt.Fprintf(errw, "parse error: %v\n", err)
 		return 1
 	}
-	p, err := plan.Build(ctx, stmt.(*sql.SelectStmt), a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		fmt.Fprintf(errw, "plan error: %v\n", err)
 		return 1
@@ -374,9 +521,32 @@ func formatPlan(n plan.Node, depth int) string {
 	indent := strings.Repeat("  ", depth)
 	switch node := n.(type) {
 	case *plan.Scan:
-		return indent + "Scan " + node.Source.Name
+		line := indent + "Scan " + node.Source.Name
+		var pd []string
+		if node.Predicate != nil {
+			pd = append(pd, "predicate")
+		}
+		if node.Limit != nil {
+			pd = append(pd, fmt.Sprintf("limit=%d", *node.Limit))
+		}
+		if len(pd) > 0 {
+			line += " [pushdown: " + strings.Join(pd, ", ") + "]"
+		}
+		return line
 	case *plan.NoFrom:
 		return indent + "NoFrom"
+	case *plan.Subquery:
+		return indent + "Subquery " + node.Alias + "\n" + formatPlan(node.Child, depth+1)
+	case *plan.Union:
+		kind := "Union"
+		if !node.Distinct {
+			kind = "Union all"
+		}
+		s := indent + kind
+		for _, b := range node.Branches {
+			s += "\n" + formatPlan(b, depth+1)
+		}
+		return s
 	case *plan.Filter:
 		return indent + "Filter\n" + formatPlan(node.Child, depth+1)
 	case *plan.Project:

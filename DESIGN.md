@@ -439,9 +439,13 @@ defaults:
   `CURRENT_DATE`.
 
 **v0.4+ — Ecosystem**
-- CloudWatch logs/metrics, Prometheus, HTTP connectors.
+- CloudWatch logs/metrics, Prometheus, HTTP connectors. *(CloudWatch, HTTP,
+  Linear, Trello, Azure DevOps, DynamoDB, Azure Tables connectors landed.)*
+- FROM-clause subqueries (derived tables), `UNION`/`UNION ALL`, and
+  non-correlated `IN (SELECT ...)` subqueries. *(Done.)*
 - Public `pkg/` connector API + out-of-tree plugin story.
-- Right/full outer joins, window functions, CTEs.
+- Right/full outer joins, window functions, CTEs; scalar/`EXISTS` and correlated
+  subqueries; `INTERSECT`/`EXCEPT`.
 - Query/result caching; view definitions in config.
 
 ---
