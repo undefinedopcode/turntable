@@ -20,6 +20,7 @@ const (
 	TKFloat
 	TKString
 	TKOperator // = <> < <= > >= + - * / ( ) , .
+	TKURL      // a connector-qualified URL ref, e.g. http://host/path?q=1
 )
 
 // Token is a single lexed token.
@@ -39,7 +40,7 @@ var keywords = map[string]bool{
 	"THEN": true, "ELSE": true, "END": true, "CAST": true, "AS": true,
 	"DISTINCT": true, "COUNT": true, "SUM": true, "AVG": true, "MIN": true,
 	"MAX": true, "TRUE": true, "FALSE": true, "INTERVAL": true,
-	"EXTRACT": true, "POSITION": true,
+	"EXTRACT": true, "POSITION": true, "UNION": true,
 }
 
 // Lex tokenizes src into a slice of Tokens, including a trailing TKEOF.
@@ -111,6 +112,18 @@ func Lex(src string) ([]Token, error) {
 			for i < n && isIdentPart(src[i]) {
 				i++
 			}
+			// URL ref: an identifier immediately followed by "://" is a
+			// connector-qualified URL (e.g. http://host/path?a=1). The scheme is
+			// the connector prefix; the whole thing is one token, ending at the
+			// next whitespace or SQL boundary so query strings stay intact.
+			if i+2 < n && src[i] == ':' && src[i+1] == '/' && src[i+2] == '/' {
+				i += 3
+				for i < n && !isURLTerminator(src[i]) {
+					i++
+				}
+				toks = append(toks, Token{Kind: TKURL, Value: src[start:i], Pos: start})
+				continue
+			}
 			word := src[start:i]
 			upper := strings.ToUpper(word)
 			if keywords[upper] {
@@ -149,4 +162,15 @@ func isIdentStart(c byte) bool {
 
 func isIdentPart(c byte) bool {
 	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+// isURLTerminator reports whether c ends a URL token. A URL runs until
+// whitespace or a SQL-structural delimiter; characters common in query strings
+// (?, &, =, %, #, @, etc.) are kept as part of the URL.
+func isURLTerminator(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', ',', ')', ';', '\'', '"':
+		return true
+	}
+	return false
 }

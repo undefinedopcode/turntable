@@ -184,3 +184,211 @@ func TestParsePosition(t *testing.T) {
 		t.Fatalf("expected PositionExpr, got %T", s.Items.Items[0].Expr)
 	}
 }
+
+func TestParseTrailingSemicolon(t *testing.T) {
+	ok := []string{
+		"SELECT 1;",
+		"SELECT 1 ;",
+		"SELECT region FROM t WHERE x = 1 LIMIT 5;",
+		"SELECT 1;;",        // multiple trailing semicolons
+		"SELECT 1;\n",       // trailing newline after the semicolon
+		"SELECT * FROM http://h/data.json;", // trailing ';' after a URL ref
+	}
+	for _, q := range ok {
+		if _, err := Parse(q); err != nil {
+			t.Errorf("Parse(%q) errored: %v", q, err)
+		}
+	}
+
+	// A semicolon inside a string literal is preserved (not a terminator).
+	stmt, err := Parse("SELECT ';' AS s")
+	if err != nil {
+		t.Fatalf("Parse string-with-semicolon: %v", err)
+	}
+	lit, ok2 := stmt.(*SelectStmt).Items.Items[0].Expr.(*LitString)
+	if !ok2 || lit.V != ";" {
+		t.Errorf("string literal = %+v, want ';'", stmt.(*SelectStmt).Items.Items[0].Expr)
+	}
+
+	// A mid-query semicolon still errors — the dialect is single-statement.
+	if _, err := Parse("SELECT 1; SELECT 2"); err == nil {
+		t.Error("expected error for a mid-query semicolon (multi-statement)")
+	}
+}
+
+func TestParseSubqueryFrom(t *testing.T) {
+	stmt, err := Parse("SELECT x.a FROM (SELECT a FROM t WHERE a > 1) AS x")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if s.From.Subquery == nil {
+		t.Fatal("expected From.Subquery to be set")
+	}
+	if s.From.Alias != "x" {
+		t.Errorf("alias = %q, want x", s.From.Alias)
+	}
+	if s.From.Subquery.From.Name != "t" {
+		t.Errorf("inner from = %q, want t", s.From.Subquery.From.Name)
+	}
+}
+
+func TestParseInSubquery(t *testing.T) {
+	stmt, err := Parse("SELECT name FROM t WHERE id IN (SELECT uid FROM o)")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	in, ok := stmt.(*SelectStmt).Where.(*InExpr)
+	if !ok {
+		t.Fatalf("expected *InExpr, got %T", stmt.(*SelectStmt).Where)
+	}
+	if in.Subquery == nil {
+		t.Fatal("expected InExpr.Subquery to be set")
+	}
+	if len(in.List) != 0 {
+		t.Errorf("List should be empty for a subquery IN, got %d", len(in.List))
+	}
+	if in.Subquery.From.Name != "o" {
+		t.Errorf("subquery from = %q, want o", in.Subquery.From.Name)
+	}
+}
+
+func TestParseInValueListStillWorks(t *testing.T) {
+	stmt, err := Parse("SELECT name FROM t WHERE id IN (1, 2, 3)")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	in := stmt.(*SelectStmt).Where.(*InExpr)
+	if in.Subquery != nil {
+		t.Error("value-list IN should not set Subquery")
+	}
+	if len(in.List) != 3 {
+		t.Errorf("List len = %d, want 3", len(in.List))
+	}
+}
+
+func TestParseNotInSubquery(t *testing.T) {
+	stmt, err := Parse("SELECT name FROM t WHERE id NOT IN (SELECT uid FROM o)")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	in := stmt.(*SelectStmt).Where.(*InExpr)
+	if !in.Negate || in.Subquery == nil {
+		t.Errorf("expected negated subquery IN, got Negate=%v Subquery=%v", in.Negate, in.Subquery)
+	}
+}
+
+func TestParseUnion(t *testing.T) {
+	stmt, err := Parse("SELECT a FROM t UNION SELECT a FROM u")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	set, ok := stmt.(*SetOpStmt)
+	if !ok {
+		t.Fatalf("expected *SetOpStmt, got %T", stmt)
+	}
+	if len(set.Selects) != 2 {
+		t.Fatalf("branches = %d, want 2", len(set.Selects))
+	}
+	if len(set.All) != 1 || set.All[0] {
+		t.Errorf("All = %v, want [false]", set.All)
+	}
+}
+
+func TestParseUnionAllAndChain(t *testing.T) {
+	stmt, err := Parse("SELECT a FROM t UNION ALL SELECT a FROM u UNION SELECT a FROM v")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	set := stmt.(*SetOpStmt)
+	if len(set.Selects) != 3 {
+		t.Fatalf("branches = %d, want 3", len(set.Selects))
+	}
+	if !set.All[0] || set.All[1] {
+		t.Errorf("All = %v, want [true false]", set.All)
+	}
+}
+
+func TestParseUnionTrailingOrderByLifted(t *testing.T) {
+	stmt, err := Parse("SELECT a FROM t UNION SELECT a FROM u ORDER BY a DESC LIMIT 5")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	set := stmt.(*SetOpStmt)
+	// ORDER BY / LIMIT belong to the union, not the last branch.
+	if len(set.OrderBy) != 1 || !set.OrderBy[0].Desc {
+		t.Errorf("set.OrderBy = %+v, want one DESC term", set.OrderBy)
+	}
+	if set.Limit == nil || *set.Limit != 5 {
+		t.Errorf("set.Limit = %v, want 5", set.Limit)
+	}
+	last := set.Selects[1]
+	if len(last.OrderBy) != 0 || last.Limit != nil {
+		t.Errorf("last branch should have no ORDER BY/LIMIT, got order=%v limit=%v", last.OrderBy, last.Limit)
+	}
+}
+
+func TestParseURLRef(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM http://example.com/users.json")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if s.From.Prefix != "http" {
+		t.Errorf("prefix = %q, want http", s.From.Prefix)
+	}
+	if s.From.Source != "http://example.com/users.json" {
+		t.Errorf("source = %q", s.From.Source)
+	}
+}
+
+func TestParseURLRefHTTPSWithAliasAndWhere(t *testing.T) {
+	stmt, err := Parse("SELECT name FROM https://api.test/v1/items?active=true AS feed WHERE name LIKE 'a%'")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if s.From.Prefix != "https" {
+		t.Errorf("prefix = %q, want https", s.From.Prefix)
+	}
+	if s.From.Source != "https://api.test/v1/items?active=true" {
+		t.Errorf("source = %q", s.From.Source)
+	}
+	if s.From.Alias != "feed" {
+		t.Errorf("alias = %q, want feed", s.From.Alias)
+	}
+	if s.Where == nil {
+		t.Error("where clause lost after URL ref")
+	}
+}
+
+func TestParseURLRefInJoin(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM users u JOIN http://h/orders.json o ON o.uid = u.id")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if len(s.Joins) != 1 {
+		t.Fatalf("joins = %d, want 1", len(s.Joins))
+	}
+	if s.Joins[0].Ref.Prefix != "http" || s.Joins[0].Ref.Source != "http://h/orders.json" {
+		t.Errorf("join ref = %+v", s.Joins[0].Ref)
+	}
+	if s.Joins[0].Ref.Alias != "o" {
+		t.Errorf("join alias = %q, want o", s.Joins[0].Ref.Alias)
+	}
+}
+
+func TestParsePrefixedDSNRef(t *testing.T) {
+	stmt, err := Parse("SELECT * FROM sql:postgres://user@host:5432/db")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if s.From.Prefix != "sql" {
+		t.Errorf("prefix = %q, want sql", s.From.Prefix)
+	}
+	if s.From.Source != "postgres://user@host:5432/db" {
+		t.Errorf("source = %q", s.From.Source)
+	}
+}

@@ -630,6 +630,54 @@ func (d *DistinctIter) Close() error {
 	return d.child.Close()
 }
 
+// ---- Concat -----------------------------------------------------------------
+
+// ConcatIter yields all rows from each child in order (UNION ALL's plumbing).
+// Children must share a column layout; the caller validates that. Each child is
+// closed as it is exhausted.
+type ConcatIter struct {
+	children []RowIterator
+	idx      int
+	closed   bool
+}
+
+// NewConcatIter returns an iterator that concatenates the children in order.
+func NewConcatIter(children []RowIterator) *ConcatIter {
+	return &ConcatIter{children: children}
+}
+
+func (c *ConcatIter) Next() (Row, bool, error) {
+	for c.idx < len(c.children) {
+		r, ok, err := c.children[c.idx].Next()
+		if err != nil {
+			return Row{}, false, err
+		}
+		if ok {
+			return r, true, nil
+		}
+		// Exhausted: close this child and move to the next.
+		c.children[c.idx].Close()
+		c.idx++
+	}
+	return Row{}, false, nil
+}
+
+func (c *ConcatIter) Close() error {
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	// Children before idx were already closed as they were exhausted; close any
+	// remaining (including a partially-consumed current child after early stop).
+	var firstErr error
+	for i := c.idx; i < len(c.children); i++ {
+		if err := c.children[i].Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func rowKey(r Row) string {
 	var b strings.Builder
 	for _, v := range r.Values {

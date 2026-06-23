@@ -22,6 +22,20 @@ type SelectStmt struct {
 
 func (*SelectStmt) stmtNode() {}
 
+// SetOpStmt is a UNION of two or more SELECT branches. All[i] reports whether
+// the i-th UNION (joining Selects[i] to Selects[i+1]) is UNION ALL, so len(All)
+// == len(Selects)-1. OrderBy/Limit/Offset apply to the combined result (they
+// are lifted from the final branch during parsing, where SQL places them).
+type SetOpStmt struct {
+	Selects []*SelectStmt
+	All     []bool
+	OrderBy []OrderTerm
+	Limit   *int
+	Offset  *int
+}
+
+func (*SetOpStmt) stmtNode() {}
+
 // SelectList is the projection list.
 type SelectList struct {
 	Items []SelectItem
@@ -107,9 +121,10 @@ func (*UnaryOp) exprNode()  {}
 
 // Predicates
 type InExpr struct {
-	Expr   Expr
-	List   []Expr
-	Negate bool
+	Expr     Expr
+	List     []Expr      // value list; mutually exclusive with Subquery
+	Subquery *SelectStmt // x IN (SELECT ...); non-correlated, single column
+	Negate   bool
 }
 
 type BetweenExpr struct {

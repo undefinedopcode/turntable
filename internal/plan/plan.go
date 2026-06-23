@@ -30,15 +30,41 @@ type Plan struct {
 type Node interface{ planNode() }
 
 // Scan reads rows from a connector dataset.
+//
+// Predicate and Limit are pushdown hints handed to the connector via the
+// ScanRequest. They are an optimization only: the engine still applies its own
+// Filter/Limit above the Scan, so a connector that ignores or partially honors
+// them stays correct. They are set only for single-table scans (no joins) where
+// pushing is safe — see buildSelect.
 type Scan struct {
-	Source   connector.Source
-	Schema   engine.Schema
-	Alias    string
+	Source    connector.Source
+	Schema    engine.Schema
+	Alias     string
+	Predicate sql.Expr // WHERE predicate to offer the connector (may be nil)
+	Limit     *int     // row limit to offer the connector (may be nil)
 }
 
 // NoFrom is a synthetic single-row, zero-column relation for "SELECT <expr>"
 // queries that have no FROM clause (e.g. scratch math in the REPL).
 type NoFrom struct{}
+
+// Subquery is a derived table: a FROM-clause subquery whose child plan produces
+// the rows, presented under an alias. It passes the child's rows through
+// unchanged; the alias lets the outer query qualify the subquery's columns.
+type Subquery struct {
+	Child  Node
+	Schema engine.Schema
+	Alias  string
+}
+
+// Union concatenates the rows of its branches (which must share a column count).
+// Distinct is true for UNION (dedupe the combined result) and false for
+// UNION ALL. Any final ORDER BY/LIMIT is layered above as Sort/Limit nodes.
+type Union struct {
+	Branches []Node
+	Schema   engine.Schema
+	Distinct bool
+}
 
 // Filter applies a residual predicate.
 type Filter struct {
@@ -86,14 +112,16 @@ type Limit struct {
 	Offset *int
 }
 
-func (*Scan) planNode()     {}
-func (*Filter) planNode()   {}
-func (*Project) planNode()  {}
-func (*Join) planNode()     {}
+func (*Scan) planNode()      {}
+func (*Subquery) planNode()  {}
+func (*Union) planNode()     {}
+func (*Filter) planNode()    {}
+func (*Project) planNode()   {}
+func (*Join) planNode()      {}
 func (*Aggregate) planNode() {}
-func (*Sort) planNode()     {}
-func (*Limit) planNode()    {}
-func (*NoFrom) planNode()   {}
+func (*Sort) planNode()      {}
+func (*Limit) planNode()     {}
+func (*NoFrom) planNode()    {}
 
 // buildCtx carries planner state down the tree.
 type buildCtx struct {
@@ -102,14 +130,27 @@ type buildCtx struct {
 	funcs *engine.FuncRegistry
 }
 
-// Build resolves and validates a parsed SELECT into a Plan against the given
-// Registry. Options adjust planning behavior (e.g. strict mode).
-func Build(ctx context.Context, stmt *sql.SelectStmt, reg *connector.Registry, opts ...BuildOption) (*Plan, error) {
+// Build resolves and validates a parsed statement (a SELECT or a UNION of
+// SELECTs) into a Plan against the given Registry. Options adjust planning
+// behavior (e.g. strict mode).
+func Build(ctx context.Context, stmt sql.Statement, reg *connector.Registry, opts ...BuildOption) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("nil statement")
 	}
 	bc := &buildCtx{ctx: ctx, reg: reg, funcs: engine.NewFuncRegistry()}
-	root, schema, err := bc.buildSelect(stmt)
+	var (
+		root   Node
+		schema engine.Schema
+		err    error
+	)
+	switch s := stmt.(type) {
+	case *sql.SelectStmt:
+		root, schema, err = bc.buildSelect(s)
+	case *sql.SetOpStmt:
+		root, schema, err = bc.buildSetOp(s)
+	default:
+		return nil, fmt.Errorf("unsupported statement %T", stmt)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +159,48 @@ func Build(ctx context.Context, stmt *sql.SelectStmt, reg *connector.Registry, o
 		o(p)
 	}
 	return p, nil
+}
+
+// buildSetOp builds the plan for a UNION of SELECT branches. Branches must agree
+// on column count; the first branch's output schema names the result. The union
+// dedupes (UNION) unless every branch is joined with UNION ALL. A trailing
+// ORDER BY/LIMIT is layered above the union.
+func (bc *buildCtx) buildSetOp(s *sql.SetOpStmt) (Node, engine.Schema, error) {
+	if len(s.Selects) == 0 {
+		return nil, engine.Schema{}, fmt.Errorf("empty set operation")
+	}
+	branches := make([]Node, len(s.Selects))
+	var outSchema engine.Schema
+	for i, sel := range s.Selects {
+		n, sch, err := bc.buildSelect(sel)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		if i == 0 {
+			outSchema = sch
+		} else if len(sch.Columns) != len(outSchema.Columns) {
+			return nil, engine.Schema{}, fmt.Errorf(
+				"each UNION branch must have the same number of columns (%d vs %d)",
+				len(outSchema.Columns), len(sch.Columns))
+		}
+		branches[i] = n
+	}
+	// UNION dedupes; only stays UNION ALL if every connector is ALL.
+	distinct := false
+	for _, all := range s.All {
+		if !all {
+			distinct = true
+			break
+		}
+	}
+	var root Node = &Union{Branches: branches, Schema: outSchema, Distinct: distinct}
+	if len(s.OrderBy) > 0 {
+		root = &Sort{Child: root, Terms: s.OrderBy}
+	}
+	if s.Limit != nil || s.Offset != nil {
+		root = &Limit{Child: root, Limit: s.Limit, Offset: s.Offset}
+	}
+	return root, outSchema, nil
 }
 
 // BuildOption configures a Plan during Build.
@@ -137,6 +220,145 @@ func IfStrict(enabled bool) []BuildOption {
 	return nil
 }
 
+// resolveInSubqueries walks an expression and folds every non-correlated
+// `x IN (SELECT ...)` into a literal value list by executing the subquery once.
+// It mutates InExpr nodes in place; other shapes are traversed so nested INs are
+// handled. A nil expression is a no-op.
+func (bc *buildCtx) resolveInSubqueries(e sql.Expr) error {
+	switch ex := e.(type) {
+	case nil:
+		return nil
+	case *sql.BinaryOp:
+		if err := bc.resolveInSubqueries(ex.Left); err != nil {
+			return err
+		}
+		return bc.resolveInSubqueries(ex.Right)
+	case *sql.UnaryOp:
+		return bc.resolveInSubqueries(ex.Expr)
+	case *sql.InExpr:
+		if err := bc.resolveInSubqueries(ex.Expr); err != nil {
+			return err
+		}
+		for _, it := range ex.List {
+			if err := bc.resolveInSubqueries(it); err != nil {
+				return err
+			}
+		}
+		if ex.Subquery != nil {
+			list, err := bc.evalSubqueryColumn(ex.Subquery)
+			if err != nil {
+				return err
+			}
+			ex.List = list
+			ex.Subquery = nil
+		}
+		return nil
+	case *sql.BetweenExpr:
+		if err := bc.resolveInSubqueries(ex.Expr); err != nil {
+			return err
+		}
+		if err := bc.resolveInSubqueries(ex.Low); err != nil {
+			return err
+		}
+		return bc.resolveInSubqueries(ex.High)
+	case *sql.LikeExpr:
+		if err := bc.resolveInSubqueries(ex.Expr); err != nil {
+			return err
+		}
+		return bc.resolveInSubqueries(ex.Pat)
+	case *sql.IsNullExpr:
+		return bc.resolveInSubqueries(ex.Expr)
+	case *sql.FuncCall:
+		for _, a := range ex.Args {
+			if err := bc.resolveInSubqueries(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *sql.CaseExpr:
+		for _, w := range ex.Whens {
+			if err := bc.resolveInSubqueries(w.Cond); err != nil {
+				return err
+			}
+			if err := bc.resolveInSubqueries(w.Then); err != nil {
+				return err
+			}
+		}
+		return bc.resolveInSubqueries(ex.Else)
+	case *sql.CastExpr:
+		return bc.resolveInSubqueries(ex.Expr)
+	case *sql.ExtractExpr:
+		return bc.resolveInSubqueries(ex.Source)
+	}
+	return nil
+}
+
+// evalSubqueryColumn executes an IN subquery and returns its single column's
+// distinct values as literal expressions. The subquery must be non-correlated
+// (it is planned and run independently) and produce exactly one column of a
+// scalar type.
+func (bc *buildCtx) evalSubqueryColumn(sub *sql.SelectStmt) ([]sql.Expr, error) {
+	root, schema, err := bc.buildSelect(sub)
+	if err != nil {
+		return nil, fmt.Errorf("IN subquery: %w", err)
+	}
+	if len(schema.Columns) != 1 {
+		return nil, fmt.Errorf("subquery in IN must return exactly one column, got %d", len(schema.Columns))
+	}
+	it, _, err := Exec(bc.ctx, &Plan{Root: root, OutputSchema: schema, Funcs: bc.funcs})
+	if err != nil {
+		return nil, fmt.Errorf("IN subquery: %w", err)
+	}
+	rows, err := engine.Materialize(bc.ctx, it)
+	if err != nil {
+		return nil, fmt.Errorf("IN subquery: %w", err)
+	}
+	list := make([]sql.Expr, 0, len(rows))
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if len(r.Values) == 0 {
+			continue
+		}
+		v := r.Values[0]
+		if v.IsNull() {
+			continue // a NULL adds no matchable value to an IN list
+		}
+		// Dedup by string form; all values share one column type, so this is safe.
+		key := v.AsString()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		lit, err := valueToLiteral(v)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, lit)
+	}
+	return list, nil
+}
+
+// valueToLiteral converts a scalar engine value into the matching literal AST
+// node. Non-scalar types (time, structured) are rejected rather than silently
+// coerced, which would drop or mis-match rows.
+func valueToLiteral(v engine.Value) (sql.Expr, error) {
+	switch v.Type {
+	case engine.TypeInt:
+		n, _ := v.AsInt()
+		return &sql.LitInt{V: n}, nil
+	case engine.TypeFloat:
+		f, _ := v.AsFloat()
+		return &sql.LitFloat{V: f}, nil
+	case engine.TypeString:
+		return &sql.LitString{V: v.AsString()}, nil
+	case engine.TypeBool:
+		b, _ := v.AsBool()
+		return &sql.LitBool{V: b}, nil
+	default:
+		return nil, fmt.Errorf("IN subquery: unsupported value type %s (supported: int, float, string, bool)", v.Type)
+	}
+}
+
 // buildSelect builds the plan for a SELECT, returning the root node and the
 // output schema (after projection).
 func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, error) {
@@ -146,13 +368,19 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		return nil, engine.Schema{}, err
 	}
 
-	// 2. WHERE -> Filter (engine-applied; no pushdown for file connectors in v0.1).
-	if stmt.Where != nil {
-		base = &Filter{Child: base, Predicate: stmt.Where}
+	// Fold any `x IN (SELECT ...)` in WHERE/HAVING into a literal value list by
+	// executing the (non-correlated) subquery once. Doing this before pushdown
+	// and Filter construction means the resolved IN list can also be pushed to a
+	// capable connector. The engine sees an ordinary IN-list predicate.
+	if err := bc.resolveInSubqueries(stmt.Where); err != nil {
+		return nil, engine.Schema{}, err
+	}
+	if err := bc.resolveInSubqueries(stmt.Having); err != nil {
+		return nil, engine.Schema{}, err
 	}
 
-	// 3. Determine if this is an aggregate query (GROUP BY present, or any
-	//    aggregate function in the select list).
+	// Determine if this is an aggregate query (GROUP BY present, or any
+	// aggregate function in the select list). Needed for pushdown gating below.
 	hasAgg := len(stmt.GroupBy) > 0
 	if !hasAgg {
 		for _, it := range stmt.Items.Items {
@@ -161,6 +389,27 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 				break
 			}
 		}
+	}
+
+	// 2. Pushdown hints: for a single-table scan (no joins) hand the WHERE
+	//    predicate, and a safe LIMIT, to the connector. This is an optimization
+	//    only — the engine's Filter/Limit below still run, so a connector that
+	//    ignores or partially honors the request stays correct; capable
+	//    connectors (sql databases, Azure Tables) just fetch fewer rows.
+	if scan, ok := base.(*Scan); ok {
+		scan.Predicate = stmt.Where
+		// A LIMIT can only be pushed when nothing between the scan and the
+		// engine's Limit changes the row count or order: no ORDER BY (needs all
+		// rows to sort), no aggregation (needs all rows to group), no OFFSET.
+		if stmt.Limit != nil && stmt.Offset == nil && len(stmt.OrderBy) == 0 && !hasAgg {
+			scan.Limit = stmt.Limit
+		}
+	}
+
+	// 3. WHERE -> Filter (always applied by the engine; pushdown above is a
+	//    superset optimization, so re-filtering here keeps results correct).
+	if stmt.Where != nil {
+		base = &Filter{Child: base, Predicate: stmt.Where}
 	}
 
 	var projectBase Node
@@ -248,7 +497,15 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 // buildTableRef resolves a single FROM/JOIN table reference into a Scan node.
 func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string, error) {
 	if tr.Subquery != nil {
-		return nil, engine.Schema{}, "", fmt.Errorf("subqueries not yet supported")
+		alias := tr.Alias
+		if alias == "" {
+			return nil, engine.Schema{}, "", fmt.Errorf("subquery in FROM must have an alias")
+		}
+		child, schema, err := bc.buildSelect(tr.Subquery)
+		if err != nil {
+			return nil, engine.Schema{}, "", fmt.Errorf("subquery %q: %w", alias, err)
+		}
+		return &Subquery{Child: child, Schema: schema, Alias: alias}, schema, alias, nil
 	}
 	src, err := resolveTableRef(bc.ctx, tr, bc.reg)
 	if err != nil {
@@ -358,7 +615,12 @@ func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAliases
 func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, engine.Schema, error) {
 	var keys []sql.Expr
 	var aggs []engine.AggSpec
-	var outCols []engine.Column
+	// The AggregateIter emits each row as [group keys..., aggregates...], so the
+	// output schema must follow that layout — NOT the SELECT-list order — or the
+	// final projection (which references these columns by name) reads the wrong
+	// positions when a group key follows an aggregate in the SELECT list. The
+	// projection restores SELECT-list order.
+	var keyCols, aggCols []engine.Column
 
 	for _, it := range stmt.Items.Items {
 		if it.Star {
@@ -375,7 +637,7 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 				name = inferExprName(it.Expr)
 			}
 			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name})
-			outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+			aggCols = append(aggCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 			continue
 		}
 		name := it.As
@@ -383,9 +645,9 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 			name = inferExprName(it.Expr)
 		}
 		keys = append(keys, it.Expr)
-		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+		keyCols = append(keyCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
-	aggSchema := engine.Schema{Columns: outCols}
+	aggSchema := engine.Schema{Columns: append(keyCols, aggCols...)}
 	node := &Aggregate{
 		Child: base, Keys: keys, Aggs: aggs, Having: stmt.Having, Schema: aggSchema,
 	}

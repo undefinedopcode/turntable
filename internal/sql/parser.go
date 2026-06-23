@@ -19,6 +19,12 @@ func NewParser(toks []Token) *Parser { return &Parser{toks: toks} }
 
 // Parse lexes and parses src into a Statement.
 func Parse(src string) (Statement, error) {
+	// Accept an optional trailing semicolon (and trailing whitespace), the way
+	// every SQL tool does. The lexer doesn't treat ';' as a token, so a bare
+	// trailing ';' would otherwise be an "unexpected character". A ';' anywhere
+	// but the end still errors — the dialect is single-statement. A ';' inside a
+	// string literal is unaffected (the value ends in a quote, not ';').
+	src = strings.TrimRight(src, " \t\r\n;")
 	toks, err := Lex(src)
 	if err != nil {
 		return nil, err
@@ -69,7 +75,43 @@ func (p *Parser) ParseStatement() (Statement, error) {
 	if !p.kw("SELECT") {
 		return nil, p.errf("expected SELECT")
 	}
-	return p.parseSelect()
+	first, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	if !p.kw("UNION") {
+		return first, nil
+	}
+
+	// One or more UNION [ALL] branches follow. "ALL" is matched contextually
+	// (it is not a reserved word) so columns named "all" still work elsewhere.
+	set := &SetOpStmt{Selects: []*SelectStmt{first}}
+	for p.kw("UNION") {
+		p.advance()
+		all := false
+		if p.cur().Kind == TKIdent && strings.EqualFold(p.cur().Value, "all") {
+			all = true
+			p.advance()
+		}
+		if !p.kw("SELECT") {
+			return nil, p.errf("expected SELECT after UNION")
+		}
+		next, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		set.All = append(set.All, all)
+		set.Selects = append(set.Selects, next)
+	}
+
+	// A trailing ORDER BY / LIMIT / OFFSET written after the last branch applies
+	// to the whole union in SQL, but parseSelect attached it to that branch —
+	// lift it to the set operation.
+	last := set.Selects[len(set.Selects)-1]
+	set.OrderBy, last.OrderBy = last.OrderBy, nil
+	set.Limit, last.Limit = last.Limit, nil
+	set.Offset, last.Offset = last.Offset, nil
+	return set, nil
 }
 
 func (p *Parser) parseSelect() (*SelectStmt, error) {
@@ -236,6 +278,11 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 			return tr, err
 		}
 		tr.Subquery = sub
+	} else if t.Kind == TKURL {
+		// Inline URL ref (e.g. http://host/data.json): the scheme is the
+		// connector prefix and the full URL is the source.
+		tr.Prefix = urlScheme(t.Value)
+		tr.Source = t.Value
 	} else if t.Kind == TKIdent || t.Kind == TKKeyword {
 		// qualified "prefix:source" or bare name
 		name := t.Value
@@ -272,6 +319,11 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 // single ident/path token; richer path parsing is added with the file
 // connectors.
 func (p *Parser) parseSourceString() (string, error) {
+	// A prefixed URL DSN (e.g. sql:postgres://host/db) lexes as a single URL
+	// token after the colon; take it whole.
+	if p.cur().Kind == TKURL {
+		return p.advance().Value, nil
+	}
 	// collect a path-like token: idents, dots, slashes, digits
 	var b strings.Builder
 	for {
@@ -290,6 +342,15 @@ func (p *Parser) parseSourceString() (string, error) {
 		return "", p.errf("expected source after ':'")
 	}
 	return b.String(), nil
+}
+
+// urlScheme returns the scheme portion of a URL ref (the text before "://"),
+// used as the connector prefix. It returns the whole string if "://" is absent.
+func urlScheme(url string) string {
+	if i := strings.Index(url, "://"); i >= 0 {
+		return url[:i]
+	}
+	return url
 }
 
 func (p *Parser) parseJoin() (Join, error) {
@@ -420,6 +481,17 @@ func (p *Parser) parseCompare() (Expr, error) {
 		p.advance()
 		if err := p.expectOp("("); err != nil {
 			return nil, err
+		}
+		// IN (SELECT ...) — a subquery; otherwise a parenthesized value list.
+		if p.kw("SELECT") {
+			sub, err := p.parseSelect()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectOp(")"); err != nil {
+				return nil, err
+			}
+			return &InExpr{Expr: left, Subquery: sub, Negate: neg}, nil
 		}
 		var list []Expr
 		for {

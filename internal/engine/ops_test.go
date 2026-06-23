@@ -30,6 +30,36 @@ func TestFilterIter(t *testing.T) {
 	}
 }
 
+func TestConcatIter(t *testing.T) {
+	a := NewSliceIter([]Row{{Values: []Value{IntVal(1)}}, {Values: []Value{IntVal(2)}}})
+	b := NewSliceIter([]Row{{Values: []Value{IntVal(3)}}})
+	empty := NewSliceIter(nil)
+	it := NewConcatIter([]RowIterator{a, empty, b})
+	got, err := Materialize(context.Background(), it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d rows, want 3", len(got))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if v := got[i].Values[0]; v != IntVal(want) {
+			t.Errorf("row %d = %v, want %d", i, v, want)
+		}
+	}
+}
+
+func TestConcatIterEmpty(t *testing.T) {
+	it := NewConcatIter(nil)
+	got, err := Materialize(context.Background(), it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d rows, want 0", len(got))
+	}
+}
+
 func TestSortIter(t *testing.T) {
 	schema := Schema{Columns: []Column{{Name: "n", Type: TypeInt}}}
 	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}

@@ -26,6 +26,32 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 	case *Scan:
 		return execScan(ctx, node)
 
+	case *Subquery:
+		// Run the child plan; its rows pass through under the subquery alias.
+		child, _, err := execNode(ctx, node.Child, funcs, strict)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		return child, node.Schema, nil
+
+	case *Union:
+		its := make([]engine.RowIterator, 0, len(node.Branches))
+		for _, b := range node.Branches {
+			it, _, err := execNode(ctx, b, funcs, strict)
+			if err != nil {
+				for _, opened := range its {
+					opened.Close()
+				}
+				return nil, engine.Schema{}, err
+			}
+			its = append(its, it)
+		}
+		var it engine.RowIterator = engine.NewConcatIter(its)
+		if node.Distinct {
+			it = engine.NewDistinctIter(it)
+		}
+		return it, node.Schema, nil
+
 	case *NoFrom:
 		// One empty row; a zero-column schema.
 		return engine.NewSliceIter([]engine.Row{{}}), engine.Schema{}, nil
@@ -93,6 +119,9 @@ func resolverFor(child Node, schema engine.Schema) engine.Resolver {
 	if s, ok := base.(*Scan); ok {
 		return engine.SchemaResolver(schema, s.Alias)
 	}
+	if sub, ok := base.(*Subquery); ok {
+		return engine.SchemaResolver(schema, sub.Alias)
+	}
 	return engine.SchemaResolver(schema, "")
 }
 
@@ -117,10 +146,15 @@ func baseRelation(n Node) Node {
 	}
 }
 
-// execScan calls the connector and returns a Scan iterator + schema.
+// execScan calls the connector and returns a Scan iterator + schema. The
+// Predicate/Limit pushdown hints (set by the planner for single-table scans)
+// are passed through; the connector applies what it can and the engine's
+// Filter/Limit re-apply the rest.
 func execScan(ctx context.Context, node *Scan) (engine.RowIterator, engine.Schema, error) {
 	it, err := node.Source.Conn.Scan(ctx, connector.ScanRequest{
-		Dataset: node.Source.Dataset,
+		Dataset:   node.Source.Dataset,
+		Predicate: node.Predicate,
+		Limit:     node.Limit,
 	})
 	if err != nil {
 		return nil, engine.Schema{}, err
