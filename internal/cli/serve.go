@@ -2,9 +2,10 @@ package cli
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"sort"
@@ -17,8 +18,26 @@ import (
 	"github.com/april/turntable/internal/sql"
 )
 
-//go:embed webui.html
-var webUIHTML string
+// webUIDist holds the built React/Vite single-page app. The source lives in
+// webui/ and is compiled to webui/dist/ (committed) by `npm run build` — see
+// the //go:generate directive and webui/README.md. The dist tree is embedded
+// so `go build` needs no Node toolchain.
+//
+//go:generate sh -c "cd webui && npm install && npm run build"
+//
+//go:embed all:webui/dist
+var webUIDist embed.FS
+
+// webUIFS is the dist directory rooted at its top level (webui/dist -> /).
+var webUIFS = mustSubFS(webUIDist, "webui/dist")
+
+func mustSubFS(f embed.FS, dir string) fs.FS {
+	sub, err := fs.Sub(f, dir)
+	if err != nil {
+		panic("webui dist embed: " + err.Error())
+	}
+	return sub
+}
 
 // defaultServeMaxRows caps how many rows a single web query returns when no
 // --max-rows is set, so the browser never has to render an unbounded result.
@@ -29,7 +48,9 @@ const defaultServeMaxRows = 5000
 // over HTTP as a small JSON API plus a single-page UI.
 func (a *App) serve(ctx context.Context, addr string) int {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", a.handleIndex)
+	// Serve the embedded SPA (index.html + hashed assets) at the root; the API
+	// routes below are more specific, so they take precedence in the mux.
+	mux.Handle("/", http.FileServerFS(webUIFS))
 	mux.HandleFunc("/api/query", a.handleQuery)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/schema", a.handleSchema)
@@ -76,15 +97,6 @@ func exposureNote(addr string) string {
 	default:
 		return "WARNING: reachable from other hosts — queries run with this process's access"
 	}
-}
-
-func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(webUIHTML))
 }
 
 // ---- JSON API ----------------------------------------------------------------

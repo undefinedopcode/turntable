@@ -14,3 +14,7 @@ vendor/
 *.test
 *.out
 coverage.txt
+
+# web UI build tooling (the built dist/ IS committed so `go build` needs no Node)
+internal/cli/webui/node_modules/
+internal/cli/webui/*.tsbuildinfo

@@ -136,13 +136,18 @@ interfaces:
 **`internal/cli`** wires it together. `cli.go` `NewApp()` registers all built-in
 connectors and owns flag/config handling; `repl.go` is the interactive loop
 (readline history, tab completion, dot-commands); `serve.go` (`--serve`) is the
-web UI — an HTTP server exposing the same parse/plan/exec path as a JSON API
-plus a single embedded page (`webui.html`, `//go:embed`). Endpoints: `GET/POST
-/api/query`, `GET /api/sources` (list) / `POST /api/sources` (register at
-runtime, the web `.use` — goes through `registerSourceExpand`, so wildcards and
-validation match), and `GET /api/schema`. Field routing for both `.use` and the
-web add-source form is shared via `applySourceField` in `cli.go`. Results are
-row-capped (`--max-rows`, default 5000) and it binds to localhost by default. **`internal/config`** loads
+web UI — an HTTP server exposing the same parse/plan/exec path as a JSON API.
+Endpoints: `GET/POST /api/query`, `GET /api/sources` (list) / `POST /api/sources`
+(register at runtime, the web `.use` — goes through `registerSourceExpand`, so
+wildcards and validation match), and `GET /api/schema`. Field routing for both
+`.use` and the web add-source form is shared via `applySourceField` in `cli.go`.
+Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by
+default. The frontend is a **React + Vite + TypeScript** app under
+`internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via
+`//go:embed all:webui/dist` and served with `http.FileServerFS`. `go build`
+needs no Node; after editing `webui/src/**` run `npm run build` (or `go generate
+./internal/cli`) and commit the updated `dist/`. Dev: `npm run dev` (HMR on
+:5173, proxies `/api` to the Go server). See `webui/README.md`. **`internal/config`** loads
 `turntable.yaml` with `${ENV_VAR}` / `${VAR:-default}` interpolation.
 
 ## Pushdown contract (the core invariant)

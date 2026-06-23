@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,22 +175,41 @@ func TestSourcesMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleIndexServesUI(t *testing.T) {
-	a := NewApp()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+func TestServesEmbeddedUI(t *testing.T) {
+	srv := http.FileServerFS(webUIFS)
+
+	// "/" serves the SPA's index.html.
 	rec := httptest.NewRecorder()
-	a.handleIndex(rec, req)
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q", ct)
+		t.Errorf("content-type = %q, want text/html", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "turntable") {
-		t.Error("UI body missing 'turntable'")
+	if body := rec.Body.String(); !strings.Contains(body, "turntable") ||
+		!strings.Contains(body, `id="root"`) {
+		t.Errorf("index.html missing expected markers:\n%s", body)
 	}
-	// Unknown paths 404 (the catch-all handler is mounted at "/").
+
+	// The built JS bundle is present and served as JavaScript.
+	entries, err := fs.ReadDir(webUIFS, "assets")
+	if err != nil {
+		t.Fatalf("dist assets missing — run `npm run build` in internal/cli/webui: %v", err)
+	}
+	var js string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".js") {
+			js = e.Name()
+		}
+	}
+	if js == "" {
+		t.Fatal("no .js asset in the embedded dist")
+	}
 	rec2 := httptest.NewRecorder()
-	a.handleIndex(rec2, httptest.NewRequest(http.MethodGet, "/nope", nil))
-	if rec2.Code != http.StatusNotFound {
-		t.Errorf("unknown path status = %d, want 404", rec2.Code)
+	srv.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/assets/"+js, nil))
+	if rec2.Code != http.StatusOK {
+		t.Errorf("GET /assets/%s status = %d, want 200", js, rec2.Code)
 	}
 }
 

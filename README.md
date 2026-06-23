@@ -156,8 +156,10 @@ whole database without listing each table.
 ### Web UI
 
 `--serve` starts a browser-based query UI — a complement to the REPL using the
-same parse/plan/exec path. It serves a single self-contained page (no external
-assets) plus a small JSON API.
+same parse/plan/exec path. The UI is a React + Vite app (source under
+`internal/cli/webui/`) built to a static bundle that is embedded into the binary,
+so `go build` needs no Node toolchain. See `internal/cli/webui/README.md` for the
+dev (`npm run dev` with HMR) and rebuild workflow.
 
 ```bash
 turntable -c examples/turntable.yaml --serve            # http://localhost:8080
