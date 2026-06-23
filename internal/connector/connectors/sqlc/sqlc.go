@@ -12,7 +12,10 @@ import (
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
 	oparseSQL "github.com/april/turntable/internal/sql"
-	_ "modernc.org/sqlite" // pure-Go SQLite driver; v0.2 default
+
+	_ "github.com/go-sql-driver/mysql" // registers the "mysql" driver
+	_ "github.com/lib/pq"              // registers the "postgres" driver
+	_ "modernc.org/sqlite"             // pure-Go SQLite driver; v0.2 default
 )
 
 // Connector implements a database/sql connector.
@@ -155,13 +158,13 @@ func listTables(ctx context.Context, db *sql.DB, driver string) ([]string, error
 // Resolve discovers the schema for a dataset. The dataset name is treated as a
 // table identifier (possibly qualified as "schema.table" or "catalog.schema.table").
 func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Schema, error) {
-	db, table, err := openAndTable(ds)
+	db, table, dial, err := openAndTable(ds)
 	if err != nil {
 		return engine.Schema{}, err
 	}
 	defer db.Close()
 
-	cols, err := discoverColumns(ctx, db, table)
+	cols, err := discoverColumns(ctx, db, table, dial)
 	if err != nil {
 		return engine.Schema{}, fmt.Errorf("discover %q: %w", table.name, err)
 	}
@@ -172,7 +175,7 @@ func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sche
 // asks for. Unpushable predicates are not pushed; the engine applies them in
 // memory via a Filter.
 func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.RowIterator, error) {
-	db, table, err := openAndTable(req.Dataset)
+	db, table, dial, err := openAndTable(req.Dataset)
 	if err != nil {
 		return nil, err
 	}
@@ -187,17 +190,20 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(quoteIdent(c))
+			b.WriteString(dial.quoteIdent(c))
 		}
 	}
-	fmt.Fprintf(&b, " FROM %s", table.quoted())
+	fmt.Fprintf(&b, " FROM %s", table.quoted(dial))
 
 	// Try to push down the predicate. If translation fails (e.g. contains an
-	// unsupported function or expression), we simply omit the WHERE clause and let
-	// the engine filter in memory.
+	// unsupported function or expression), we omit the WHERE clause and let the
+	// engine filter in memory. predicateHandled tracks whether the full
+	// predicate made it into the query — only then is it safe to push LIMIT.
+	predicateHandled := req.Predicate == nil
 	if req.Predicate != nil {
-		if where, ok := translateExpr(req.Predicate); ok {
+		if where, ok := translateExpr(req.Predicate, dial); ok {
 			fmt.Fprintf(&b, " WHERE %s", where)
+			predicateHandled = true
 		}
 	}
 
@@ -207,18 +213,20 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(quoteIdent(o.Column))
+			b.WriteString(dial.quoteIdent(o.Column))
 			if o.Desc {
 				b.WriteString(" DESC")
 			}
 		}
 	}
 
-	if req.Limit != nil {
+	// Push LIMIT only when the predicate was fully applied in-DB; otherwise the
+	// engine must see every matching row before limiting.
+	if req.Limit != nil && predicateHandled {
 		fmt.Fprintf(&b, " LIMIT %d", *req.Limit)
 	}
 
-	schema, err := discoverSchema(ctx, db, table)
+	schema, err := discoverSchema(ctx, db, table, dial)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -253,26 +261,26 @@ type tableRef struct {
 	name    string
 }
 
-func (t tableRef) quoted() string {
+func (t tableRef) quoted(d dialect) string {
 	parts := []string{}
 	if t.catalog != "" {
-		parts = append(parts, quoteIdent(t.catalog))
+		parts = append(parts, d.quoteIdent(t.catalog))
 	}
 	if t.schema != "" {
-		parts = append(parts, quoteIdent(t.schema))
+		parts = append(parts, d.quoteIdent(t.schema))
 	}
-	parts = append(parts, quoteIdent(t.name))
+	parts = append(parts, d.quoteIdent(t.name))
 	return strings.Join(parts, ".")
 }
 
-func openAndTable(ds connector.Dataset) (*sql.DB, tableRef, error) {
+func openAndTable(ds connector.Dataset) (*sql.DB, tableRef, dialect, error) {
 	driver := stringOpt(ds.Options, "driver")
 	dsn := stringOpt(ds.Options, "dsn")
 	if driver == "" {
 		driver = "sqlite"
 	}
 	if dsn == "" {
-		return nil, tableRef{}, fmt.Errorf("sql connector requires dsn option")
+		return nil, tableRef{}, dialect{}, fmt.Errorf("sql connector requires dsn option")
 	}
 	name := ds.Name
 	if name == "" {
@@ -280,9 +288,9 @@ func openAndTable(ds connector.Dataset) (*sql.DB, tableRef, error) {
 	}
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, tableRef{}, fmt.Errorf("open %s: %w", driver, err)
+		return nil, tableRef{}, dialect{}, fmt.Errorf("open %s: %w", driver, err)
 	}
-	return db, parseTableName(name), nil
+	return db, parseTableName(name), dialectFor(driver), nil
 }
 
 func parseTableName(name string) tableRef {
@@ -306,53 +314,51 @@ func stringOpt(opts map[string]any, key string) string {
 	return s
 }
 
-func discoverSchema(ctx context.Context, db *sql.DB, t tableRef) (engine.Schema, error) {
-	cols, err := discoverColumns(ctx, db, t)
+func discoverSchema(ctx context.Context, db *sql.DB, t tableRef, d dialect) (engine.Schema, error) {
+	cols, err := discoverColumns(ctx, db, t, d)
 	if err != nil {
 		return engine.Schema{}, err
 	}
 	return engine.Schema{Columns: cols}, nil
 }
 
-func discoverColumns(ctx context.Context, db *sql.DB, t tableRef) ([]engine.Column, error) {
+func discoverColumns(ctx context.Context, db *sql.DB, t tableRef, d dialect) ([]engine.Column, error) {
 	// Discovery is dialect-specific. We try SQLite's PRAGMA first, then fall
 	// back to information_schema (Postgres/MySQL), then DESCRIBE (MySQL).
 	// Try SQLite pragma first.
-	pragmaSQL := fmt.Sprintf("PRAGMA table_info(%s)", t.quoted())
+	pragmaSQL := fmt.Sprintf("PRAGMA table_info(%s)", t.quoted(d))
 	if rows, err := db.QueryContext(ctx, pragmaSQL); err == nil {
 		defer rows.Close()
 		return readColumnRows(rows)
 	}
 
-	// Try information_schema. Postgres/MySQL/SQLite all support it.
-	var query string
+	// Try information_schema. Postgres/MySQL/SQLite all support it. Placeholders
+	// are dialect-specific ($1.. for Postgres, ? elsewhere), so build the
+	// predicate with the dialect's placeholder syntax.
+	var conds []string
 	var args []any
-	if t.catalog != "" {
-		query = `SELECT column_name, data_type, is_nullable 
-			 FROM information_schema.columns 
-			 WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
-			 ORDER BY ordinal_position`
-		args = []any{t.catalog, t.schema, t.name}
-	} else if t.schema != "" {
-		query = `SELECT column_name, data_type, is_nullable 
-			 FROM information_schema.columns 
-			 WHERE table_schema = ? AND table_name = ?
-			 ORDER BY ordinal_position`
-		args = []any{t.schema, t.name}
-	} else {
-		query = `SELECT column_name, data_type, is_nullable 
-			 FROM information_schema.columns 
-			 WHERE table_name = ?
-			 ORDER BY ordinal_position`
-		args = []any{t.name}
+	addCond := func(col, val string) {
+		args = append(args, val)
+		conds = append(conds, fmt.Sprintf("%s = %s", col, d.placeholder(len(args))))
 	}
+	if t.catalog != "" {
+		addCond("table_catalog", t.catalog)
+	}
+	if t.schema != "" {
+		addCond("table_schema", t.schema)
+	}
+	addCond("table_name", t.name)
+	query := `SELECT column_name, data_type, is_nullable
+		 FROM information_schema.columns
+		 WHERE ` + strings.Join(conds, " AND ") + `
+		 ORDER BY ordinal_position`
 	if rows, err := db.QueryContext(ctx, query, args...); err == nil {
 		defer rows.Close()
 		return readColumnRows(rows)
 	}
 
 	// Last resort: DESCRIBE / SHOW COLUMNS (MySQL).
-	rows, err := db.QueryContext(ctx, fmt.Sprintf("DESCRIBE %s", t.quoted()))
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("DESCRIBE %s", t.quoted(d)))
 	if err == nil {
 		defer rows.Close()
 		return readDescribeRows(rows)
@@ -547,7 +553,7 @@ func scanValue(raw any, t engine.Type) engine.Value {
 // translateExpr converts a Turntable expression into a SQL string that can
 // be sent to the remote database. It returns ok=false for expressions we choose
 // not to push (functions, subqueries, etc.).
-func translateExpr(e oparseSQL.Expr) (string, bool) {
+func translateExpr(e oparseSQL.Expr, d dialect) (string, bool) {
 	switch ex := e.(type) {
 	case *oparseSQL.LitInt:
 		return fmt.Sprintf("%d", ex.V), true
@@ -564,18 +570,15 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 		return "NULL", true
 
 	case *oparseSQL.ColRef:
-		if ex.Qualifier != "" {
-			// Qualifiers are not needed for simple single-table scans; push down
-			// only the column name.
-			return quoteIdent(ex.Name), true
-		}
-		return quoteIdent(ex.Name), true
+		// Qualifiers are not needed for simple single-table scans; push down
+		// only the column name.
+		return d.quoteIdent(ex.Name), true
 
 	case *oparseSQL.BinaryOp:
-		return translateBinaryOp(ex)
+		return translateBinaryOp(ex, d)
 
 	case *oparseSQL.UnaryOp:
-		inner, ok := translateExpr(ex.Expr)
+		inner, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
 		}
@@ -587,13 +590,13 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 		}
 
 	case *oparseSQL.InExpr:
-		inner, ok := translateExpr(ex.Expr)
+		inner, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
 		}
 		var vals []string
 		for _, l := range ex.List {
-			v, ok := translateExpr(l)
+			v, ok := translateExpr(l, d)
 			if !ok {
 				return "", false
 			}
@@ -605,15 +608,15 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 		return fmt.Sprintf("%s IN (%s)", inner, strings.Join(vals, ", ")), true
 
 	case *oparseSQL.BetweenExpr:
-		v, ok := translateExpr(ex.Expr)
+		v, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
 		}
-		lo, ok := translateExpr(ex.Low)
+		lo, ok := translateExpr(ex.Low, d)
 		if !ok {
 			return "", false
 		}
-		hi, ok := translateExpr(ex.High)
+		hi, ok := translateExpr(ex.High, d)
 		if !ok {
 			return "", false
 		}
@@ -623,7 +626,7 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 		return fmt.Sprintf("%s BETWEEN %s AND %s", v, lo, hi), true
 
 	case *oparseSQL.IsNullExpr:
-		v, ok := translateExpr(ex.Expr)
+		v, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
 		}
@@ -633,11 +636,11 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 		return fmt.Sprintf("%s IS NULL", v), true
 
 	case *oparseSQL.LikeExpr:
-		v, ok := translateExpr(ex.Expr)
+		v, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
 		}
-		p, ok := translateExpr(ex.Pat)
+		p, ok := translateExpr(ex.Pat, d)
 		if !ok {
 			return "", false
 		}
@@ -649,12 +652,12 @@ func translateExpr(e oparseSQL.Expr) (string, bool) {
 	return "", false
 }
 
-func translateBinaryOp(ex *oparseSQL.BinaryOp) (string, bool) {
-	left, ok := translateExpr(ex.Left)
+func translateBinaryOp(ex *oparseSQL.BinaryOp, d dialect) (string, bool) {
+	left, ok := translateExpr(ex.Left, d)
 	if !ok {
 		return "", false
 	}
-	right, ok := translateExpr(ex.Right)
+	right, ok := translateExpr(ex.Right, d)
 	if !ok {
 		return "", false
 	}
@@ -668,9 +671,39 @@ func translateBinaryOp(ex *oparseSQL.BinaryOp) (string, bool) {
 	return "", false
 }
 
-// quoteIdent wraps identifiers in double quotes for portability.
-func quoteIdent(s string) string {
+// dialect captures the per-driver SQL differences the connector must honor:
+// identifier quoting and bind-placeholder syntax.
+type dialect struct{ driver string }
+
+// dialectFor returns the dialect for a database/sql driver name, defaulting to
+// SQLite when unset.
+func dialectFor(driver string) dialect {
+	if driver == "" {
+		driver = "sqlite"
+	}
+	return dialect{driver: driver}
+}
+
+// quoteIdent quotes an identifier for the dialect. MySQL uses backticks;
+// sqlite and postgres use standard double quotes. (MySQL reads a double-quoted
+// token as a string literal unless ANSI_QUOTES is set, so double-quoting a
+// column there would select a constant string, not the column.)
+func (d dialect) quoteIdent(s string) string {
+	if d.driver == "mysql" {
+		return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+	}
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// placeholder returns the bind placeholder for the n-th parameter (1-based).
+// Postgres (lib/pq, pgx) uses $1, $2, ...; sqlite and mysql use ?.
+func (d dialect) placeholder(n int) string {
+	switch d.driver {
+	case "postgres", "pgx":
+		return fmt.Sprintf("$%d", n)
+	default:
+		return "?"
+	}
 }
 
 // quoteString escapes string literals with single quotes.

@@ -15,7 +15,7 @@ func TestSQLiteResolveAndScan(t *testing.T) {
 
 	// DSN for an in-memory SQLite database with a table.
 	dsn := "file::memory:?cache=shared"
-	db, _, err := openAndTable(connector.Dataset{
+	db, _, _, err := openAndTable(connector.Dataset{
 		Name:    "inventory",
 		Source:  "inventory",
 		Options: map[string]any{"driver": "sqlite", "dsn": dsn},
@@ -92,6 +92,45 @@ func TestSQLiteResolveAndScan(t *testing.T) {
 	}
 }
 
+func TestScanLimitNotPushedWhenPredicateUntranslatable(t *testing.T) {
+	ctx := context.Background()
+	conn := New()
+	dsn := "file::memory:?cache=shared"
+	db, _, _, err := openAndTable(connector.Dataset{
+		Name: "widgets", Source: "widgets",
+		Options: map[string]any{"driver": "sqlite", "dsn": dsn},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() // keep the shared in-memory DB alive for the duration
+
+	if _, err := db.Exec(`CREATE TABLE widgets (id INTEGER PRIMARY KEY, item TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO widgets (id, item) VALUES (1,'hammer'),(2,'nails'),(3,'saw'),(4,'tape')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	ds := connector.Dataset{Name: "widgets", Source: "widgets", Options: map[string]any{"driver": "sqlite", "dsn": dsn}}
+	// LOWER(item) is a function the translator can't push, so neither the WHERE
+	// nor the LIMIT may be applied in-DB — the engine must see every row.
+	limit := 2
+	pred, _ := sql.ParseExpr(`LOWER(item) = 'hammer'`)
+	it, err := conn.Scan(ctx, connector.ScanRequest{Dataset: ds, Predicate: pred, Limit: &limit})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	defer it.Close()
+	rows, err := engine.Materialize(ctx, it)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("expected all 4 rows (no WHERE/LIMIT pushed), got %d", len(rows))
+	}
+}
+
 func TestTranslateExprPushdown(t *testing.T) {
 	tests := []struct {
 		expr string
@@ -111,7 +150,7 @@ func TestTranslateExprPushdown(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %q: %v", tc.expr, err)
 		}
-		got, ok := translateExpr(e)
+		got, ok := translateExpr(e, dialectFor("sqlite"))
 		if ok != tc.ok {
 			t.Errorf("translate %q: ok=%v, want %v", tc.expr, ok, tc.ok)
 			continue
