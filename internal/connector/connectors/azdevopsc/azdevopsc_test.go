@@ -2,6 +2,10 @@ package azdevopsc
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/april/turntable/internal/connector"
@@ -155,6 +159,115 @@ func TestScanLimitNoPredicate(t *testing.T) {
 	}
 	if fake.lastMax != 2 {
 		t.Errorf("max passed to API = %d, want 2", fake.lastMax)
+	}
+}
+
+func TestNormalizeOrg(t *testing.T) {
+	cases := map[string]string{
+		"myorg":                          "myorg",
+		"https://dev.azure.com/myorg":    "myorg",
+		"https://dev.azure.com/myorg/":   "myorg",
+		"dev.azure.com/myorg":            "myorg",
+		"http://dev.azure.com/myorg/sub": "myorg",
+		"  myorg  ":                      "myorg",
+	}
+	for in, want := range cases {
+		if got := normalizeOrg(in); got != want {
+			t.Errorf("normalizeOrg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestURLEscaping guards against the "dangerous Request.Path" 400: a URL-valued
+// org must not leak ":" into the path, and a project name with a space must be
+// percent-encoded.
+func TestURLEscaping(t *testing.T) {
+	h := &httpClient{
+		base:    "https://dev.azure.com",
+		org:     normalizeOrg("https://dev.azure.com/contoso"),
+		project: "My Project",
+	}
+	wiql := fmt.Sprintf("%s/%s/%s/_apis/wit/wiql?api-version=%s",
+		h.base, h.orgPath(), h.projectPath(), apiVersion)
+	if strings.Contains(wiql[len("https://"):], ":") {
+		t.Errorf("path still contains a colon: %s", wiql)
+	}
+	if !strings.Contains(wiql, "/contoso/") {
+		t.Errorf("org not normalized into path: %s", wiql)
+	}
+	if !strings.Contains(wiql, "My%20Project") {
+		t.Errorf("project space not escaped: %s", wiql)
+	}
+}
+
+// TestRealClientPathNoColon drives the actual HTTP client (not the injected
+// fake) against a local server, with a URL-valued organization — the config
+// that produced the reported "dangerous Request.Path (:)" 400. It asserts the
+// request path Azure would have seen contains no colon and the org/project are
+// correct.
+func TestRealClientPathNoColon(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path // decoded path, as Azure's front end would validate
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"workItems":[]}`)) // empty -> no batch fetch
+	}))
+	defer srv.Close()
+
+	c := New()
+	ds := connector.Dataset{Source: "work_items", Options: map[string]any{
+		"organization": "https://dev.azure.com/contoso", // a URL, not a slug
+		"project":      "My Project",
+		"pat":          "x",
+		"url":          srv.URL,
+	}}
+	it, err := c.Scan(context.Background(), connector.ScanRequest{Dataset: ds})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	it.Close()
+
+	if strings.Contains(gotPath, ":") {
+		t.Errorf("request path contains a colon (would 400): %q", gotPath)
+	}
+	if gotPath != "/contoso/My Project/_apis/wit/wiql" {
+		t.Errorf("path = %q, want /contoso/My Project/_apis/wit/wiql", gotPath)
+	}
+}
+
+// TestWIQLTopCap verifies the WIQL request always carries $top: capped at the
+// hard limit by default (so a >20000-item project doesn't fail the query), and
+// lowered to the engine's LIMIT when that can be pushed.
+func TestWIQLTopCap(t *testing.T) {
+	var gotTop string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTop = r.URL.Query().Get("$top")
+		w.Write([]byte(`{"workItems":[]}`))
+	}))
+	defer srv.Close()
+
+	opts := map[string]any{"organization": "org", "project": "proj", "pat": "x", "url": srv.URL}
+	ds := connector.Dataset{Source: "work_items", Options: opts}
+
+	// No engine limit -> capped at the WIQL hard max.
+	it, err := New().Scan(context.Background(), connector.ScanRequest{Dataset: ds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it.Close()
+	if gotTop != "20000" {
+		t.Errorf("default $top = %q, want 20000", gotTop)
+	}
+
+	// A pushed LIMIT lowers $top so only that many ids are requested.
+	five := 5
+	it, err = New().Scan(context.Background(), connector.ScanRequest{Dataset: ds, Limit: &five})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it.Close()
+	if gotTop != "5" {
+		t.Errorf("$top with LIMIT 5 = %q, want 5", gotTop)
 	}
 }
 

@@ -413,6 +413,12 @@ pass a `wiql` option with a complete WIQL query (it must `SELECT ... FROM
 workitems`), e.g. `wiql=SELECT [System.Id] FROM workitems WHERE [System.Tags]
 CONTAINS 'release'`.
 
+The `organization` may be the bare slug (`my-org`) or a full
+`https://dev.azure.com/my-org` URL. WIQL caps results at 20,000 (the connector
+takes the most-recently-changed within that cap); for a larger project, narrow
+server-side with the `type` filter or a `wiql` `WHERE` clause — a SQL `WHERE`
+only filters the fetched window.
+
 ### AWS CloudWatch
 
 `cloudwatchlogs` queries log groups (via `FilterLogEvents`); `cloudwatch`

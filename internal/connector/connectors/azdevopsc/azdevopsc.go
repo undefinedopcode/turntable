@@ -11,7 +11,8 @@
 // Options:
 //
 //	dataset       must be "work_items" (or empty); the connector has one dataset.
-//	organization  Azure DevOps organization (required).
+//	organization  Azure DevOps organization (required). Either the bare slug
+//	              ("myorg") or a full URL ("https://dev.azure.com/myorg").
 //	project       team project (required).
 //	pat           personal access token (required).
 //	type          optional System.WorkItemType filter for the default query
@@ -20,6 +21,12 @@
 //	              from workitems (flat list), e.g.
 //	              "SELECT [System.Id] FROM workitems WHERE [System.State] = 'Active'".
 //	url           override the API base (default https://dev.azure.com).
+//
+// WIQL caps results at 20000 server-side; the connector always sends $top to
+// stay within it (at the query's LIMIT when that can be pushed, else 20000),
+// taking the most-recently-changed items. A project with more than 20000
+// relevant items should narrow server-side via the type filter or a custom
+// wiql WHERE clause, since a SQL WHERE filters only the fetched window.
 package azdevopsc
 
 import (
@@ -29,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,8 +50,12 @@ const (
 	apiVersion  = "7.0"
 	// batchSize is the max work item IDs per work-items fetch (API limit is 200).
 	batchSize = 200
+	// wiqlTopMax is the WIQL endpoint's hard result cap. A query that matches
+	// more rows than this fails with HTTP 400 ("number of work items returned
+	// exceeded limit of 20000"), so we always send $top to cap it server-side.
+	wiqlTopMax = 20000
 	// maxItems bounds a single scan to keep memory bounded.
-	maxItems = 20000
+	maxItems = wiqlTopMax
 )
 
 // devopsAPI is the connector's narrow view of Azure DevOps: run a WIQL query and
@@ -266,12 +278,30 @@ func (c *Connector) resolveClient(opts map[string]any) (devopsAPI, error) {
 	c.client = &httpClient{
 		hc:      &http.Client{Timeout: 60 * time.Second},
 		base:    strings.TrimRight(base, "/"),
-		org:     org,
+		org:     normalizeOrg(org),
 		project: project,
 		// PAT auth is HTTP Basic with an empty username and the PAT as password.
 		auth: "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+pat)),
 	}
 	return c.client, nil
+}
+
+// normalizeOrg accepts either a bare organization slug ("myorg") or a full
+// Azure DevOps URL ("https://dev.azure.com/myorg") and returns just the slug.
+// Without this, a URL-valued organization puts "https:" into the request path,
+// which Azure's front end rejects with HTTP 400 "a potentially dangerous
+// Request.Path was detected from the client (:)".
+func normalizeOrg(org string) string {
+	org = strings.TrimSpace(org)
+	if i := strings.Index(org, "://"); i >= 0 {
+		org = org[i+3:] // drop scheme
+	}
+	org = strings.TrimPrefix(org, "dev.azure.com/")
+	// Keep only the first path segment (the org slug); drop any trailing path.
+	if i := strings.IndexByte(org, '/'); i >= 0 {
+		org = org[:i]
+	}
+	return org
 }
 
 type httpClient struct {
@@ -281,13 +311,24 @@ type httpClient struct {
 	auth         string
 }
 
+// orgPath / projectPath escape the org and project as single URL path segments
+// so spaces and special characters never reach Azure as raw path bytes.
+func (h *httpClient) orgPath() string     { return url.PathEscape(h.org) }
+func (h *httpClient) projectPath() string { return url.PathEscape(h.project) }
+
 // queryWorkItems runs the WIQL query, caps the IDs to max, then batch-fetches
 // the requested fields. Returned maps are each work item's "fields" object plus
 // a top-level "id".
 func (h *httpClient) queryWorkItems(ctx context.Context, wiql string, reqFields []string, max int) ([]map[string]any, error) {
-	// 1. WIQL -> work item references.
-	wiqlURL := fmt.Sprintf("%s/%s/%s/_apis/wit/wiql?api-version=%s",
-		h.base, h.org, h.project, apiVersion)
+	// 1. WIQL -> work item references. The WIQL is project-scoped. $top caps the
+	// result server-side: at the engine's row limit when it can be pushed, else
+	// at the WIQL hard cap so a large project doesn't fail the whole query.
+	top := wiqlTopMax
+	if max > 0 && max < top {
+		top = max
+	}
+	wiqlURL := fmt.Sprintf("%s/%s/%s/_apis/wit/wiql?api-version=%s&$top=%d",
+		h.base, h.orgPath(), h.projectPath(), apiVersion, top)
 	body, _ := json.Marshal(map[string]string{"query": wiql})
 	var wiqlResp struct {
 		WorkItems []struct {
@@ -330,7 +371,7 @@ func (h *httpClient) fetchBatch(ctx context.Context, ids []int, reqFields []stri
 		idStrs[i] = strconv.Itoa(id)
 	}
 	u := fmt.Sprintf("%s/%s/_apis/wit/workitems?ids=%s&fields=%s&api-version=%s",
-		h.base, h.org, strings.Join(idStrs, ","), strings.Join(reqFields, ","), apiVersion)
+		h.base, h.orgPath(), strings.Join(idStrs, ","), strings.Join(reqFields, ","), apiVersion)
 	var resp struct {
 		Value []struct {
 			ID     int            `json:"id"`

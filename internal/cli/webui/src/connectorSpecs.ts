@@ -88,8 +88,8 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     name: "azuredevops",
     label: "Azure DevOps Boards",
     fields: [
-      { key: "organization", label: "Organization", required: true },
-      { key: "project", label: "Project", required: true },
+      { key: "organization", label: "Organization", required: true, placeholder: "myorg (slug or full dev.azure.com URL)" },
+      { key: "project", label: "Project", required: true, placeholder: "My Project" },
       { key: "pat", label: "Personal access token", type: "password", required: true },
       { key: "type", label: "Work item type", placeholder: "Bug, User Story, … (optional filter)" },
       { key: "wiql", label: "WIQL override", placeholder: "SELECT [System.Id] FROM workitems WHERE …" },
