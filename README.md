@@ -518,6 +518,39 @@ it (comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`); anything else (`LIKE`,
 point `endpoint`/`connection_string` at the [Azurite](https://github.com/Azure/Azurite)
 emulator.
 
+### Claude Code transcripts
+
+The `claudelogs` connector reads Claude Code's JSONL session logs (under
+`~/.claude/projects/<slug>/`) and exposes the conversation messages as rows —
+handy for querying your own usage. Bookkeeping events (titles, mode changes,
+snapshots) are skipped; `message.content` is flattened into a `text` column and
+`tool_use` blocks are counted.
+
+```bash
+# default: the transcripts of the project you run turntable in
+turntable "SELECT model, COUNT(*) AS n FROM claudelogs WHERE type='assistant'
+            AND model IS NOT NULL GROUP BY model ORDER BY n DESC"
+
+# a specific session file, or a whole project directory (qualified ref)
+turntable "SELECT LEFT(text, 80) AS prompt FROM claudelogs:./session.jsonl
+            WHERE type='user' ORDER BY timestamp DESC LIMIT 10"
+```
+
+```yaml
+sources:
+  logs:
+    connector: claudelogs
+    options:
+      path: /home/me/.claude/projects/-home-me-projects-foo   # file or directory
+      # project: -home-me-projects-foo                        # or a slug / working-dir path
+```
+
+Columns: `session_id, session_file, uuid, parent_uuid, type, role, model,
+timestamp, text, tool_uses, cwd, git_branch`. With no `path`/`project` it
+defaults to the current working directory's project. Note: project slugs contain
+`-`; the config `path`/`project` options or a single-session qualified ref are
+the easiest ways to point at one.
+
 ## Layout
 
 ```
@@ -528,7 +561,7 @@ internal/sql         lexer, parser, AST
 internal/plan        resolution, validation, pushdown
 internal/engine      types, rows, operator pipeline
 internal/connector   Connector interface + Registry
-internal/connector/connectors/{jsonc,csvc,yamlc,excelc,parquetc,sqlc,httpc,linearc,trelloc,azdevopsc,cwlogsc,cwmetricsc,dynamodbc,aztablesc}
+internal/connector/connectors/{jsonc,csvc,yamlc,excelc,parquetc,sqlc,httpc,linearc,trelloc,azdevopsc,cwlogsc,cwmetricsc,dynamodbc,aztablesc,claudelogsc}
 internal/render       output formatters
 internal/config       turntable.yaml loader
 examples/             sample config, data, and run.sh demo script

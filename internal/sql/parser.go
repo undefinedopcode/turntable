@@ -324,14 +324,16 @@ func (p *Parser) parseSourceString() (string, error) {
 	if p.cur().Kind == TKURL {
 		return p.advance().Value, nil
 	}
-	// collect a path-like token: idents, dots, slashes, digits
+	// collect a path-like token: idents, dots, slashes, dashes, digits. Dashes
+	// appear in filenames (my-data.csv) and Claude Code project slugs
+	// (-home-april-projects-x). (A "--" run still lexes as a comment.)
 	var b strings.Builder
 	for {
 		t := p.cur()
 		if t.Kind == TKIdent || t.Kind == TKInt || t.Kind == TKFloat {
 			b.WriteString(t.Value)
 			p.advance()
-		} else if t.Kind == TKOperator && (t.Value == "." || t.Value == "/") {
+		} else if t.Kind == TKOperator && (t.Value == "." || t.Value == "/" || t.Value == "-") {
 			b.WriteString(t.Value)
 			p.advance()
 		} else {

@@ -278,6 +278,22 @@ func TestParseNotInSubquery(t *testing.T) {
 	}
 }
 
+func TestParseQualifiedRefWithDashes(t *testing.T) {
+	// Dashes appear in filenames and Claude Code project slugs; the source
+	// string must capture them, not stop at the first '-'.
+	stmt, err := Parse("SELECT * FROM claudelogs:/home/x/.claude/projects/-home-x-proj")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if s.From.Prefix != "claudelogs" {
+		t.Errorf("prefix = %q", s.From.Prefix)
+	}
+	if s.From.Source != "/home/x/.claude/projects/-home-x-proj" {
+		t.Errorf("source = %q (dashes lost)", s.From.Source)
+	}
+}
+
 func TestParseUnion(t *testing.T) {
 	stmt, err := Parse("SELECT a FROM t UNION SELECT a FROM u")
 	if err != nil {

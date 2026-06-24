@@ -14,6 +14,7 @@ import (
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/connector/connectors/azdevopsc"
 	"github.com/april/turntable/internal/connector/connectors/aztablesc"
+	"github.com/april/turntable/internal/connector/connectors/claudelogsc"
 	"github.com/april/turntable/internal/connector/connectors/csvc"
 	"github.com/april/turntable/internal/connector/connectors/cwlogsc"
 	"github.com/april/turntable/internal/connector/connectors/cwmetricsc"
@@ -74,6 +75,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(aztablesc.New())
 	_ = reg.RegisterConnector(trelloc.New())
 	_ = reg.RegisterConnector(azdevopsc.New())
+	_ = reg.RegisterConnector(claudelogsc.New())
 	return &App{
 		Out:    os.Stdout,
 		Err:    os.Stderr,
