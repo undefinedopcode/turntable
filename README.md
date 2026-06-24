@@ -545,11 +545,28 @@ sources:
       # project: -home-me-projects-foo                        # or a slug / working-dir path
 ```
 
-Columns: `session_id, session_file, uuid, parent_uuid, type, role, model,
-timestamp, text, tool_uses, cwd, git_branch`. With no `path`/`project` it
-defaults to the current working directory's project. Note: project slugs contain
-`-`; the config `path`/`project` options or a single-session qualified ref are
-the easiest ways to point at one.
+Default columns (`kind: messages`): `session_id, session_file, uuid,
+parent_uuid, type, role, model, timestamp, text, tool_uses, cwd, git_branch`.
+
+Set `kind: tools` for a **tool-call view** — one row per `tool_use` block, with
+`tool_name`, `tool_id`, and `tool_input` (the input re-encoded as JSON, so it's
+queryable as a string):
+
+```yaml
+sources:
+  tools: { connector: claudelogs, options: { kind: tools, path: ./session.jsonl } }
+```
+```sql
+-- which tools get used most
+SELECT tool_name, COUNT(*) AS n FROM tools GROUP BY tool_name ORDER BY n DESC
+
+-- grep tool inputs
+SELECT tool_input FROM tools WHERE tool_name = 'Bash' AND tool_input LIKE '%git%'
+```
+
+With no `path`/`project` it defaults to the current working directory's project.
+Note: project slugs contain `-`; the config `path`/`project` options or a
+single-session qualified ref are the easiest ways to point at one.
 
 ## Layout
 

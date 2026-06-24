@@ -125,6 +125,64 @@ func TestScanDirectoryAcrossSessions(t *testing.T) {
 	}
 }
 
+func TestScanToolsKind(t *testing.T) {
+	dir := t.TempDir()
+	// An assistant message with two tool_use blocks + text; the user/tool_result
+	// message has no tool_use blocks (yields no tool rows).
+	p := writeSession(t, dir, "s1.jsonl", sample)
+	c := New()
+	it, err := c.Scan(context.Background(), connector.ScanRequest{
+		Dataset: connector.Dataset{Options: map[string]any{"path": p, "kind": "tools"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := drain(t, it)
+	// sample has one tool_use (Bash) in the assistant message.
+	if len(rows) != 1 {
+		t.Fatalf("tool rows = %d, want 1", len(rows))
+	}
+	// cols: session_id(0) session_file(1) message_uuid(2) parent(3) timestamp(4)
+	//       tool_name(5) tool_id(6) tool_input(7)
+	r := rows[0].Values
+	if r[5].V != "Bash" {
+		t.Errorf("tool_name = %v, want Bash", r[5].V)
+	}
+	if r[2].V != "a1" {
+		t.Errorf("message_uuid = %v, want a1 (the assistant message)", r[2].V)
+	}
+}
+
+func TestToolsKindWithInputs(t *testing.T) {
+	dir := t.TempDir()
+	writeSession(t, dir, "s.jsonl",
+		`{"type":"assistant","uuid":"a","timestamp":"2026-05-24T00:00:00Z","sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la","description":"list"}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/x"}}]}}
+`)
+	c := New()
+	it, _ := c.Scan(context.Background(), connector.ScanRequest{
+		Dataset: connector.Dataset{Options: map[string]any{"path": dir, "kind": "tools"}},
+	})
+	rows := drain(t, it)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (one per tool_use block)", len(rows))
+	}
+	// Inputs are JSON-encoded and queryable as strings.
+	if s, _ := rows[0].Values[7].V.(string); s != `{"command":"ls -la","description":"list"}` {
+		t.Errorf("tool_input[0] = %q", rows[0].Values[7].V)
+	}
+	if rows[1].Values[5].V != "Read" || rows[1].Values[6].V != "t2" {
+		t.Errorf("row1 = name %v id %v", rows[1].Values[5].V, rows[1].Values[6].V)
+	}
+}
+
+func TestUnknownKindErrors(t *testing.T) {
+	c := New()
+	_, err := c.Resolve(context.Background(), connector.Dataset{Options: map[string]any{"kind": "bogus"}})
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
+}
+
 func TestDefaultProjectDir(t *testing.T) {
 	// With base set and no path/project, it derives the slug from cwd.
 	base := t.TempDir()

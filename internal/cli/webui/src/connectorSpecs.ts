@@ -129,6 +129,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     name: "claudelogs",
     label: "Claude Code transcripts",
     fields: [
+      { key: "kind", label: "View", type: "select", options: ["messages", "tools"] },
       { key: "path", label: "Path", placeholder: ".jsonl file or dir (default: current project)" },
       { key: "project", label: "Project", placeholder: "project slug or path (optional)" },
     ],

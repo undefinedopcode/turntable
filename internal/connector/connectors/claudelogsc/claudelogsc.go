@@ -4,15 +4,23 @@
 // flattened, typed rows. Bookkeeping events (titles, mode changes, snapshots,
 // etc.) are skipped.
 //
+// Two views are available via the `kind` option:
+//
+//	messages (default)  one row per conversation message (text + tool_uses count)
+//	tools               one row per tool_use block (tool_name, tool_id, the input
+//	                    re-encoded as JSON), so a message that calls N tools is N
+//	                    rows. Query tool usage, or grep tool inputs as strings.
+//
 // Options (path wins over project wins over the default):
 //
+//	kind     "messages" (default) or "tools".
 //	path     a .jsonl session file, or a directory of them.
 //	project  a project slug (e.g. "-home-april-projects-foo") or a working-dir
 //	         path (slugified) -> ~/.claude/projects/<slug>.
 //	base     override the projects root (default ~/.claude/projects); for tests.
 //
-// With none set, it defaults to the current working directory's project — the
-// transcripts of the project turntable is running in.
+// With no path/project set, it defaults to the current working directory's
+// project — the transcripts of the project turntable is running in.
 package claudelogsc
 
 import (
@@ -41,12 +49,13 @@ func (Connector) Name() string { return "claudelogs" }
 
 func (Connector) Datasets(ctx context.Context) ([]connector.Dataset, error) { return nil, nil }
 
-// Resolve returns the fixed message schema (the same for every session).
+// Resolve returns the schema for the dataset's kind (messages or tools).
 func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Schema, error) {
-	return schema(), nil
+	return schemaFor(kindOf(ds))
 }
 
-var columns = []engine.Column{
+// messageColumns: one row per conversation message.
+var messageColumns = []engine.Column{
 	{Name: "session_id", Type: engine.TypeString, Nullable: true},
 	{Name: "session_file", Type: engine.TypeString, Nullable: true},
 	{Name: "uuid", Type: engine.TypeString, Nullable: true},
@@ -61,14 +70,48 @@ var columns = []engine.Column{
 	{Name: "git_branch", Type: engine.TypeString, Nullable: true},
 }
 
-func schema() engine.Schema { return engine.Schema{Columns: columns} }
+// toolColumns: one row per tool_use block (a message may have several).
+var toolColumns = []engine.Column{
+	{Name: "session_id", Type: engine.TypeString, Nullable: true},
+	{Name: "session_file", Type: engine.TypeString, Nullable: true},
+	{Name: "message_uuid", Type: engine.TypeString, Nullable: true},
+	{Name: "parent_uuid", Type: engine.TypeString, Nullable: true},
+	{Name: "timestamp", Type: engine.TypeTime, Nullable: true},
+	{Name: "tool_name", Type: engine.TypeString, Nullable: true},
+	{Name: "tool_id", Type: engine.TypeString, Nullable: true},
+	{Name: "tool_input", Type: engine.TypeString, Nullable: true}, // JSON-encoded input
+}
+
+// kindOf returns the requested view: "messages" (default) or "tools".
+func kindOf(ds connector.Dataset) string {
+	k := strings.ToLower(strings.TrimSpace(stringOpt(ds.Options, "kind")))
+	if k == "" {
+		return "messages"
+	}
+	return k
+}
+
+func schemaFor(kind string) (engine.Schema, error) {
+	switch kind {
+	case "messages":
+		return engine.Schema{Columns: messageColumns}, nil
+	case "tools":
+		return engine.Schema{Columns: toolColumns}, nil
+	default:
+		return engine.Schema{}, fmt.Errorf("claudelogs: unknown kind %q (messages|tools)", kind)
+	}
+}
 
 func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.RowIterator, error) {
+	kind := kindOf(req.Dataset)
+	if _, err := schemaFor(kind); err != nil {
+		return nil, err
+	}
 	files, err := resolveFiles(req.Dataset)
 	if err != nil {
 		return nil, err
 	}
-	return &logIter{files: files}, nil
+	return &logIter{files: files, kind: kind}, nil
 }
 
 // ---- file resolution ---------------------------------------------------------
@@ -149,6 +192,8 @@ type logIter struct {
 	fi      int
 	f       *os.File
 	scanner *bufio.Scanner
+	kind    string
+	pending []engine.Row // rows produced from the current line not yet returned
 	closed  bool
 }
 
@@ -173,6 +218,13 @@ type event struct {
 
 func (it *logIter) Next() (engine.Row, bool, error) {
 	for {
+		// Drain rows already produced from the current line (a tools-view
+		// message can yield several).
+		if len(it.pending) > 0 {
+			r := it.pending[0]
+			it.pending = it.pending[1:]
+			return r, true, nil
+		}
 		if it.scanner == nil {
 			if it.fi >= len(it.files) {
 				return engine.Row{}, false, nil
@@ -206,14 +258,33 @@ func (it *logIter) Next() (engine.Row, bool, error) {
 		if !messageTypes[ev.Type] {
 			continue
 		}
-		return it.rowFor(ev), true, nil
+		it.pending = it.rowsFor(ev) // may be empty (e.g. a message with no tools)
 	}
 }
 
-func (it *logIter) rowFor(ev event) engine.Row {
-	text, tools := extractText(ev.Message.Content)
+// rowsFor turns one message event into the rows for the iterator's kind: a
+// single message row, or one row per tool_use block.
+func (it *logIter) rowsFor(ev event) []engine.Row {
 	file := strings.TrimSuffix(filepath.Base(it.files[it.fi]), ".jsonl")
-	return engine.Row{Values: []engine.Value{
+	if it.kind == "tools" {
+		calls := extractToolCalls(ev.Message.Content)
+		rows := make([]engine.Row, len(calls))
+		for i, c := range calls {
+			rows[i] = engine.Row{Values: []engine.Value{
+				strOrNull(ev.SessionID),
+				strOrNull(file),
+				strOrNull(ev.UUID),
+				strOrNull(ev.ParentUUID),
+				timeVal(ev.Timestamp),
+				strOrNull(c.name),
+				strOrNull(c.id),
+				strOrNull(c.input),
+			}}
+		}
+		return rows
+	}
+	text, tools := extractText(ev.Message.Content)
+	return []engine.Row{{Values: []engine.Value{
 		strOrNull(ev.SessionID),
 		strOrNull(file),
 		strOrNull(ev.UUID),
@@ -226,7 +297,7 @@ func (it *logIter) rowFor(ev event) engine.Row {
 		engine.IntVal(int64(tools)),
 		strOrNull(ev.Cwd),
 		strOrNull(ev.GitBranch),
-	}}
+	}}}
 }
 
 func (it *logIter) Close() error {
@@ -284,6 +355,45 @@ func walkContent(v any) (string, int) {
 		return b.String(), tools
 	}
 	return "", 0
+}
+
+type toolCall struct {
+	name  string
+	id    string
+	input string // the tool input object, re-encoded as JSON
+}
+
+// extractToolCalls returns the tool_use blocks in a message's content, with the
+// input object re-encoded as JSON so it is queryable as a string (LIKE/REGEXP).
+func extractToolCalls(raw json.RawMessage) []toolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []toolCall
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok || m["type"] != "tool_use" {
+			continue
+		}
+		c := toolCall{}
+		c.name, _ = m["name"].(string)
+		c.id, _ = m["id"].(string)
+		if inp, ok := m["input"]; ok && inp != nil {
+			if b, err := json.Marshal(inp); err == nil {
+				c.input = string(b)
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 func appendLine(b *strings.Builder, s string) {
