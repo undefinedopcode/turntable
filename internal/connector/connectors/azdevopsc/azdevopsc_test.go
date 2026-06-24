@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,22 +14,68 @@ import (
 	"github.com/april/turntable/internal/engine"
 )
 
-// fakeDevops records the WIQL/fields/max it was asked for and returns canned
-// flattened work item maps.
+// fakeDevops simulates the Azure DevOps API over a canned set of work items
+// (each map has an "id" plus fields). It honors the System.Id watermark in the
+// WIQL so the connector's forward paging can be exercised, and records the
+// WIQL queries / fields it was asked for.
 type fakeDevops struct {
 	items    []map[string]any
-	lastWIQL string
-	lastMax  int
+	wiqls    []string // every queryIDs query, in order
+	lastTop  int
 	lastFlds []string
 }
 
-func (f *fakeDevops) queryWorkItems(ctx context.Context, wiql string, flds []string, max int) ([]map[string]any, error) {
-	f.lastWIQL, f.lastFlds, f.lastMax = wiql, flds, max
-	items := f.items
-	if max > 0 && max < len(items) {
-		items = items[:max]
+func (f *fakeDevops) itemID(m map[string]any) int { return int(m["id"].(float64)) }
+
+func (f *fakeDevops) queryIDs(ctx context.Context, wiql string, top int) ([]int, error) {
+	f.wiqls = append(f.wiqls, wiql)
+	f.lastTop = top
+	watermark := parseWatermark(wiql) // -1 if the wiql has no "[System.Id] > N"
+	var ids []int
+	for _, m := range f.items {
+		if id := f.itemID(m); watermark < 0 || id > watermark {
+			ids = append(ids, id)
+		}
 	}
-	return items, nil
+	sort.Ints(ids)
+	if len(ids) > top {
+		ids = ids[:top]
+	}
+	return ids, nil
+}
+
+func (f *fakeDevops) workItems(ctx context.Context, ids []int, flds []string) ([]map[string]any, error) {
+	f.lastFlds = flds
+	byID := map[int]map[string]any{}
+	for _, m := range f.items {
+		byID[f.itemID(m)] = m
+	}
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// parseWatermark extracts N from a "[System.Id] > N" clause, or -1 if absent.
+func parseWatermark(wiql string) int {
+	const marker = "[System.Id] > "
+	i := strings.Index(wiql, marker)
+	if i < 0 {
+		return -1
+	}
+	rest := wiql[i+len(marker):]
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	n, err := strconv.Atoi(rest[:j])
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 func drain(t *testing.T, it engine.RowIterator) []engine.Row {
@@ -121,8 +169,11 @@ func TestDefaultWIQLAndTypeFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = @project AND [System.WorkItemType] = 'Bug' ORDER BY [System.ChangedDate] DESC"; fake.lastWIQL != want {
-		t.Errorf("wiql:\n got  %s\n want %s", fake.lastWIQL, want)
+	// The default query filters by type, pages by ascending System.Id, and
+	// starts from watermark 0.
+	want := "SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = @project AND [System.WorkItemType] = 'Bug' AND [System.Id] > 0 ORDER BY [System.Id] ASC"
+	if fake.wiqls[0] != want {
+		t.Errorf("wiql:\n got  %s\n want %s", fake.wiqls[0], want)
 	}
 	// Requested fields should include the namespaced keys but not "id".
 	for _, f := range fake.lastFlds {
@@ -139,8 +190,9 @@ func TestWIQLOverride(t *testing.T) {
 	if _, err := c.Scan(context.Background(), connector.ScanRequest{Dataset: ds(map[string]any{"wiql": custom})}); err != nil {
 		t.Fatal(err)
 	}
-	if fake.lastWIQL != custom {
-		t.Errorf("wiql = %q, want override %q", fake.lastWIQL, custom)
+	// A custom query is run once, verbatim (no watermark injected).
+	if len(fake.wiqls) != 1 || fake.wiqls[0] != custom {
+		t.Errorf("queries = %v, want one verbatim %q", fake.wiqls, custom)
 	}
 }
 
@@ -157,8 +209,45 @@ func TestScanLimitNoPredicate(t *testing.T) {
 	if rows := drain(t, it); len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	if fake.lastMax != 2 {
-		t.Errorf("max passed to API = %d, want 2", fake.lastMax)
+	// The pushed LIMIT becomes the page $top, so only 2 ids are requested.
+	if fake.lastTop != 2 {
+		t.Errorf("$top = %d, want 2", fake.lastTop)
+	}
+}
+
+func TestPagingByWatermark(t *testing.T) {
+	// Shrink the page size so a handful of items forces multiple pages.
+	old := wiqlPageSize
+	wiqlPageSize = 2
+	defer func() { wiqlPageSize = old }()
+
+	var items []map[string]any
+	for _, id := range []int{10, 20, 30, 40, 50} {
+		items = append(items, map[string]any{"id": float64(id), "System.Title": fmt.Sprintf("wi-%d", id)})
+	}
+	fake := &fakeDevops{items: items}
+	c := newWithClient(fake)
+
+	it, err := c.Scan(context.Background(), connector.ScanRequest{Dataset: ds(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := drain(t, it)
+	if len(rows) != 5 {
+		t.Fatalf("rows = %d, want 5 (paged across pages of 2)", len(rows))
+	}
+	// 5 items in pages of 2 -> queries at watermark 0, 20, 40 (last page short,
+	// loop stops): at least 3 paged queries with ascending watermarks.
+	if len(fake.wiqls) < 3 {
+		t.Fatalf("queries = %d, want >= 3 (paging)", len(fake.wiqls))
+	}
+	if parseWatermark(fake.wiqls[0]) != 0 || parseWatermark(fake.wiqls[1]) != 20 {
+		t.Errorf("watermarks = [%d, %d, ...], want [0, 20, ...]",
+			parseWatermark(fake.wiqls[0]), parseWatermark(fake.wiqls[1]))
+	}
+	// Titles come back for all five (rows ordered by ascending id).
+	if rows[0].Values[1].V != "wi-10" || rows[4].Values[1].V != "wi-50" {
+		t.Errorf("row titles wrong: %v .. %v", rows[0].Values[1].V, rows[4].Values[1].V)
 	}
 }
 
@@ -235,9 +324,10 @@ func TestRealClientPathNoColon(t *testing.T) {
 	}
 }
 
-// TestWIQLTopCap verifies the WIQL request always carries $top: capped at the
-// hard limit by default (so a >20000-item project doesn't fail the query), and
-// lowered to the engine's LIMIT when that can be pushed.
+// TestWIQLTopCap verifies each WIQL request carries $top: the page size by
+// default, and the engine's LIMIT when that is smaller (so a small LIMIT fetches
+// just one short page). Paging — not $top — is what keeps under the 20000 match
+// cap; this only checks $top is sent and sized correctly.
 func TestWIQLTopCap(t *testing.T) {
 	var gotTop string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -22,11 +22,13 @@
 //	              "SELECT [System.Id] FROM workitems WHERE [System.State] = 'Active'".
 //	url           override the API base (default https://dev.azure.com).
 //
-// WIQL caps results at 20000 server-side; the connector always sends $top to
-// stay within it (at the query's LIMIT when that can be pushed, else 20000),
-// taking the most-recently-changed items. A project with more than 20000
-// relevant items should narrow server-side via the type filter or a custom
-// wiql WHERE clause, since a SQL WHERE filters only the fetched window.
+// WIQL fails any query that *matches* more than 20000 items (error VS402337),
+// and $top does not avoid it. The default query therefore pages forward by
+// ascending System.Id ([System.Id] > watermark ORDER BY [System.Id] ASC), an
+// index range scan that stays under the cap, retrieving work items beyond 20000
+// up to an overall scan cap. A custom `wiql` is run as a single query, so it
+// must itself match under 20000 — narrow it with a WHERE clause. A SQL WHERE on
+// our side filters only the fetched rows, not the WIQL match set.
 package azdevopsc
 
 import (
@@ -50,19 +52,24 @@ const (
 	apiVersion  = "7.0"
 	// batchSize is the max work item IDs per work-items fetch (API limit is 200).
 	batchSize = 200
-	// wiqlTopMax is the WIQL endpoint's hard result cap. A query that matches
-	// more rows than this fails with HTTP 400 ("number of work items returned
-	// exceeded limit of 20000"), so we always send $top to cap it server-side.
-	wiqlTopMax = 20000
-	// maxItems bounds a single scan to keep memory bounded.
-	maxItems = wiqlTopMax
+	// maxItems bounds a single scan (when no LIMIT is pushed) to keep memory
+	// bounded; paging can retrieve work items beyond WIQL's 20000 cap up to here.
+	maxItems = 50000
 )
 
-// devopsAPI is the connector's narrow view of Azure DevOps: run a WIQL query and
-// return up to max work items as flattened field maps (each includes "id"). The
-// real client performs the WIQL + batch-fetch round trips; tests inject a fake.
+// wiqlPageSize is the per-page $top for WIQL paging. WIQL fails a query that
+// *matches* more than 20000 items (VS402337) regardless of $top, so the default
+// query pages forward by ascending System.Id — each page is an index range scan
+// that stays under the cap. A var so tests can shrink it.
+var wiqlPageSize = 20000
+
+// devopsAPI is the connector's narrow view of Azure DevOps, split so the
+// connector can page WIQL itself: queryIDs runs one WIQL flat query (returning
+// matching ids, capped at top), and workItems fetches those ids' fields. The
+// real client does the HTTP; tests inject a fake.
 type devopsAPI interface {
-	queryWorkItems(ctx context.Context, wiql string, fields []string, max int) ([]map[string]any, error)
+	queryIDs(ctx context.Context, wiql string, top int) ([]int, error)
+	workItems(ctx context.Context, ids []int, fields []string) ([]map[string]any, error)
 }
 
 // Connector queries Azure DevOps Boards work items.
@@ -102,10 +109,13 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		limit = *req.Limit
 	}
 
-	wiql := buildWIQL(req.Dataset.Options)
-	items, err := api.queryWorkItems(ctx, wiql, requestedFields(), limit)
+	ids, err := collectIDs(ctx, api, req.Dataset.Options, limit)
 	if err != nil {
 		return nil, fmt.Errorf("azuredevops query: %w", err)
+	}
+	items, err := api.workItems(ctx, ids, requestedFields())
+	if err != nil {
+		return nil, fmt.Errorf("azuredevops fetch: %w", err)
 	}
 	rows := make([]engine.Row, len(items))
 	for i, m := range items {
@@ -183,20 +193,52 @@ func checkDataset(ds connector.Dataset) error {
 	}
 }
 
-// buildWIQL returns the WIQL query: the caller-supplied "wiql" option verbatim,
-// or a default selecting the project's work items (optionally filtered by type),
-// newest first. @project resolves from the project in the request URL.
-func buildWIQL(opts map[string]any) string {
+// collectIDs returns the matching work item ids, up to limit. The default query
+// is paged forward by ascending System.Id (watermark = the highest id seen),
+// which keeps each WIQL page an index range scan under the 20000 match cap. A
+// caller-supplied wiql is run once as-is (it must itself match under the cap).
+func collectIDs(ctx context.Context, api devopsAPI, opts map[string]any, limit int) ([]int, error) {
+	var all []int
+	watermark := 0
+	for len(all) < limit {
+		wiql, pageable := wiqlForPage(opts, watermark)
+		page := wiqlPageSize
+		if rem := limit - len(all); rem < page {
+			page = rem
+		}
+		ids, err := api.queryIDs(ctx, wiql, page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, ids...)
+		if !pageable || len(ids) < page {
+			break // single-shot custom query, or the default query is drained
+		}
+		watermark = ids[len(ids)-1] // ids are ascending; advance past this page
+	}
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	return all, nil
+}
+
+// wiqlForPage builds the WIQL for one page. A caller-supplied "wiql" option is
+// returned verbatim with pageable=false (run once). Otherwise it builds the
+// default project query filtered to ids above the watermark and ordered by
+// ascending System.Id, so the connector can page through arbitrarily many work
+// items without tripping WIQL's 20000-match limit. @project resolves from the
+// project in the request URL.
+func wiqlForPage(opts map[string]any, watermark int) (wiql string, pageable bool) {
 	if q := stringOpt(opts, "wiql"); q != "" {
-		return q
+		return q, false
 	}
 	var b strings.Builder
 	b.WriteString("SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = @project")
 	if typ := stringOpt(opts, "type"); typ != "" {
 		fmt.Fprintf(&b, " AND [System.WorkItemType] = '%s'", strings.ReplaceAll(typ, "'", "''"))
 	}
-	b.WriteString(" ORDER BY [System.ChangedDate] DESC")
-	return b.String()
+	fmt.Fprintf(&b, " AND [System.Id] > %d ORDER BY [System.Id] ASC", watermark)
+	return b.String(), true
 }
 
 // ---- value helpers -----------------------------------------------------------
@@ -316,17 +358,9 @@ type httpClient struct {
 func (h *httpClient) orgPath() string     { return url.PathEscape(h.org) }
 func (h *httpClient) projectPath() string { return url.PathEscape(h.project) }
 
-// queryWorkItems runs the WIQL query, caps the IDs to max, then batch-fetches
-// the requested fields. Returned maps are each work item's "fields" object plus
-// a top-level "id".
-func (h *httpClient) queryWorkItems(ctx context.Context, wiql string, reqFields []string, max int) ([]map[string]any, error) {
-	// 1. WIQL -> work item references. The WIQL is project-scoped. $top caps the
-	// result server-side: at the engine's row limit when it can be pushed, else
-	// at the WIQL hard cap so a large project doesn't fail the whole query.
-	top := wiqlTopMax
-	if max > 0 && max < top {
-		top = max
-	}
+// queryIDs runs one WIQL flat query and returns the matching work item ids,
+// capped at top via the $top query parameter. The WIQL is project-scoped.
+func (h *httpClient) queryIDs(ctx context.Context, wiql string, top int) ([]int, error) {
 	wiqlURL := fmt.Sprintf("%s/%s/%s/_apis/wit/wiql?api-version=%s&$top=%d",
 		h.base, h.orgPath(), h.projectPath(), apiVersion, top)
 	body, _ := json.Marshal(map[string]string{"query": wiql})
@@ -338,18 +372,16 @@ func (h *httpClient) queryWorkItems(ctx context.Context, wiql string, reqFields 
 	if err := h.do(ctx, http.MethodPost, wiqlURL, body, &wiqlResp); err != nil {
 		return nil, fmt.Errorf("wiql: %w", err)
 	}
-	ids := make([]int, 0, len(wiqlResp.WorkItems))
-	for _, w := range wiqlResp.WorkItems {
-		ids = append(ids, w.ID)
-		if len(ids) >= max {
-			break
-		}
+	ids := make([]int, len(wiqlResp.WorkItems))
+	for i, w := range wiqlResp.WorkItems {
+		ids[i] = w.ID
 	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
+	return ids, nil
+}
 
-	// 2. Batch-fetch fields, chunked to the API's per-call limit.
+// workItems fetches the given ids' fields, chunked to the API's per-call limit.
+// Returned maps are each work item's "fields" object plus a top-level "id".
+func (h *httpClient) workItems(ctx context.Context, ids []int, reqFields []string) ([]map[string]any, error) {
 	var out []map[string]any
 	for start := 0; start < len(ids); start += batchSize {
 		end := start + batchSize
