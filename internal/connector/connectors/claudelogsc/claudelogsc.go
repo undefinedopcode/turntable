@@ -4,16 +4,19 @@
 // flattened, typed rows. Bookkeeping events (titles, mode changes, snapshots,
 // etc.) are skipped.
 //
-// Two views are available via the `kind` option:
+// Three views are available via the `kind` option:
 //
 //	messages (default)  one row per conversation message (text + tool_uses count)
 //	tools               one row per tool_use block (tool_name, tool_id, the input
 //	                    re-encoded as JSON), so a message that calls N tools is N
 //	                    rows. Query tool usage, or grep tool inputs as strings.
+//	tool_results        one row per tool_result block (tool_use_id, is_error,
+//	                    text). Join tool_use_id back to a tools-view tool_id to
+//	                    pair each call with its output.
 //
 // Options (path wins over project wins over the default):
 //
-//	kind     "messages" (default) or "tools".
+//	kind     "messages" (default), "tools", or "tool_results".
 //	path     a .jsonl session file, or a directory of them.
 //	project  a project slug (e.g. "-home-april-projects-foo") or a working-dir
 //	         path (slugified) -> ~/.claude/projects/<slug>.
@@ -82,6 +85,18 @@ var toolColumns = []engine.Column{
 	{Name: "tool_input", Type: engine.TypeString, Nullable: true}, // JSON-encoded input
 }
 
+// toolResultColumns: one row per tool_result block. Join tool_use_id back to a
+// tools-view tool_id to pair each call with its output.
+var toolResultColumns = []engine.Column{
+	{Name: "session_id", Type: engine.TypeString, Nullable: true},
+	{Name: "session_file", Type: engine.TypeString, Nullable: true},
+	{Name: "message_uuid", Type: engine.TypeString, Nullable: true},
+	{Name: "timestamp", Type: engine.TypeTime, Nullable: true},
+	{Name: "tool_use_id", Type: engine.TypeString, Nullable: true},
+	{Name: "is_error", Type: engine.TypeBool, Nullable: true},
+	{Name: "text", Type: engine.TypeString, Nullable: true},
+}
+
 // kindOf returns the requested view: "messages" (default) or "tools".
 func kindOf(ds connector.Dataset) string {
 	k := strings.ToLower(strings.TrimSpace(stringOpt(ds.Options, "kind")))
@@ -97,8 +112,10 @@ func schemaFor(kind string) (engine.Schema, error) {
 		return engine.Schema{Columns: messageColumns}, nil
 	case "tools":
 		return engine.Schema{Columns: toolColumns}, nil
+	case "tool_results":
+		return engine.Schema{Columns: toolResultColumns}, nil
 	default:
-		return engine.Schema{}, fmt.Errorf("claudelogs: unknown kind %q (messages|tools)", kind)
+		return engine.Schema{}, fmt.Errorf("claudelogs: unknown kind %q (messages|tools|tool_results)", kind)
 	}
 }
 
@@ -283,6 +300,22 @@ func (it *logIter) rowsFor(ev event) []engine.Row {
 		}
 		return rows
 	}
+	if it.kind == "tool_results" {
+		results := extractToolResults(ev.Message.Content)
+		rows := make([]engine.Row, len(results))
+		for i, r := range results {
+			rows[i] = engine.Row{Values: []engine.Value{
+				strOrNull(ev.SessionID),
+				strOrNull(file),
+				strOrNull(ev.UUID),
+				timeVal(ev.Timestamp),
+				strOrNull(r.useID),
+				engine.BoolVal(r.isError),
+				strOrNull(r.text),
+			}}
+		}
+		return rows
+	}
 	text, tools := extractText(ev.Message.Content)
 	return []engine.Row{{Values: []engine.Value{
 		strOrNull(ev.SessionID),
@@ -392,6 +425,44 @@ func extractToolCalls(raw json.RawMessage) []toolCall {
 			}
 		}
 		out = append(out, c)
+	}
+	return out
+}
+
+type toolResult struct {
+	useID   string
+	isError bool
+	text    string
+}
+
+// extractToolResults returns the tool_result blocks in a message's content
+// (these appear in the user message following a tool call). is_error defaults to
+// false when absent or null.
+func extractToolResults(raw json.RawMessage) []toolResult {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []toolResult
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok || m["type"] != "tool_result" {
+			continue
+		}
+		r := toolResult{}
+		r.useID, _ = m["tool_use_id"].(string)
+		if e, ok := m["is_error"].(bool); ok {
+			r.isError = e
+		}
+		r.text, _ = walkContent(m["content"])
+		out = append(out, r)
 	}
 	return out
 }

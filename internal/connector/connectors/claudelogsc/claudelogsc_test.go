@@ -175,6 +175,43 @@ func TestToolsKindWithInputs(t *testing.T) {
 	}
 }
 
+func TestScanToolResultsKind(t *testing.T) {
+	dir := t.TempDir()
+	writeSession(t, dir, "s.jsonl",
+		`{"type":"assistant","uuid":"a","timestamp":"2026-05-24T00:00:00Z","sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"u","timestamp":"2026-05-24T00:00:01Z","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"boom"},{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"ok output"}]}]}}
+`)
+	c := New()
+	it, err := c.Scan(context.Background(), connector.ScanRequest{
+		Dataset: connector.Dataset{Options: map[string]any{"path": dir, "kind": "tool_results"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := drain(t, it)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	// cols: session_id(0) session_file(1) message_uuid(2) timestamp(3)
+	//       tool_use_id(4) is_error(5) text(6)
+	if rows[0].Values[4].V != "t1" {
+		t.Errorf("tool_use_id = %v, want t1", rows[0].Values[4].V)
+	}
+	if b, _ := rows[0].Values[5].AsBool(); !b {
+		t.Errorf("is_error = %v, want true", rows[0].Values[5].V)
+	}
+	if rows[0].Values[6].V != "boom" {
+		t.Errorf("text = %v, want boom", rows[0].Values[6].V)
+	}
+	// Array content extracted; is_error defaults to false when absent.
+	if b, _ := rows[1].Values[5].AsBool(); b {
+		t.Errorf("row1 is_error = %v, want false (absent)", rows[1].Values[5].V)
+	}
+	if rows[1].Values[6].V != "ok output" {
+		t.Errorf("row1 text = %v", rows[1].Values[6].V)
+	}
+}
+
 func TestUnknownKindErrors(t *testing.T) {
 	c := New()
 	_, err := c.Resolve(context.Background(), connector.Dataset{Options: map[string]any{"kind": "bogus"}})

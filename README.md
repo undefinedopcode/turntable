@@ -564,6 +564,18 @@ SELECT tool_name, COUNT(*) AS n FROM tools GROUP BY tool_name ORDER BY n DESC
 SELECT tool_input FROM tools WHERE tool_name = 'Bash' AND tool_input LIKE '%git%'
 ```
 
+`kind: tool_results` is the matching output view — one row per `tool_result`
+block, with `tool_use_id`, `is_error`, and `text`. Join it to the tools view to
+pair each call with its result:
+
+```sql
+-- error rate per tool
+SELECT c.tool_name, COUNT(*) AS calls,
+       SUM(CASE WHEN r.is_error THEN 1 ELSE 0 END) AS errors
+FROM calls c JOIN results r ON c.tool_id = r.tool_use_id
+GROUP BY c.tool_name ORDER BY errors DESC
+```
+
 With no `path`/`project` it defaults to the current working directory's project.
 Note: project slugs contain `-`; the config `path`/`project` options or a
 single-session qualified ref are the easiest ways to point at one.

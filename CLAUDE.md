@@ -101,9 +101,11 @@ interfaces:
     `claudelogsc` is a specialized local-JSONL reader for Claude Code transcripts
     (`~/.claude/projects/<slug>/*.jsonl`): text extraction from string-or-array
     `content`, a `path`/`project` option (or default to the cwd's project), and a
-    `kind` option selecting one of two fixed schemas — `messages` (default; one
-    row per message) or `tools` (one row per `tool_use` block; the iterator
-    buffers the N rows a message produces). Its options route through
+    `kind` option selecting one of three fixed schemas — `messages` (default; one
+    row per message), `tools` (one row per `tool_use` block), or `tool_results`
+    (one row per `tool_result` block; join `tool_use_id` to a tools-view
+    `tool_id`). The iterator buffers the N rows a message produces. Its options
+    route through
     `Dataset.Options`, not the file-path field, so it is **not** in
     `isFileConnector`.
   - **SQL** (`sqlc`): pushes `WHERE`/`ORDER BY`/`LIMIT` into the DB via
