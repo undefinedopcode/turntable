@@ -101,6 +101,47 @@ func TestPushdownLimitWithdrawnUnderOrderBy(t *testing.T) {
 	}
 }
 
+func TestPushdownOrderByColumns(t *testing.T) {
+	// A plain-column ORDER BY is offered to the connector (a hint; the engine
+	// still sorts). DESC and multiple terms are preserved.
+	p := buildPlan(t, "SELECT * FROM t ORDER BY y DESC, x")
+	scan := firstScan(p.Root)
+	if len(scan.OrderBy) != 2 {
+		t.Fatalf("OrderBy = %+v, want 2 terms", scan.OrderBy)
+	}
+	if scan.OrderBy[0].Column != "y" || !scan.OrderBy[0].Desc {
+		t.Errorf("term 0 = %+v, want {y DESC}", scan.OrderBy[0])
+	}
+	if scan.OrderBy[1].Column != "x" || scan.OrderBy[1].Desc {
+		t.Errorf("term 1 = %+v, want {x ASC}", scan.OrderBy[1])
+	}
+	// The engine still sorts above the scan.
+	if !hasSort(p.Root) {
+		t.Error("expected engine Sort retained above Scan")
+	}
+}
+
+func TestPushdownOrderByNotPushedForExpression(t *testing.T) {
+	// An ORDER BY expression (not a plain column) can't be a connector hint.
+	p := buildPlan(t, "SELECT * FROM t ORDER BY x + 1")
+	if scan := firstScan(p.Root); len(scan.OrderBy) != 0 {
+		t.Errorf("OrderBy should be empty for an expression order, got %+v", scan.OrderBy)
+	}
+}
+
+func TestPushdownOrderByNotPushedForJoin(t *testing.T) {
+	p := buildPlan(t, "SELECT * FROM t JOIN u ON t.x = u.x ORDER BY t.y")
+	j := firstJoin(p.Root)
+	if j == nil {
+		t.Fatal("expected a Join")
+	}
+	for _, side := range []Node{j.Left, j.Right} {
+		if s, ok := side.(*Scan); ok && len(s.OrderBy) != 0 {
+			t.Errorf("join scan %q should have no OrderBy hint, got %+v", s.Alias, s.OrderBy)
+		}
+	}
+}
+
 func TestPushdownLimitWithdrawnUnderAggregate(t *testing.T) {
 	p := buildPlan(t, "SELECT COUNT(*) AS n FROM t WHERE x > 1 LIMIT 5")
 	scan := firstScan(p.Root)
@@ -147,6 +188,22 @@ func hasFilter(n Node) bool {
 		return hasFilter(node.Child)
 	case *Limit:
 		return hasFilter(node.Child)
+	}
+	return false
+}
+
+func hasSort(n Node) bool {
+	switch node := n.(type) {
+	case *Sort:
+		return true
+	case *Filter:
+		return hasSort(node.Child)
+	case *Project:
+		return hasSort(node.Child)
+	case *Aggregate:
+		return hasSort(node.Child)
+	case *Limit:
+		return hasSort(node.Child)
 	}
 	return false
 }

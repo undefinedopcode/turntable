@@ -126,18 +126,21 @@ interfaces:
     (Azure Table Storage) supports two auth paths — `connection_string`, or
     `account`/`endpoint` for Azure AD via `DefaultAzureCredential` — and
     translates predicates to an OData `$filter` (`translateOData`).
-    **Predicate/Limit pushdown:** wired in the planner. For a single-table scan
-    (no joins), `buildSelect` sets `Scan.Predicate` (the WHERE) and, when safe
-    (no ORDER BY / aggregate / OFFSET), `Scan.Limit`; `execScan` passes them in
-    the `ScanRequest`. It is an **optimization only** — the engine's `Filter`/
-    `Limit` nodes are always kept above the Scan, so a connector that ignores or
-    partially honors the hints stays correct (sqlc/aztablesc filter at the
-    source; file & most API connectors ignore the predicate and the engine
-    filters). A connector must push `Limit` only when it fully applied the
-    predicate (see sqlc's `predicateHandled`); the planner withdraws the limit
-    for ORDER BY/aggregate/OFFSET. `--explain` annotates pushed scans, e.g.
-    `Scan inv [pushdown: predicate, limit=3]`. There is no `ScanResponse`, so
-    the engine cannot drop the redundant re-filter — a future refinement.
+    **Predicate/Limit/OrderBy pushdown:** wired in the planner. For a
+    single-table scan (no joins), `buildSelect` sets `Scan.Predicate` (the
+    WHERE); `Scan.Limit` when safe (no ORDER BY / aggregate / OFFSET); and
+    `Scan.OrderBy` when every ORDER BY term is a plain column (`columnOrderTerms`).
+    `execScan` passes all three in the `ScanRequest`. It is an **optimization
+    only** — the engine's `Filter`/`Sort`/`Limit` nodes are always kept above the
+    Scan, so a connector that ignores or partially honors the hints stays correct
+    (sqlc/aztablesc filter at the source; sqlc and azdevopsc also order at the
+    source; file & most API connectors ignore them and the engine does the work).
+    A connector must push `Limit` only when it fully applied the predicate (see
+    sqlc's `predicateHandled`); the planner withdraws the limit for
+    ORDER BY/aggregate/OFFSET (so a connector honoring an ORDER BY hint must not
+    also truncate). `--explain` annotates pushed scans, e.g.
+    `Scan inv [pushdown: predicate, limit=3, order]`. There is no `ScanResponse`,
+    so the engine cannot drop the redundant re-filter/re-sort — a future refinement.
 
 **`internal/cli`** wires it together. `cli.go` `NewApp()` registers all built-in
 connectors and owns flag/config handling; `repl.go` is the interactive loop

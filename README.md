@@ -420,8 +420,10 @@ The `organization` may be the bare slug (`my-org`) or a full
 server-side — `WHERE assigned_to_email = 'me@co' AND state = 'Active'` becomes an
 Azure-side filter, returning only your items even on a huge project. (Translatable
 comparisons and `IN` on the columns above are pushed; the rest still run in the
-engine.) An *unfiltered* query over a >20,000-item project can still exceed the
-cap — add a `WHERE`, or a custom `wiql` `WHERE` clause.
+engine.) A plain-column `ORDER BY` is pushed too, so `ORDER BY changed_date DESC
+LIMIT 50` returns the 50 most-recently-changed *from Azure*. An *unfiltered*
+query over a >20,000-item project can still exceed the cap — add a `WHERE`, or a
+custom `wiql` `WHERE` clause.
 
 ### AWS CloudWatch
 

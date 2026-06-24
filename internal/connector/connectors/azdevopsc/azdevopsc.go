@@ -35,6 +35,12 @@
 //
 // Filter assignment with assigned_to_email (the identity's unique name / email);
 // assigned_to is the display name. Both push to [System.AssignedTo].
+//
+// A plain-column ORDER BY is also pushed: the connector runs a single ordered
+// WIQL query (instead of System.Id paging) so a capped result is the true top by
+// that sort key — e.g. ORDER BY changed_date DESC LIMIT 50 returns the 50 most
+// recently changed from Azure, not from an arbitrary id window. The engine
+// re-sorts, so an untranslatable ORDER BY just falls back to paging.
 package azdevopsc
 
 import (
@@ -116,7 +122,20 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		limit = *req.Limit
 	}
 
-	ids, err := collectIDs(ctx, api, req.Dataset.Options, req.Predicate, limit)
+	// When the engine offers a fully-column ORDER BY (and we own the query),
+	// run a single ordered query so a capped result is the user's true top by
+	// that sort key; otherwise page forward by System.Id. The engine re-sorts
+	// regardless, so this only affects which rows survive a cap.
+	var ids []int
+	if order := translateOrderBy(req.OrderBy); order != "" && stringOpt(req.Dataset.Options, "wiql") == "" {
+		top := wiqlPageSize
+		if limit < top {
+			top = limit
+		}
+		ids, err = api.queryIDs(ctx, wiqlOrdered(req.Dataset.Options, req.Predicate, order), top)
+	} else {
+		ids, err = collectIDs(ctx, api, req.Dataset.Options, req.Predicate, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("azuredevops query: %w", err)
 	}
@@ -240,22 +259,56 @@ func wiqlForPage(opts map[string]any, predicate tsql.Expr, watermark int) (wiql 
 	if q := stringOpt(opts, "wiql"); q != "" {
 		return q, false
 	}
+	return fmt.Sprintf("SELECT [System.Id] FROM workitems WHERE %s AND [System.Id] > %d ORDER BY [System.Id] ASC",
+		wiqlWhere(opts, predicate), watermark), true
+}
+
+// wiqlOrdered builds the default query with the caller's ORDER BY (no System.Id
+// paging). Used when the engine pushes a fully-column ORDER BY.
+func wiqlOrdered(opts map[string]any, predicate tsql.Expr, order string) string {
+	return fmt.Sprintf("SELECT [System.Id] FROM workitems WHERE %s ORDER BY %s",
+		wiqlWhere(opts, predicate), order)
+}
+
+// wiqlWhere builds the WHERE body shared by the paged and ordered queries: the
+// project scope, the optional type filter, and as much of the SQL predicate as
+// translates safely (the engine re-applies the full predicate, so a looser push
+// stays correct). Pushing the predicate is essential — an unfiltered query over
+// a >20000-item project fails server-side.
+func wiqlWhere(opts map[string]any, predicate tsql.Expr) string {
 	var b strings.Builder
-	b.WriteString("SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = @project")
+	b.WriteString("[System.TeamProject] = @project")
 	if typ := stringOpt(opts, "type"); typ != "" {
 		fmt.Fprintf(&b, " AND [System.WorkItemType] = '%s'", strings.ReplaceAll(typ, "'", "''"))
 	}
-	// Push as much of the SQL WHERE into WIQL as translates safely, so Azure
-	// filters server-side (essential: an unfiltered query over a >20000-item
-	// project fails). The engine still re-applies the full predicate, so a
-	// partial/looser translation stays correct.
 	if predicate != nil {
 		if p, ok := translateWIQL(predicate); ok {
 			fmt.Fprintf(&b, " AND (%s)", p)
 		}
 	}
-	fmt.Fprintf(&b, " AND [System.Id] > %d ORDER BY [System.Id] ASC", watermark)
-	return b.String(), true
+	return b.String()
+}
+
+// translateOrderBy maps the engine's ORDER BY hint to a WIQL ORDER BY clause,
+// or "" if any term references a column we can't push (then the caller keeps
+// System.Id paging and lets the engine sort).
+func translateOrderBy(terms []connector.OrderTerm) string {
+	if len(terms) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(terms))
+	for _, t := range terms {
+		f, ok := wiqlFieldFor(t.Column)
+		if !ok {
+			return ""
+		}
+		dir := "ASC"
+		if t.Desc {
+			dir = "DESC"
+		}
+		parts = append(parts, f+" "+dir)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // wiqlFieldFor maps an output column to its WIQL field reference, or false if

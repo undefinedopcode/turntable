@@ -533,6 +533,9 @@ func formatPlan(n plan.Node, depth int) string {
 		if node.Limit != nil {
 			pd = append(pd, fmt.Sprintf("limit=%d", *node.Limit))
 		}
+		if len(node.OrderBy) > 0 {
+			pd = append(pd, "order")
+		}
 		if len(pd) > 0 {
 			line += " [pushdown: " + strings.Join(pd, ", ") + "]"
 		}

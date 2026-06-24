@@ -31,17 +31,18 @@ type Node interface{ planNode() }
 
 // Scan reads rows from a connector dataset.
 //
-// Predicate and Limit are pushdown hints handed to the connector via the
-// ScanRequest. They are an optimization only: the engine still applies its own
-// Filter/Limit above the Scan, so a connector that ignores or partially honors
-// them stays correct. They are set only for single-table scans (no joins) where
-// pushing is safe — see buildSelect.
+// Predicate, Limit, and OrderBy are pushdown hints handed to the connector via
+// the ScanRequest. They are an optimization only: the engine still applies its
+// own Filter/Sort/Limit above the Scan, so a connector that ignores or partially
+// honors them stays correct. They are set only for single-table scans (no joins)
+// where pushing is safe — see buildSelect.
 type Scan struct {
 	Source    connector.Source
 	Schema    engine.Schema
 	Alias     string
-	Predicate sql.Expr // WHERE predicate to offer the connector (may be nil)
-	Limit     *int     // row limit to offer the connector (may be nil)
+	Predicate sql.Expr              // WHERE predicate to offer the connector (may be nil)
+	Limit     *int                  // row limit to offer the connector (may be nil)
+	OrderBy   []connector.OrderTerm // ordering hint (set only when every ORDER BY term is a plain column)
 }
 
 // NoFrom is a synthetic single-row, zero-column relation for "SELECT <expr>"
@@ -359,6 +360,22 @@ func valueToLiteral(v engine.Value) (sql.Expr, error) {
 	}
 }
 
+// columnOrderTerms converts ORDER BY terms to connector order hints, but only
+// if every term is a plain column reference (the connector OrderTerm carries
+// just a column name + direction). ok is false if any term is an expression or
+// alias, so the caller pushes the whole ORDER BY or none of it.
+func columnOrderTerms(order []sql.OrderTerm) ([]connector.OrderTerm, bool) {
+	out := make([]connector.OrderTerm, 0, len(order))
+	for _, t := range order {
+		cr, ok := t.Expr.(*sql.ColRef)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, connector.OrderTerm{Column: cr.Name, Desc: t.Desc})
+	}
+	return out, true
+}
+
 // buildSelect builds the plan for a SELECT, returning the root node and the
 // output schema (after projection).
 func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, error) {
@@ -403,6 +420,15 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		// rows to sort), no aggregation (needs all rows to group), no OFFSET.
 		if stmt.Limit != nil && stmt.Offset == nil && len(stmt.OrderBy) == 0 && !hasAgg {
 			scan.Limit = stmt.Limit
+		}
+		// ORDER BY is offered to the connector only when every term is a plain
+		// column (the connector OrderTerm is column+direction) and there is no
+		// aggregation. It is a hint — the engine's Sort re-orders — so a
+		// connector may honor it to choose which rows survive a cap.
+		if len(stmt.OrderBy) > 0 && !hasAgg {
+			if terms, ok := columnOrderTerms(stmt.OrderBy); ok {
+				scan.OrderBy = terms
+			}
 		}
 	}
 

@@ -155,6 +155,7 @@ func execScan(ctx context.Context, node *Scan) (engine.RowIterator, engine.Schem
 		Dataset:   node.Source.Dataset,
 		Predicate: node.Predicate,
 		Limit:     node.Limit,
+		OrderBy:   node.OrderBy,
 	})
 	if err != nil {
 		return nil, engine.Schema{}, err

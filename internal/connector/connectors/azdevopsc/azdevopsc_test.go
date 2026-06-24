@@ -271,6 +271,49 @@ func TestScanPushesPredicate(t *testing.T) {
 	}
 }
 
+func TestScanPushesOrderBy(t *testing.T) {
+	fake := &fakeDevops{}
+	c := newWithClient(fake)
+	// A fully-column ORDER BY hint -> a single ordered WIQL query (no System.Id
+	// paging), with the SQL WHERE also pushed.
+	pred, _ := tsql.ParseExpr(`state = 'Active'`)
+	_, err := c.Scan(context.Background(), connector.ScanRequest{
+		Dataset:   ds(nil),
+		Predicate: pred,
+		OrderBy:   []connector.OrderTerm{{Column: "changed_date", Desc: true}, {Column: "priority"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := fake.wiqls[0]
+	if !strings.Contains(q, "ORDER BY [System.ChangedDate] DESC, [Microsoft.VSTS.Common.Priority] ASC") {
+		t.Errorf("ORDER BY not pushed into WIQL:\n%s", q)
+	}
+	if strings.Contains(q, "[System.Id] >") {
+		t.Errorf("ordered query should not page by System.Id:\n%s", q)
+	}
+	if !strings.Contains(q, "[System.State] = 'Active'") {
+		t.Errorf("predicate should still be pushed:\n%s", q)
+	}
+}
+
+func TestScanUnpushableOrderByFallsBackToPaging(t *testing.T) {
+	fake := &fakeDevops{items: []map[string]any{{"id": float64(1)}, {"id": float64(2)}}}
+	c := newWithClient(fake)
+	// area_path is mappable, but an unmapped column voids the whole order hint;
+	// simulate that with an unknown column -> connector falls back to id paging.
+	_, err := c.Scan(context.Background(), connector.ScanRequest{
+		Dataset: ds(nil),
+		OrderBy: []connector.OrderTerm{{Column: "not_a_field"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.wiqls[0], "[System.Id] > 0 ORDER BY [System.Id] ASC") {
+		t.Errorf("expected fallback to System.Id paging, got:\n%s", fake.wiqls[0])
+	}
+}
+
 func TestPagingByWatermark(t *testing.T) {
 	// Shrink the page size so a handful of items forces multiple pages.
 	old := wiqlPageSize
