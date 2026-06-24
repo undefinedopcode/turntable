@@ -12,6 +12,7 @@ import (
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
+	tsql "github.com/april/turntable/internal/sql"
 )
 
 // fakeDevops simulates the Azure DevOps API over a canned set of work items
@@ -99,7 +100,7 @@ func TestResolveSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"id", "title", "work_item_type", "state", "assigned_to", "area_path", "iteration_path", "tags", "priority", "created_date", "changed_date"}
+	want := []string{"id", "title", "work_item_type", "state", "assigned_to", "assigned_to_email", "area_path", "iteration_path", "tags", "priority", "created_date", "changed_date"}
 	if len(sc.Columns) != len(want) {
 		t.Fatalf("cols = %d, want %d", len(sc.Columns), len(want))
 	}
@@ -143,18 +144,19 @@ func TestScanFlattensFields(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	// cols: id(0) title(1) type(2) state(3) assigned_to(4) area(5) iter(6) tags(7) priority(8) created(9) changed(10)
+	// cols: id(0) title(1) type(2) state(3) assigned_to(4) assigned_to_email(5)
+	//       area(6) iter(7) tags(8) priority(9) created(10) changed(11)
 	if n, _ := rows[0].Values[0].AsInt(); n != 42 {
 		t.Errorf("id = %v, want 42", rows[0].Values[0].V)
 	}
 	if rows[0].Values[4].V != "Ada Lovelace" {
 		t.Errorf("assigned_to = %v, want Ada Lovelace (nested displayName)", rows[0].Values[4].V)
 	}
-	if p, _ := rows[0].Values[8].AsInt(); p != 2 {
-		t.Errorf("priority = %v, want 2", rows[0].Values[8].V)
+	if p, _ := rows[0].Values[9].AsInt(); p != 2 {
+		t.Errorf("priority = %v, want 2", rows[0].Values[9].V)
 	}
-	if rows[0].Values[10].Type != engine.TypeTime {
-		t.Errorf("changed_date should coerce to time, got %v", rows[0].Values[10].Type)
+	if rows[0].Values[11].Type != engine.TypeTime {
+		t.Errorf("changed_date should coerce to time, got %v", rows[0].Values[11].Type)
 	}
 	// Row 1: missing AssignedTo -> NULL.
 	if !rows[1].Values[4].IsNull() {
@@ -212,6 +214,60 @@ func TestScanLimitNoPredicate(t *testing.T) {
 	// The pushed LIMIT becomes the page $top, so only 2 ids are requested.
 	if fake.lastTop != 2 {
 		t.Errorf("$top = %d, want 2", fake.lastTop)
+	}
+}
+
+func TestTranslateWIQL(t *testing.T) {
+	cases := []struct {
+		expr string
+		want string
+		ok   bool
+	}{
+		{`assigned_to_email = 'me@x.com'`, "[System.AssignedTo] = 'me@x.com'", true},
+		{`state = 'Active'`, "[System.State] = 'Active'", true},
+		{`state = 'Active' AND priority <= 2`, "([System.State] = 'Active' AND [Microsoft.VSTS.Common.Priority] <= 2)", true},
+		{`state IN ('Active', 'New')`, "[System.State] IN ('Active', 'New')", true},
+		// AND with an untranslatable conjunct: the translatable side is kept
+		// (still a superset, since the engine re-applies the full predicate).
+		{`state = 'Active' AND LOWER(title) = 'x'`, "[System.State] = 'Active'", true},
+		// OR is all-or-nothing; an untranslatable side voids the whole OR.
+		{`state = 'Active' OR LOWER(title) = 'x'`, "", false},
+		{`LOWER(title) = 'x'`, "", false}, // function not pushable
+		{`unknown_col = 'x'`, "", false},  // unmapped column
+		{`title LIKE 'a%'`, "", false},    // LIKE not pushed
+	}
+	for _, tc := range cases {
+		e, err := tsql.ParseExpr(tc.expr)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.expr, err)
+		}
+		got, ok := translateWIQL(e)
+		if ok != tc.ok {
+			t.Errorf("translate %q: ok=%v, want %v", tc.expr, ok, tc.ok)
+			continue
+		}
+		if ok && got != tc.want {
+			t.Errorf("translate %q:\n got  %s\n want %s", tc.expr, got, tc.want)
+		}
+	}
+}
+
+// TestScanPushesPredicate verifies the SQL WHERE is injected into the WIQL so
+// Azure filters server-side (the fix for hitting the 20000 cap on a filtered
+// query). This is the user's reported case.
+func TestScanPushesPredicate(t *testing.T) {
+	fake := &fakeDevops{}
+	c := newWithClient(fake)
+	pred, err := tsql.ParseExpr(`assigned_to_email = 'me@company.com'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Scan(context.Background(), connector.ScanRequest{Dataset: ds(nil), Predicate: pred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.wiqls[0], "[System.AssignedTo] = 'me@company.com'") {
+		t.Errorf("predicate not pushed into WIQL:\n%s", fake.wiqls[0])
 	}
 }
 

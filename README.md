@@ -407,18 +407,21 @@ turntable -c turntable.yaml \
    WHERE state = 'Active' ORDER BY changed_date DESC LIMIT 20"
 ```
 
-Columns: `id, title, work_item_type, state, assigned_to, area_path,
-iteration_path, tags, priority, created_date, changed_date`. For full control,
-pass a `wiql` option with a complete WIQL query (it must `SELECT ... FROM
-workitems`), e.g. `wiql=SELECT [System.Id] FROM workitems WHERE [System.Tags]
-CONTAINS 'release'`.
+Columns: `id, title, work_item_type, state, assigned_to, assigned_to_email,
+area_path, iteration_path, tags, priority, created_date, changed_date`
+(`assigned_to` is the display name; `assigned_to_email` is the identity's unique
+name/email). For full control, pass a `wiql` option with a complete WIQL query
+(it must `SELECT ... FROM workitems`), e.g. `wiql=SELECT [System.Id] FROM
+workitems WHERE [System.Tags] CONTAINS 'release'`.
 
 The `organization` may be the bare slug (`my-org`) or a full
 `https://dev.azure.com/my-org` URL. WIQL fails any query that *matches* more than
-20,000 items, so the default query pages forward by ascending `System.Id` to
-retrieve a project of any size. A custom `wiql` is run as a single query and must
-itself match under 20,000 — narrow it with a `WHERE` clause (a SQL `WHERE` on
-turntable's side only filters the rows already fetched).
+20,000 items, so the connector **pushes your SQL `WHERE` into the WIQL** to filter
+server-side — `WHERE assigned_to_email = 'me@co' AND state = 'Active'` becomes an
+Azure-side filter, returning only your items even on a huge project. (Translatable
+comparisons and `IN` on the columns above are pushed; the rest still run in the
+engine.) An *unfiltered* query over a >20,000-item project can still exceed the
+cap — add a `WHERE`, or a custom `wiql` `WHERE` clause.
 
 ### AWS CloudWatch
 

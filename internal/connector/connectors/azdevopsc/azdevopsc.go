@@ -22,13 +22,19 @@
 //	              "SELECT [System.Id] FROM workitems WHERE [System.State] = 'Active'".
 //	url           override the API base (default https://dev.azure.com).
 //
-// WIQL fails any query that *matches* more than 20000 items (error VS402337),
-// and $top does not avoid it. The default query therefore pages forward by
-// ascending System.Id ([System.Id] > watermark ORDER BY [System.Id] ASC), an
-// index range scan that stays under the cap, retrieving work items beyond 20000
-// up to an overall scan cap. A custom `wiql` is run as a single query, so it
-// must itself match under 20000 — narrow it with a WHERE clause. A SQL WHERE on
-// our side filters only the fetched rows, not the WIQL match set.
+// WIQL fails any query that *matches* more than 20000 items (error VS402337).
+// To stay under that, the connector pushes the SQL WHERE into the WIQL where it
+// can (translateWIQL), so Azure filters server-side — e.g. `WHERE assigned_to_
+// email = 'me@x'` becomes `[System.AssignedTo] = 'me@x'` and only your items are
+// matched. The engine still re-applies the full predicate, so an untranslatable
+// or looser push stays correct. The default query also pages forward by
+// ascending System.Id so a filtered result spanning >20000 still streams. An
+// unfiltered query over a >20000-item project can still exceed the cap — add a
+// WHERE (or a custom `wiql` WHERE clause, which is run as-is and must itself
+// match under 20000).
+//
+// Filter assignment with assigned_to_email (the identity's unique name / email);
+// assigned_to is the display name. Both push to [System.AssignedTo].
 package azdevopsc
 
 import (
@@ -45,6 +51,7 @@ import (
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
+	tsql "github.com/april/turntable/internal/sql"
 )
 
 const (
@@ -109,7 +116,7 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		limit = *req.Limit
 	}
 
-	ids, err := collectIDs(ctx, api, req.Dataset.Options, limit)
+	ids, err := collectIDs(ctx, api, req.Dataset.Options, req.Predicate, limit)
 	if err != nil {
 		return nil, fmt.Errorf("azuredevops query: %w", err)
 	}
@@ -145,6 +152,7 @@ var fields = []field{
 	{"work_item_type", []string{"System.WorkItemType"}, engine.TypeString},
 	{"state", []string{"System.State"}, engine.TypeString},
 	{"assigned_to", []string{"System.AssignedTo", "displayName"}, engine.TypeString},
+	{"assigned_to_email", []string{"System.AssignedTo", "uniqueName"}, engine.TypeString},
 	{"area_path", []string{"System.AreaPath"}, engine.TypeString},
 	{"iteration_path", []string{"System.IterationPath"}, engine.TypeString},
 	{"tags", []string{"System.Tags"}, engine.TypeString},
@@ -197,11 +205,11 @@ func checkDataset(ds connector.Dataset) error {
 // is paged forward by ascending System.Id (watermark = the highest id seen),
 // which keeps each WIQL page an index range scan under the 20000 match cap. A
 // caller-supplied wiql is run once as-is (it must itself match under the cap).
-func collectIDs(ctx context.Context, api devopsAPI, opts map[string]any, limit int) ([]int, error) {
+func collectIDs(ctx context.Context, api devopsAPI, opts map[string]any, predicate tsql.Expr, limit int) ([]int, error) {
 	var all []int
 	watermark := 0
 	for len(all) < limit {
-		wiql, pageable := wiqlForPage(opts, watermark)
+		wiql, pageable := wiqlForPage(opts, predicate, watermark)
 		page := wiqlPageSize
 		if rem := limit - len(all); rem < page {
 			page = rem
@@ -228,7 +236,7 @@ func collectIDs(ctx context.Context, api devopsAPI, opts map[string]any, limit i
 // ascending System.Id, so the connector can page through arbitrarily many work
 // items without tripping WIQL's 20000-match limit. @project resolves from the
 // project in the request URL.
-func wiqlForPage(opts map[string]any, watermark int) (wiql string, pageable bool) {
+func wiqlForPage(opts map[string]any, predicate tsql.Expr, watermark int) (wiql string, pageable bool) {
 	if q := stringOpt(opts, "wiql"); q != "" {
 		return q, false
 	}
@@ -237,8 +245,108 @@ func wiqlForPage(opts map[string]any, watermark int) (wiql string, pageable bool
 	if typ := stringOpt(opts, "type"); typ != "" {
 		fmt.Fprintf(&b, " AND [System.WorkItemType] = '%s'", strings.ReplaceAll(typ, "'", "''"))
 	}
+	// Push as much of the SQL WHERE into WIQL as translates safely, so Azure
+	// filters server-side (essential: an unfiltered query over a >20000-item
+	// project fails). The engine still re-applies the full predicate, so a
+	// partial/looser translation stays correct.
+	if predicate != nil {
+		if p, ok := translateWIQL(predicate); ok {
+			fmt.Fprintf(&b, " AND (%s)", p)
+		}
+	}
 	fmt.Fprintf(&b, " AND [System.Id] > %d ORDER BY [System.Id] ASC", watermark)
 	return b.String(), true
+}
+
+// wiqlFieldFor maps an output column to its WIQL field reference, or false if
+// the column isn't pushable.
+func wiqlFieldFor(col string) (string, bool) {
+	if col == "id" {
+		return "[System.Id]", true
+	}
+	for _, f := range fields {
+		if f.col == col {
+			return "[" + f.path[0] + "]", true
+		}
+	}
+	return "", false
+}
+
+// translateWIQL converts a SQL predicate into a WIQL filter that the SQL
+// predicate *implies* (so WIQL returns a superset and the engine's re-filter
+// stays correct). It returns ok=false for anything it can't safely express.
+// AND may drop an untranslatable conjunct (still a superset); OR must translate
+// fully or not at all.
+func translateWIQL(e tsql.Expr) (string, bool) {
+	switch ex := e.(type) {
+	case *tsql.BinaryOp:
+		switch strings.ToUpper(ex.Op) {
+		case "AND":
+			l, lok := translateWIQL(ex.Left)
+			r, rok := translateWIQL(ex.Right)
+			switch {
+			case lok && rok:
+				return "(" + l + " AND " + r + ")", true
+			case lok:
+				return l, true
+			case rok:
+				return r, true
+			}
+			return "", false
+		case "OR":
+			l, lok := translateWIQL(ex.Left)
+			r, rok := translateWIQL(ex.Right)
+			if lok && rok {
+				return "(" + l + " OR " + r + ")", true
+			}
+			return "", false
+		case "=", "<>", "<", "<=", ">", ">=":
+			f, fok := wiqlOperand(ex.Left)
+			v, vok := wiqlLiteral(ex.Right)
+			if fok && vok {
+				return f + " " + ex.Op + " " + v, true
+			}
+			return "", false
+		}
+	case *tsql.InExpr:
+		if ex.Negate || ex.Subquery != nil || len(ex.List) == 0 {
+			return "", false
+		}
+		f, fok := wiqlOperand(ex.Expr)
+		if !fok {
+			return "", false
+		}
+		parts := make([]string, 0, len(ex.List))
+		for _, it := range ex.List {
+			v, ok := wiqlLiteral(it)
+			if !ok {
+				return "", false
+			}
+			parts = append(parts, v)
+		}
+		return f + " IN (" + strings.Join(parts, ", ") + ")", true
+	}
+	return "", false
+}
+
+func wiqlOperand(e tsql.Expr) (string, bool) {
+	c, ok := e.(*tsql.ColRef)
+	if !ok {
+		return "", false
+	}
+	return wiqlFieldFor(c.Name)
+}
+
+func wiqlLiteral(e tsql.Expr) (string, bool) {
+	switch v := e.(type) {
+	case *tsql.LitString:
+		return "'" + strings.ReplaceAll(v.V, "'", "''") + "'", true
+	case *tsql.LitInt:
+		return strconv.FormatInt(v.V, 10), true
+	case *tsql.LitFloat:
+		return strconv.FormatFloat(v.V, 'g', -1, 64), true
+	}
+	return "", false
 }
 
 // ---- value helpers -----------------------------------------------------------
