@@ -56,6 +56,39 @@ func TestParseJoin(t *testing.T) {
 	}
 }
 
+func TestParseExistsAndScalarSubquery(t *testing.T) {
+	// EXISTS in WHERE.
+	stmt, err := Parse("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.x = t.a)")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if _, ok := stmt.(*SelectStmt).Where.(*ExistsExpr); !ok {
+		t.Errorf("WHERE = %T, want *ExistsExpr", stmt.(*SelectStmt).Where)
+	}
+
+	// NOT EXISTS parses as a prefix NOT wrapping EXISTS.
+	stmt, _ = Parse("SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u)")
+	u, ok := stmt.(*SelectStmt).Where.(*UnaryOp)
+	if !ok || u.Op != "NOT" {
+		t.Fatalf("WHERE = %T, want UnaryOp NOT", stmt.(*SelectStmt).Where)
+	}
+	if _, ok := u.Expr.(*ExistsExpr); !ok {
+		t.Errorf("NOT operand = %T, want *ExistsExpr", u.Expr)
+	}
+
+	// Scalar subquery in the select list.
+	stmt, _ = Parse("SELECT a, (SELECT COUNT(*) FROM u WHERE u.x = t.a) AS c FROM t")
+	if _, ok := stmt.(*SelectStmt).Items.Items[1].Expr.(*ScalarSubquery); !ok {
+		t.Errorf("item1 = %T, want *ScalarSubquery", stmt.(*SelectStmt).Items.Items[1].Expr)
+	}
+
+	// A parenthesized non-SELECT is still a grouped expression, not a subquery.
+	stmt, _ = Parse("SELECT (a + 1) * 2 AS x FROM t")
+	if _, ok := stmt.(*SelectStmt).Items.Items[0].Expr.(*BinaryOp); !ok {
+		t.Errorf("item0 = %T, want *BinaryOp (grouped expr)", stmt.(*SelectStmt).Items.Items[0].Expr)
+	}
+}
+
 func TestParseWindowFunction(t *testing.T) {
 	stmt, err := Parse("SELECT ROW_NUMBER() OVER (PARTITION BY a, b ORDER BY c DESC, d) AS rn FROM t")
 	if err != nil {

@@ -509,19 +509,33 @@ func (p *Parser) parseOr() (Expr, error) {
 }
 
 func (p *Parser) parseAnd() (Expr, error) {
-	left, err := p.parseCompare()
+	left, err := p.parseNot()
 	if err != nil {
 		return nil, err
 	}
 	for p.kw("AND") {
 		p.advance()
-		right, err := p.parseCompare()
+		right, err := p.parseNot()
 		if err != nil {
 			return nil, err
 		}
 		left = &BinaryOp{Op: "AND", Left: left, Right: right}
 	}
 	return left, nil
+}
+
+// parseNot handles a prefix NOT (boolean negation, including NOT EXISTS). It
+// only fires on a leading NOT; `x NOT IN (...)` is still handled in parseCompare.
+func (p *Parser) parseNot() (Expr, error) {
+	if p.kw("NOT") {
+		p.advance()
+		e, err := p.parseNot()
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryOp{Op: "NOT", Expr: e}, nil
+	}
+	return p.parseCompare()
 }
 
 func (p *Parser) parseCompare() (Expr, error) {
@@ -707,8 +721,21 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return p.parseExtract()
 	case p.kw("POSITION"):
 		return p.parsePosition()
+	case p.kw("EXISTS"):
+		return p.parseExists()
 	case p.op("("):
 		p.advance()
+		// A parenthesized SELECT is a scalar subquery; otherwise a grouped expr.
+		if p.kw("SELECT") {
+			sub, err := p.parseSelect()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectOp(")"); err != nil {
+				return nil, err
+			}
+			return &ScalarSubquery{Query: sub}, nil
+		}
 		e, err := p.parseExpr()
 		if err != nil {
 			return nil, err
@@ -918,6 +945,25 @@ func (p *Parser) parsePosition() (Expr, error) {
 		return nil, err
 	}
 	return &PositionExpr{Substr: sub, Str: str}, nil
+}
+
+// parseExists parses EXISTS (subquery). A leading NOT is handled by parseNot.
+func (p *Parser) parseExists() (Expr, error) {
+	p.advance() // EXISTS
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	if !p.kw("SELECT") {
+		return nil, p.errf("expected SELECT in EXISTS subquery")
+	}
+	sub, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return &ExistsExpr{Query: sub}, nil
 }
 
 // parseWindowSpec parses an OVER ( [PARTITION BY ...] [ORDER BY ...] ) clause.

@@ -66,12 +66,31 @@ twice). Recursive CTEs (`WITH RECURSIVE`) are not supported.
 
   SELECT COUNT(*) FROM (SELECT id FROM a UNION SELECT id FROM b) AS u
   ```
-- **`IN` subqueries** — non-correlated, single column; executed once and folded
-  into a value set:
+- **`IN` subqueries** — a non-correlated, single-column `IN (SELECT ...)` is
+  executed once and folded into a value set (and is pushdown-eligible):
   ```sql
   SELECT name FROM users WHERE id IN (SELECT user_id FROM orders)
   ```
-  Scalar/`EXISTS` and correlated subqueries are not yet supported.
+- **`EXISTS` / `NOT EXISTS`**, **scalar subqueries** `(SELECT ...)` used as a
+  value (in `WHERE` or the select list), and **correlated** forms of all three:
+  ```sql
+  -- correlated EXISTS
+  SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM ord o WHERE o.emp_id = e.id)
+
+  -- correlated scalar subquery in the select list
+  SELECT name, (SELECT COUNT(*) FROM ord o WHERE o.emp_id = e.id) AS orders
+  FROM emp e
+
+  -- non-correlated scalar in a predicate
+  SELECT * FROM ord WHERE amount > (SELECT AVG(amount) FROM ord)
+  ```
+  A correlated column must be **qualified** with the outer table's alias
+  (`e.id`). A scalar subquery must return one column and at most one row (zero
+  rows → `NULL`; more than one → an error). Correlated subqueries are evaluated
+  per outer row (`O(rows)`), so they are correct but not fast on large inputs.
+  Not yet supported: subqueries combined with `GROUP BY`/aggregates/window
+  functions in the same query, correlation more than one level deep, and
+  subqueries in `HAVING`/`GROUP BY`.
 
 ### Set operations
 
@@ -281,7 +300,7 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Explicit window frames (`ROWS`/`RANGE BETWEEN …`), window functions together
-with `GROUP BY`, recursive CTEs (`WITH RECURSIVE`), parenthesized set-op
-grouping, non-equality / compound join conditions, scalar/`EXISTS`/correlated
-subqueries, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
+Explicit window frames (`ROWS`/`RANGE BETWEEN …`), subqueries together with
+`GROUP BY`/aggregates/window functions, recursive CTEs (`WITH RECURSIVE`),
+parenthesized set-op grouping, non-equality / compound join conditions, and
+DML/DDL. See `DESIGN.md` §11 for the roadmap.

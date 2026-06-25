@@ -71,6 +71,34 @@ type SetOp struct {
 	Schema engine.Schema
 }
 
+// subqKind classifies a subquery expression lifted into an Apply column.
+type subqKind int
+
+const (
+	subqExists subqKind = iota // EXISTS (...)
+	subqScalar                 // (SELECT ...) used as a value
+	subqIn                     // x IN (correlated SELECT ...)
+)
+
+// SubquerySpec is one subquery lifted into a $subN column by the Apply node.
+type SubquerySpec struct {
+	Name       string
+	Kind       subqKind
+	Inner      Node     // the subquery plan, built once (correlated refs are OuterRefs)
+	Test       sql.Expr // subqIn only: the LHS, evaluated against the outer row
+	Negate     bool     // subqIn only: NOT IN
+	Correlated bool     // false → the value is the same for every row (memoized)
+}
+
+// Apply evaluates correlated/uncorrelated subquery expressions per outer row and
+// appends each as a column (Schema = child schema + one column per spec). A
+// projection/filter above references the appended columns by name.
+type Apply struct {
+	Child  Node
+	Specs  []SubquerySpec
+	Schema engine.Schema
+}
+
 // Window computes window-function columns and appends them to its child's rows
 // (Schema is the child schema followed by one column per spec). A projection
 // above references the appended columns by name.
@@ -130,6 +158,7 @@ func (*Scan) planNode()      {}
 func (*Subquery) planNode()  {}
 func (*SetOp) planNode()     {}
 func (*Window) planNode()    {}
+func (*Apply) planNode()     {}
 func (*Filter) planNode()    {}
 func (*Project) planNode()   {}
 func (*Join) planNode()      {}
@@ -465,17 +494,6 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		return nil, engine.Schema{}, err
 	}
 
-	// Fold any `x IN (SELECT ...)` in WHERE/HAVING into a literal value list by
-	// executing the (non-correlated) subquery once. Doing this before pushdown
-	// and Filter construction means the resolved IN list can also be pushed to a
-	// capable connector. The engine sees an ordinary IN-list predicate.
-	if err := bc.resolveInSubqueries(stmt.Where); err != nil {
-		return nil, engine.Schema{}, err
-	}
-	if err := bc.resolveInSubqueries(stmt.Having); err != nil {
-		return nil, engine.Schema{}, err
-	}
-
 	// Determine if this is an aggregate query (GROUP BY present, or any
 	// aggregate function in the select list). Needed for pushdown gating below.
 	hasAgg := len(stmt.GroupBy) > 0
@@ -506,6 +524,39 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 	}
 	if hasWindow && hasAgg {
 		return nil, engine.Schema{}, fmt.Errorf("window functions combined with GROUP BY/aggregates are not yet supported")
+	}
+
+	// Subquery expressions (EXISTS, scalar subqueries, correlated IN) in WHERE or
+	// the select list are lifted into an Apply node that computes a value column
+	// per outer row. This runs before IN-folding so non-correlated INs still fold.
+	hasSubquery := exprHasSubquery(stmt.Where)
+	if !hasSubquery {
+		for _, it := range stmt.Items.Items {
+			if !it.Star && exprHasSubquery(it.Expr) {
+				hasSubquery = true
+				break
+			}
+		}
+	}
+	if hasSubquery {
+		if hasAgg || hasWindow {
+			return nil, engine.Schema{}, fmt.Errorf("subqueries combined with GROUP BY/aggregates/window functions are not yet supported")
+		}
+		base, baseSchema, err = bc.buildSubqueries(stmt, base, baseSchema)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+	}
+
+	// Fold any remaining (non-correlated) `x IN (SELECT ...)` in WHERE/HAVING into
+	// a literal value list by executing the subquery once. Doing this before
+	// pushdown means the resolved IN list can also be pushed to a capable
+	// connector. The engine sees an ordinary IN-list predicate.
+	if err := bc.resolveInSubqueries(stmt.Where); err != nil {
+		return nil, engine.Schema{}, err
+	}
+	if err := bc.resolveInSubqueries(stmt.Having); err != nil {
+		return nil, engine.Schema{}, err
 	}
 
 	// Resolve positional ORDER BY / GROUP BY references (e.g. `ORDER BY 2`) to
@@ -1005,6 +1056,268 @@ func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engi
 	winSchema := engine.Schema{Columns: append(append([]engine.Column{}, baseSchema.Columns...), win.cols...)}
 	node := &Window{Child: base, Specs: win.specs, Schema: winSchema}
 	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
+}
+
+// mapExpr deep-copies e, applying fn to every node first: a non-nil result
+// replaces the node (its children are not descended into), and nil recurses.
+// EXISTS/scalar-subquery nodes are treated as leaves (their inner Query is not
+// walked here).
+func mapExpr(e sql.Expr, fn func(sql.Expr) sql.Expr) sql.Expr {
+	if e == nil {
+		return nil
+	}
+	if r := fn(e); r != nil {
+		return r
+	}
+	switch ex := e.(type) {
+	case *sql.BinaryOp:
+		return &sql.BinaryOp{Op: ex.Op, Left: mapExpr(ex.Left, fn), Right: mapExpr(ex.Right, fn)}
+	case *sql.UnaryOp:
+		return &sql.UnaryOp{Op: ex.Op, Expr: mapExpr(ex.Expr, fn)}
+	case *sql.FuncCall:
+		args := make([]sql.Expr, len(ex.Args))
+		for i, a := range ex.Args {
+			args[i] = mapExpr(a, fn)
+		}
+		return &sql.FuncCall{Name: ex.Name, Args: args, Distinct: ex.Distinct, Over: ex.Over}
+	case *sql.InExpr:
+		list := make([]sql.Expr, len(ex.List))
+		for i, v := range ex.List {
+			list[i] = mapExpr(v, fn)
+		}
+		return &sql.InExpr{Expr: mapExpr(ex.Expr, fn), List: list, Subquery: ex.Subquery, Negate: ex.Negate}
+	case *sql.BetweenExpr:
+		return &sql.BetweenExpr{Expr: mapExpr(ex.Expr, fn), Low: mapExpr(ex.Low, fn), High: mapExpr(ex.High, fn), Negate: ex.Negate}
+	case *sql.LikeExpr:
+		return &sql.LikeExpr{Expr: mapExpr(ex.Expr, fn), Pat: mapExpr(ex.Pat, fn), Negate: ex.Negate, Insensitive: ex.Insensitive}
+	case *sql.IsNullExpr:
+		return &sql.IsNullExpr{Expr: mapExpr(ex.Expr, fn), Negate: ex.Negate}
+	case *sql.CaseExpr:
+		whens := make([]sql.CaseWhen, len(ex.Whens))
+		for i, w := range ex.Whens {
+			whens[i] = sql.CaseWhen{Cond: mapExpr(w.Cond, fn), Then: mapExpr(w.Then, fn)}
+		}
+		var els sql.Expr
+		if ex.Else != nil {
+			els = mapExpr(ex.Else, fn)
+		}
+		return &sql.CaseExpr{Whens: whens, Else: els}
+	case *sql.CastExpr:
+		return &sql.CastExpr{Expr: mapExpr(ex.Expr, fn), Type: ex.Type}
+	case *sql.ExtractExpr:
+		return &sql.ExtractExpr{Field: ex.Field, Source: mapExpr(ex.Source, fn)}
+	case *sql.PositionExpr:
+		return &sql.PositionExpr{Substr: mapExpr(ex.Substr, fn), Str: mapExpr(ex.Str, fn)}
+	}
+	return e
+}
+
+// tableAliases returns the set of names a subquery's own FROM/JOIN tables can be
+// referenced by (alias, else source name).
+func tableAliases(q *sql.SelectStmt) map[string]bool {
+	set := map[string]bool{}
+	add := func(tr sql.TableRef) {
+		a := tr.Alias
+		if a == "" {
+			a = tr.Name
+		}
+		if a == "" {
+			a = tr.Source
+		}
+		if a != "" {
+			set[a] = true
+		}
+	}
+	add(q.From)
+	for _, j := range q.Joins {
+		add(j.Ref)
+	}
+	return set
+}
+
+// rewriteCorrelated rewrites, in place, every qualified column in q that refers
+// to the outer scope (not one of q's own tables, but resolvable outside) into an
+// OuterRef. It returns the number rewritten (0 means the subquery is not
+// correlated). Correlated columns must be qualified with the outer table alias.
+func rewriteCorrelated(q *sql.SelectStmt, outer engine.Resolver) int {
+	inner := tableAliases(q)
+	count := 0
+	fn := func(e sql.Expr) sql.Expr {
+		cr, ok := e.(*sql.ColRef)
+		if !ok || cr.Qualifier == "" || inner[cr.Qualifier] {
+			return nil
+		}
+		if outer(cr.Qualifier, cr.Name) >= 0 {
+			count++
+			return &sql.OuterRef{Qualifier: cr.Qualifier, Name: cr.Name}
+		}
+		return nil
+	}
+	q.Where = mapExpr(q.Where, fn)
+	q.Having = mapExpr(q.Having, fn)
+	for i := range q.Items.Items {
+		if !q.Items.Items[i].Star {
+			q.Items.Items[i].Expr = mapExpr(q.Items.Items[i].Expr, fn)
+		}
+	}
+	for i := range q.Joins {
+		q.Joins[i].On = mapExpr(q.Joins[i].On, fn)
+	}
+	for i := range q.GroupBy {
+		q.GroupBy[i] = mapExpr(q.GroupBy[i], fn)
+	}
+	for i := range q.OrderBy {
+		q.OrderBy[i].Expr = mapExpr(q.OrderBy[i].Expr, fn)
+	}
+	return count
+}
+
+// buildSubqueryPlan rewrites a subquery's correlated references against the outer
+// scope, then builds its plan. It reports whether the subquery is correlated.
+func (bc *buildCtx) buildSubqueryPlan(q *sql.SelectStmt, outer Node, outerSchema engine.Schema) (Node, bool, error) {
+	n := rewriteCorrelated(q, resolverFor(outer, outerSchema))
+	inner, _, err := bc.buildSelect(q)
+	if err != nil {
+		return nil, false, err
+	}
+	return inner, n > 0, nil
+}
+
+// subqExtractor lifts subquery expressions into Apply $subN columns, returning
+// expressions that reference those columns.
+type subqExtractor struct {
+	bc          *buildCtx
+	outer       Node
+	outerSchema engine.Schema
+	specs       []SubquerySpec
+	cols        []engine.Column
+	n           int
+	err         error
+}
+
+func (x *subqExtractor) add(kind subqKind, inner Node, correlated bool, test sql.Expr, negate bool) sql.Expr {
+	name := fmt.Sprintf("$sub%d", x.n)
+	x.n++
+	x.specs = append(x.specs, SubquerySpec{Name: name, Kind: kind, Inner: inner, Test: test, Negate: negate, Correlated: correlated})
+	x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+	return &sql.ColRef{Name: name}
+}
+
+func (x *subqExtractor) rewrite(e sql.Expr) sql.Expr {
+	return mapExpr(e, func(node sql.Expr) sql.Expr {
+		if x.err != nil {
+			return nil
+		}
+		switch s := node.(type) {
+		case *sql.ExistsExpr:
+			inner, corr, err := x.bc.buildSubqueryPlan(s.Query, x.outer, x.outerSchema)
+			if err != nil {
+				x.err = err
+				return &sql.LitNull{}
+			}
+			return x.add(subqExists, inner, corr, nil, false)
+		case *sql.ScalarSubquery:
+			inner, corr, err := x.bc.buildSubqueryPlan(s.Query, x.outer, x.outerSchema)
+			if err != nil {
+				x.err = err
+				return &sql.LitNull{}
+			}
+			return x.add(subqScalar, inner, corr, nil, false)
+		case *sql.InExpr:
+			if s.Subquery == nil {
+				return nil
+			}
+			inner, corr, err := x.bc.buildSubqueryPlan(s.Subquery, x.outer, x.outerSchema)
+			if err != nil {
+				x.err = err
+				return &sql.LitNull{}
+			}
+			if !corr {
+				// A non-correlated IN is folded to a literal list elsewhere
+				// (resolveInSubqueries), which is pushdown-eligible.
+				return nil
+			}
+			return x.add(subqIn, inner, true, s.Expr, s.Negate)
+		}
+		return nil
+	})
+}
+
+// buildSubqueries lifts subquery expressions in WHERE/SELECT/ORDER BY into an
+// Apply node, rewriting those clauses to reference its $subN columns. If nothing
+// is lifted (e.g. only a non-correlated IN), the base is returned unchanged.
+func (bc *buildCtx) buildSubqueries(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, engine.Schema, error) {
+	x := &subqExtractor{bc: bc, outer: base, outerSchema: baseSchema}
+	if stmt.Where != nil {
+		stmt.Where = x.rewrite(stmt.Where)
+	}
+	for i := range stmt.Items.Items {
+		if !stmt.Items.Items[i].Star {
+			stmt.Items.Items[i].Expr = x.rewrite(stmt.Items.Items[i].Expr)
+		}
+	}
+	for i := range stmt.OrderBy {
+		stmt.OrderBy[i].Expr = x.rewrite(stmt.OrderBy[i].Expr)
+	}
+	if x.err != nil {
+		return nil, engine.Schema{}, x.err
+	}
+	if len(x.specs) == 0 {
+		return base, baseSchema, nil
+	}
+	schema := engine.Schema{Columns: append(append([]engine.Column{}, baseSchema.Columns...), x.cols...)}
+	return &Apply{Child: base, Specs: x.specs, Schema: schema}, schema, nil
+}
+
+// exprHasSubquery reports whether the expression contains a subquery node
+// (EXISTS, a scalar subquery, or x IN (SELECT ...)).
+func exprHasSubquery(e sql.Expr) bool {
+	switch ex := e.(type) {
+	case *sql.ExistsExpr, *sql.ScalarSubquery:
+		return true
+	case *sql.InExpr:
+		if ex.Subquery != nil {
+			return true
+		}
+		if exprHasSubquery(ex.Expr) {
+			return true
+		}
+		for _, x := range ex.List {
+			if exprHasSubquery(x) {
+				return true
+			}
+		}
+	case *sql.BinaryOp:
+		return exprHasSubquery(ex.Left) || exprHasSubquery(ex.Right)
+	case *sql.UnaryOp:
+		return exprHasSubquery(ex.Expr)
+	case *sql.BetweenExpr:
+		return exprHasSubquery(ex.Expr) || exprHasSubquery(ex.Low) || exprHasSubquery(ex.High)
+	case *sql.LikeExpr:
+		return exprHasSubquery(ex.Expr) || exprHasSubquery(ex.Pat)
+	case *sql.IsNullExpr:
+		return exprHasSubquery(ex.Expr)
+	case *sql.FuncCall:
+		for _, a := range ex.Args {
+			if exprHasSubquery(a) {
+				return true
+			}
+		}
+	case *sql.CaseExpr:
+		for _, w := range ex.Whens {
+			if exprHasSubquery(w.Cond) || exprHasSubquery(w.Then) {
+				return true
+			}
+		}
+		return ex.Else != nil && exprHasSubquery(ex.Else)
+	case *sql.CastExpr:
+		return exprHasSubquery(ex.Expr)
+	case *sql.ExtractExpr:
+		return exprHasSubquery(ex.Source)
+	case *sql.PositionExpr:
+		return exprHasSubquery(ex.Substr) || exprHasSubquery(ex.Str)
+	}
+	return false
 }
 
 // exprHasWindow reports whether the expression tree contains a window-function

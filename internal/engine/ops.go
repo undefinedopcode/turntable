@@ -506,6 +506,8 @@ func (a *AggregateIter) Next() (Row, bool, error) {
 }
 
 func (a *AggregateIter) collect() error {
+	// Non-nil so Next does not re-collect when the input is empty.
+	a.groups = []*aggGroup{}
 	index := map[string]int{}
 	for {
 		r, ok, err := a.child.Next()
@@ -534,6 +536,11 @@ func (a *AggregateIter) collect() error {
 			a.groups = append(a.groups, &aggGroup{key: ks, keyVals: keyVals})
 		}
 		a.groups[idx].rows = append(a.groups[idx].rows, r)
+	}
+	// A global aggregate (no GROUP BY) over an empty input still yields one row:
+	// COUNT(*) = 0, SUM/MIN/MAX/AVG = NULL.
+	if len(a.groups) == 0 && len(a.keys) == 0 {
+		a.groups = append(a.groups, &aggGroup{})
 	}
 	return nil
 }

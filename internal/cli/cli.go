@@ -561,6 +561,13 @@ func formatPlan(n plan.Node, depth int) string {
 			names = append(names, s.Func)
 		}
 		return indent + "Window [" + strings.Join(names, ", ") + "]\n" + formatPlan(node.Child, depth+1)
+	case *plan.Apply:
+		s := indent + fmt.Sprintf("Apply [%d subquer%s]", len(node.Specs), map[bool]string{true: "y", false: "ies"}[len(node.Specs) == 1])
+		s += "\n" + formatPlan(node.Child, depth+1)
+		for _, spec := range node.Specs {
+			s += "\n" + formatPlan(spec.Inner, depth+1)
+		}
+		return s
 	case *plan.Filter:
 		return indent + "Filter\n" + formatPlan(node.Child, depth+1)
 	case *plan.Project:

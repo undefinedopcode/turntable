@@ -85,12 +85,22 @@ A query moves through fixed stages, one package each:
    `WindowIter` materializes, partitions, orders, and computes per spec
    (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD and aggregate windows; default frames
    only). Window + GROUP BY in one query is rejected for now.
-   A `WHERE/HAVING x IN (SELECT ...)` is handled differently: `resolveInSubqueries`
-   executes the (non-correlated) subquery at build time and folds its one column
-   into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no
+   A non-correlated `WHERE/HAVING x IN (SELECT ...)` is handled differently:
+   `resolveInSubqueries` executes the subquery at build time and folds its one
+   column into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no
    subquery support and the folded list is even pushdown-eligible. (Build-time
-   execution means `--explain` runs IN subqueries.) `exec.go` lowers the tree
-   into an `engine.RowIterator` pipeline (e.g. a `SetOp` → the matching
+   execution means `--explain` runs IN subqueries.) Other subqueries — `EXISTS`,
+   scalar `(SELECT ...)`, and correlated `IN` — are lifted by `buildSubqueries`
+   into an `Apply` node (one `$subN` column per subquery, like the aggregate/
+   window `$aggN`/`$winN` extraction): the inner plan is built once with
+   correlated qualified columns rewritten to `sql.OuterRef` (`rewriteCorrelated`,
+   resolved against the outer scope). `execApply` streams the outer rows and, per
+   row, re-executes each inner plan with the outer row bound on the context
+   (`withOuter`/`outerFromCtx`); the engine's `Evaluator.Outer` resolves
+   `OuterRef`. Non-correlated subqueries are memoized (run once). It is correct
+   but `O(outer rows)`; subqueries can't combine with GROUP BY/aggregates/window
+   in one query, and correlation is single-level. `exec.go` lowers the tree into
+   an `engine.RowIterator` pipeline (e.g. a `SetOp` → the matching
    concat/intersect/except iterator).
 3. **`internal/engine`** — pull-based operator pipeline over `[]Value` rows
    aligned to a `Schema`. `ops.go` = operators, `eval.go` = expression

@@ -21,6 +21,34 @@ func Exec(ctx context.Context, p *Plan) (engine.RowIterator, engine.Schema, erro
 	return it, schema, nil
 }
 
+// ctxKey types values stored on the exec context.
+type ctxKey int
+
+const outerKey ctxKey = iota
+
+// withOuter binds an enclosing query's current row on the context so that the
+// subquery plan executed under it can resolve correlated OuterRef expressions.
+func withOuter(ctx context.Context, o engine.Outer) context.Context {
+	return context.WithValue(ctx, outerKey, o)
+}
+
+// outerFromCtx returns the bound outer row (inactive at the top level).
+func outerFromCtx(ctx context.Context) engine.Outer {
+	if ctx == nil {
+		return engine.Outer{}
+	}
+	if o, ok := ctx.Value(outerKey).(engine.Outer); ok {
+		return o
+	}
+	return engine.Outer{}
+}
+
+// evalForChild builds an Evaluator over a child node's output, carrying any
+// active outer binding for correlated subqueries.
+func evalForChild(ctx context.Context, child Node, schema engine.Schema, funcs *engine.FuncRegistry, strict bool) engine.Evaluator {
+	return engine.Evaluator{Resolve: resolverFor(child, schema), Funcs: funcs, Strict: strict, Outer: outerFromCtx(ctx)}
+}
+
 // execNode recursively executes a node, returning its iterator + output schema.
 func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
 	switch node := n.(type) {
@@ -72,7 +100,7 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
+		eval := evalForChild(ctx, node.Child, schema, funcs, strict)
 		return engine.NewFilterIter(child, node.Predicate, eval), schema, nil
 
 	case *Project:
@@ -80,7 +108,7 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
+		eval := evalForChild(ctx, node.Child, schema, funcs, strict)
 		out := engine.NewProjectIter(child, node.Outputs, eval)
 		outSchema := projectOutputSchema(node.Outputs)
 		it := engine.RowIterator(out)
@@ -94,7 +122,7 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, schema), Funcs: funcs, Strict: strict}
+		eval := evalForChild(ctx, node.Child, schema, funcs, strict)
 		return engine.NewSortIter(child, node.Terms, eval), schema, nil
 
 	case *Limit:
@@ -119,8 +147,11 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		eval := engine.Evaluator{Resolve: resolverFor(node.Child, childSchema), Funcs: funcs, Strict: strict}
+		eval := evalForChild(ctx, node.Child, childSchema, funcs, strict)
 		return engine.NewWindowIter(child, node.Specs, eval), node.Schema, nil
+
+	case *Apply:
+		return execApply(ctx, node, funcs, strict)
 	}
 	return nil, engine.Schema{}, fmt.Errorf("unknown plan node %T", n)
 }
@@ -160,6 +191,8 @@ func baseRelation(n Node) Node {
 		case *Aggregate:
 			n = x.Child
 		case *Window:
+			n = x.Child
+		case *Apply:
 			n = x.Child
 		default:
 			return n
@@ -209,13 +242,123 @@ func execAggregate(ctx context.Context, node *Aggregate, funcs *engine.FuncRegis
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
-	eval := engine.Evaluator{Resolve: resolverFor(node.Child, childSchema), Funcs: funcs, Strict: strict}
+	eval := evalForChild(ctx, node.Child, childSchema, funcs, strict)
 	var havingEval engine.Evaluator
 	if node.Having != nil {
 		havingEval = engine.Evaluator{Resolve: engine.SchemaResolver(node.Schema, ""), Funcs: funcs, Strict: strict}
 	}
 	it := engine.NewAggregateIter(child, node.Keys, node.Aggs, node.Having, eval, havingEval, node.Schema)
 	return it, node.Schema, nil
+}
+
+// execApply runs the subquery-apply node: for each child (outer) row it
+// evaluates each subquery spec to a single value and appends it as a column.
+func execApply(ctx context.Context, node *Apply, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
+	child, childSchema, err := execNode(ctx, node.Child, funcs, strict)
+	if err != nil {
+		return nil, engine.Schema{}, err
+	}
+	outerResolve := resolverFor(node.Child, childSchema)
+	eval := evalForChild(ctx, node.Child, childSchema, funcs, strict)
+	// run executes one spec's inner plan with the outer row bound, returning its
+	// materialized rows.
+	run := func(spec SubquerySpec, outer engine.Row) ([]engine.Row, error) {
+		innerCtx := withOuter(ctx, engine.Outer{Row: outer, Resolve: outerResolve, Active: true})
+		it, _, err := execNode(innerCtx, spec.Inner, funcs, strict)
+		if err != nil {
+			return nil, err
+		}
+		return engine.Materialize(innerCtx, it)
+	}
+	return &applyIter{child: child, specs: node.Specs, eval: eval, run: run, memo: map[string]engine.Value{}}, node.Schema, nil
+}
+
+// applyIter streams its child, appending one column per subquery spec.
+type applyIter struct {
+	child  engine.RowIterator
+	specs  []SubquerySpec
+	eval   engine.Evaluator
+	run    func(SubquerySpec, engine.Row) ([]engine.Row, error)
+	memo   map[string]engine.Value // cached values for non-correlated specs
+	closed bool
+}
+
+func (a *applyIter) Next() (engine.Row, bool, error) {
+	r, ok, err := a.child.Next()
+	if err != nil || !ok {
+		return engine.Row{}, ok, err
+	}
+	for _, spec := range a.specs {
+		v, err := a.value(spec, r)
+		if err != nil {
+			return engine.Row{}, false, err
+		}
+		r.Values = append(r.Values, v)
+	}
+	return r, true, nil
+}
+
+func (a *applyIter) value(spec SubquerySpec, outer engine.Row) (engine.Value, error) {
+	// A non-correlated subquery yields the same value for every row.
+	if !spec.Correlated {
+		if v, ok := a.memo[spec.Name]; ok {
+			return v, nil
+		}
+	}
+	rows, err := a.run(spec, outer)
+	if err != nil {
+		return engine.Value{}, err
+	}
+	v, err := a.reduce(spec, outer, rows)
+	if err != nil {
+		return engine.Value{}, err
+	}
+	if !spec.Correlated {
+		a.memo[spec.Name] = v
+	}
+	return v, nil
+}
+
+func (a *applyIter) reduce(spec SubquerySpec, outer engine.Row, rows []engine.Row) (engine.Value, error) {
+	switch spec.Kind {
+	case subqExists:
+		return engine.BoolVal(len(rows) > 0), nil
+	case subqScalar:
+		if len(rows) == 0 {
+			return engine.Null(), nil
+		}
+		if len(rows) > 1 {
+			return engine.Value{}, fmt.Errorf("scalar subquery returned more than one row")
+		}
+		if len(rows[0].Values) == 0 {
+			return engine.Null(), nil
+		}
+		return rows[0].Values[0], nil
+	case subqIn:
+		tv, err := a.eval.Eval(spec.Test, outer)
+		if err != nil {
+			return engine.Value{}, err
+		}
+		found := false
+		if !tv.IsNull() {
+			for _, rr := range rows {
+				if len(rr.Values) > 0 && !rr.Values[0].IsNull() && engine.Compare(tv, rr.Values[0]) == 0 {
+					found = true
+					break
+				}
+			}
+		}
+		return engine.BoolVal(found != spec.Negate), nil
+	}
+	return engine.Value{}, fmt.Errorf("unknown subquery kind %d", spec.Kind)
+}
+
+func (a *applyIter) Close() error {
+	if a.closed {
+		return nil
+	}
+	a.closed = true
+	return a.child.Close()
 }
 
 // projectOutputSchema builds the output schema from a projection's output list.

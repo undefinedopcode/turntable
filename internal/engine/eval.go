@@ -23,6 +23,18 @@ type Evaluator struct {
 	// Strict, when true, makes type-coercion failures return errors instead of
 	// NULL. Driven by the CLI --strict flag.
 	Strict bool
+
+	// Outer binds the enclosing query's current row for evaluating correlated
+	// OuterRef expressions inside a subquery. Active is false at the top level.
+	Outer Outer
+}
+
+// Outer is the binding of an enclosing query's current row, used to evaluate
+// correlated references (OuterRef) within a subquery.
+type Outer struct {
+	Row     Row
+	Resolve Resolver
+	Active  bool
 }
 
 // Eval evaluates a single expression to a Value.
@@ -48,6 +60,17 @@ func (e Evaluator) Eval(expr sql.Expr, row Row) (Value, error) {
 			return Null(), nil
 		}
 		return row.Values[idx], nil
+
+	case *sql.OuterRef:
+		// A correlated reference: read from the bound outer row.
+		if !e.Outer.Active || e.Outer.Resolve == nil {
+			return Value{}, fmt.Errorf("outer reference %s used outside a correlated subquery", colName(ex.Qualifier, ex.Name))
+		}
+		idx := e.Outer.Resolve(ex.Qualifier, ex.Name)
+		if idx < 0 || idx >= len(e.Outer.Row.Values) {
+			return Null(), nil
+		}
+		return e.Outer.Row.Values[idx], nil
 
 	case *sql.UnaryOp:
 		v, err := e.Eval(ex.Expr, row)

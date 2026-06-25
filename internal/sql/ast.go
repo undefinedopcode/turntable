@@ -204,6 +204,31 @@ type WindowSpec struct {
 	OrderBy     []OrderTerm
 }
 
+// ExistsExpr is EXISTS (subquery): true if the subquery yields any row. NOT
+// EXISTS parses as a prefix NOT wrapping this.
+type ExistsExpr struct {
+	Query *SelectStmt
+}
+
+// ScalarSubquery is a parenthesized subquery used as a value: (SELECT ...). It
+// must return a single column; it yields that column of its single row (NULL if
+// no rows, an error if more than one).
+type ScalarSubquery struct {
+	Query *SelectStmt
+}
+
+// OuterRef is a correlated reference to a column of an enclosing query. It is
+// produced by the planner (never parsed) when a qualified column in a subquery
+// resolves to the outer scope; the engine reads it from the bound outer row.
+type OuterRef struct {
+	Qualifier string
+	Name      string
+}
+
+func (*ExistsExpr) exprNode()     {}
+func (*ScalarSubquery) exprNode() {}
+func (*OuterRef) exprNode()       {}
+
 // CASE WHEN ... THEN ... ELSE ... END
 type CaseExpr struct {
 	Whens []CaseWhen

@@ -190,6 +190,39 @@ func TestAggregateIter(t *testing.T) {
 	}
 }
 
+func TestAggregateEmptyGlobal(t *testing.T) {
+	// A global aggregate (no GROUP BY) over an empty input yields one row:
+	// COUNT(*) = 0, SUM = NULL.
+	schema := Schema{Columns: []Column{{Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	outSchema := Schema{Columns: []Column{{Name: "c", Type: TypeInt}, {Name: "s", Type: TypeFloat}}}
+	aggs := []AggSpec{
+		{Func: "COUNT", Arg: &sql.ColRef{Name: "*"}, Name: "c"},
+		{Func: "SUM", Arg: &sql.ColRef{Name: "v"}, Name: "s"},
+	}
+	it := NewAggregateIter(NewSliceIter(nil), nil, aggs, nil, eval, Evaluator{}, outSchema)
+	rows, err := Materialize(context.Background(), it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (global aggregate over empty)", len(rows))
+	}
+	if c, _ := rows[0].Values[0].AsInt(); c != 0 {
+		t.Errorf("COUNT(*) = %v, want 0", rows[0].Values[0].V)
+	}
+	if !rows[0].Values[1].IsNull() {
+		t.Errorf("SUM = %v, want NULL", rows[0].Values[1].V)
+	}
+
+	// With a GROUP BY key, an empty input yields no rows.
+	it2 := NewAggregateIter(NewSliceIter(nil), []sql.Expr{&sql.ColRef{Name: "v"}}, aggs, nil, eval, Evaluator{}, outSchema)
+	rows2, _ := Materialize(context.Background(), it2)
+	if len(rows2) != 0 {
+		t.Errorf("grouped empty = %d rows, want 0", len(rows2))
+	}
+}
+
 func TestComputeAggExtras(t *testing.T) {
 	schema := Schema{Columns: []Column{{Name: "v", Type: TypeInt}, {Name: "s", Type: TypeString}}}
 	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
