@@ -135,9 +135,10 @@ type BetweenExpr struct {
 }
 
 type LikeExpr struct {
-	Expr   Expr
-	Pat    Expr
-	Negate bool
+	Expr        Expr
+	Pat         Expr
+	Negate      bool
+	Insensitive bool // ILIKE: case-insensitive match (LIKE is case-sensitive)
 }
 
 type IsNullExpr struct {

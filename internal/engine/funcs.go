@@ -52,7 +52,10 @@ func (r *FuncRegistry) Names() []string {
 // Aggregates returns the supported aggregate function names. They are handled by
 // the Aggregate operator, not the scalar registry; listed here for discovery.
 func Aggregates() []string {
-	return []string{"AVG", "COUNT", "MAX", "MIN", "SUM"}
+	return []string{
+		"AVG", "COUNT", "MAX", "MEDIAN", "MIN", "STDDEV", "STDDEV_POP",
+		"STDDEV_SAMP", "STRING_AGG", "SUM", "VARIANCE", "VAR_POP", "VAR_SAMP",
+	}
 }
 
 func (r *FuncRegistry) registerDefaults() {
@@ -774,7 +777,9 @@ func funcCurrentDate(args []Value) (Value, error) {
 // IsAggregate reports whether name is a recognized aggregate function.
 func IsAggregate(name string) bool {
 	switch strings.ToUpper(name) {
-	case "COUNT", "SUM", "AVG", "MIN", "MAX":
+	case "COUNT", "SUM", "AVG", "MIN", "MAX",
+		"MEDIAN", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
+		"VARIANCE", "VAR_SAMP", "VAR_POP", "STRING_AGG":
 		return true
 	}
 	return false

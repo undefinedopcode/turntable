@@ -199,11 +199,16 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 	// unsupported function or expression), we omit the WHERE clause and let the
 	// engine filter in memory. predicateHandled tracks whether the full
 	// predicate made it into the query — only then is it safe to push LIMIT.
+	// predicateHandled means the WHERE was applied in-DB *exactly* — only then is
+	// LIMIT safe to push. A predicate may translate yet be inexact (a LIKE whose
+	// case-sensitivity the dialect can't reproduce): it still filters as a
+	// superset (the engine refines it), but pushing LIMIT could drop rows the
+	// engine hasn't seen, so it is withheld in that case.
 	predicateHandled := req.Predicate == nil
 	if req.Predicate != nil {
 		if where, ok := translateExpr(req.Predicate, dial); ok {
 			fmt.Fprintf(&b, " WHERE %s", where)
-			predicateHandled = true
+			predicateHandled = predicateExact(req.Predicate, dial)
 		}
 	}
 
@@ -644,12 +649,37 @@ func translateExpr(e oparseSQL.Expr, d dialect) (string, bool) {
 		if !ok {
 			return "", false
 		}
+		op := d.likeOp(ex.Insensitive)
 		if ex.Negate {
-			return fmt.Sprintf("%s NOT LIKE %s", v, p), true
+			op = "NOT " + op
 		}
-		return fmt.Sprintf("%s LIKE %s", v, p), true
+		return fmt.Sprintf("%s %s %s", v, op, p), true
 	}
 	return "", false
+}
+
+// predicateExact reports whether the in-DB evaluation of a (already fully
+// translatable) predicate matches the engine's semantics exactly. It is only
+// false for a LIKE whose case-sensitivity the dialect can't reproduce — pushing
+// such a predicate is still a correct *filter* (a superset the engine refines),
+// but it must not gate LIMIT pushdown or the DB could truncate matching rows
+// the engine has not yet seen.
+func predicateExact(e oparseSQL.Expr, d dialect) bool {
+	switch ex := e.(type) {
+	case *oparseSQL.LikeExpr:
+		return d.likeExact(ex.Insensitive)
+	case *oparseSQL.BinaryOp:
+		return predicateExact(ex.Left, d) && predicateExact(ex.Right, d)
+	case *oparseSQL.UnaryOp:
+		return predicateExact(ex.Expr, d)
+	case *oparseSQL.InExpr:
+		return predicateExact(ex.Expr, d)
+	case *oparseSQL.BetweenExpr:
+		return predicateExact(ex.Expr, d)
+	case *oparseSQL.IsNullExpr:
+		return predicateExact(ex.Expr, d)
+	}
+	return true
 }
 
 func translateBinaryOp(ex *oparseSQL.BinaryOp, d dialect) (string, bool) {
@@ -704,6 +734,28 @@ func (d dialect) placeholder(n int) string {
 	default:
 		return "?"
 	}
+}
+
+// likeOp returns the SQL operator for an engine LIKE/ILIKE. The engine's LIKE is
+// case-sensitive and ILIKE case-insensitive. Postgres has both natively. MySQL
+// and SQLite have only LIKE, which is case-insensitive by default — so it
+// reproduces the engine's ILIKE, and approximates LIKE as a superset (the engine
+// re-filters; see likeExact).
+func (d dialect) likeOp(insensitive bool) string {
+	if insensitive && (d.driver == "postgres" || d.driver == "pgx") {
+		return "ILIKE"
+	}
+	return "LIKE"
+}
+
+// likeExact reports whether likeOp reproduces the engine's match exactly (vs.
+// returning a superset the engine must refine). Postgres is always exact; the
+// case-insensitive LIKE of MySQL/SQLite is exact only for the engine's ILIKE.
+func (d dialect) likeExact(insensitive bool) bool {
+	if d.driver == "postgres" || d.driver == "pgx" {
+		return true
+	}
+	return insensitive
 }
 
 // quoteString escapes string literals with single quotes.

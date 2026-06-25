@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -385,8 +386,9 @@ func (j *HashJoinIter) Close() error {
 // AggSpec describes one aggregate output column: the function name, the
 // argument expression (evaluated against child rows), and the output name.
 type AggSpec struct {
-	Func     string // COUNT, SUM, AVG, MIN, MAX
+	Func     string // COUNT, SUM, AVG, MIN, MAX, MEDIAN, STDDEV*, VAR*, STRING_AGG
 	Arg      sql.Expr
+	Arg2     sql.Expr // second argument, e.g. the STRING_AGG delimiter
 	Name     string
 	Distinct bool // COUNT(DISTINCT x) etc.: dedupe arg values before aggregating
 }
@@ -514,42 +516,16 @@ func (a *AggregateIter) Close() error {
 
 func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 	name := strings.ToUpper(spec.Func)
+	// COUNT(*) counts rows regardless of nullness; DISTINCT is meaningless on it.
 	if name == "COUNT" {
-		// COUNT(*) counts rows; COUNT(col) counts non-null values;
-		// COUNT(DISTINCT col) counts distinct non-null values.
 		if cr, ok := spec.Arg.(*sql.ColRef); ok && cr.Name == "*" && cr.Qualifier == "" {
 			return IntVal(int64(len(rows))), nil
 		}
-		var seen map[string]bool
-		if spec.Distinct {
-			seen = make(map[string]bool)
-		}
-		var n int64
-		for _, r := range rows {
-			v, err := eval.Eval(spec.Arg, r)
-			if err != nil {
-				return Value{}, err
-			}
-			if v.IsNull() {
-				continue
-			}
-			if seen != nil {
-				k := keyString(v)
-				if seen[k] {
-					continue
-				}
-				seen[k] = true
-			}
-			n++
-		}
-		return IntVal(n), nil
 	}
-	// SUM/AVG/MIN/MAX ignore NULLs. With DISTINCT, each distinct value counts
-	// once (matters for SUM/AVG; MIN/MAX are unaffected).
-	var sum float64
-	var count int
-	var minV, maxV Value
-	haveVal := false
+
+	// Evaluate the argument over each row, dropping NULLs and (with DISTINCT)
+	// duplicates. The value-based aggregates below operate on this list.
+	var vals []Value
 	var seen map[string]bool
 	if spec.Distinct {
 		seen = make(map[string]bool)
@@ -569,54 +545,135 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 			}
 			seen[k] = true
 		}
-		count++
-		switch name {
-		case "SUM", "AVG":
-			f, ok := v.AsFloat()
-			if !ok {
-				return Value{}, fmt.Errorf("%s requires numeric arg", name)
-			}
-			sum += f
-		case "MIN":
-			if !haveVal {
-				minV = v
-			} else if Compare(v, minV) < 0 {
-				minV = v
-			}
-		case "MAX":
-			if !haveVal {
-				maxV = v
-			} else if Compare(v, maxV) > 0 {
-				maxV = v
+		vals = append(vals, v)
+	}
+
+	switch name {
+	case "COUNT":
+		return IntVal(int64(len(vals))), nil
+	case "MIN", "MAX":
+		if len(vals) == 0 {
+			return Null(), nil
+		}
+		best := vals[0]
+		for _, v := range vals[1:] {
+			c := Compare(v, best)
+			if (name == "MIN" && c < 0) || (name == "MAX" && c > 0) {
+				best = v
 			}
 		}
-		if !haveVal {
-			haveVal = true
+		return best, nil
+	case "STRING_AGG":
+		if len(vals) == 0 {
+			return Null(), nil
 		}
+		sep, err := aggSeparator(spec, rows, eval)
+		if err != nil {
+			return Value{}, err
+		}
+		parts := make([]string, len(vals))
+		for i, v := range vals {
+			parts[i] = v.AsString()
+		}
+		return StringVal(strings.Join(parts, sep)), nil
+	}
+
+	// The remaining aggregates are numeric.
+	nums := make([]float64, len(vals))
+	for i, v := range vals {
+		f, ok := v.AsFloat()
+		if !ok {
+			return Value{}, fmt.Errorf("%s requires numeric arg", name)
+		}
+		nums[i] = f
 	}
 	switch name {
 	case "SUM":
-		if !haveVal {
+		if len(nums) == 0 {
 			return Null(), nil
 		}
-		return FloatVal(sum), nil
+		var s float64
+		for _, f := range nums {
+			s += f
+		}
+		return FloatVal(s), nil
 	case "AVG":
-		if !haveVal || count == 0 {
+		if len(nums) == 0 {
 			return Null(), nil
 		}
-		return FloatVal(sum / float64(count)), nil
-	case "MIN":
-		if !haveVal {
+		return FloatVal(mean(nums)), nil
+	case "MEDIAN":
+		if len(nums) == 0 {
 			return Null(), nil
 		}
-		return minV, nil
-	case "MAX":
-		if !haveVal {
+		s := append([]float64(nil), nums...)
+		sort.Float64s(s)
+		n := len(s)
+		if n%2 == 1 {
+			return FloatVal(s[n/2]), nil
+		}
+		return FloatVal((s[n/2-1] + s[n/2]) / 2), nil
+	case "VARIANCE", "VAR_SAMP", "VAR_POP", "STDDEV", "STDDEV_SAMP", "STDDEV_POP":
+		pop := name == "VAR_POP" || name == "STDDEV_POP"
+		v, ok := variance(nums, pop)
+		if !ok {
 			return Null(), nil
 		}
-		return maxV, nil
+		if strings.HasPrefix(name, "STDDEV") {
+			return FloatVal(math.Sqrt(v)), nil
+		}
+		return FloatVal(v), nil
 	}
 	return Value{}, fmt.Errorf("unknown aggregate %s", name)
+}
+
+// aggSeparator evaluates a STRING_AGG delimiter (its second argument), which is
+// normally a constant. It defaults to "" when absent.
+func aggSeparator(spec AggSpec, rows []Row, eval Evaluator) (string, error) {
+	if spec.Arg2 == nil {
+		return "", nil
+	}
+	probe := Row{}
+	if len(rows) > 0 {
+		probe = rows[0]
+	}
+	sv, err := eval.Eval(spec.Arg2, probe)
+	if err != nil {
+		return "", err
+	}
+	if sv.IsNull() {
+		return "", nil
+	}
+	return sv.AsString(), nil
+}
+
+func mean(nums []float64) float64 {
+	var s float64
+	for _, f := range nums {
+		s += f
+	}
+	return s / float64(len(nums))
+}
+
+// variance returns the population or sample variance. ok=false (→ NULL) when
+// there are too few values: none for either, or a single value for the sample
+// form (its n-1 denominator is zero), matching SQL's *_samp semantics.
+func variance(nums []float64, pop bool) (float64, bool) {
+	n := len(nums)
+	if n == 0 || (!pop && n < 2) {
+		return 0, false
+	}
+	m := mean(nums)
+	var ss float64
+	for _, f := range nums {
+		d := f - m
+		ss += d * d
+	}
+	denom := float64(n)
+	if !pop {
+		denom = float64(n - 1)
+	}
+	return ss / denom, true
 }
 
 // ---- Distinct ---------------------------------------------------------------

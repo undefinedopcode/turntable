@@ -253,6 +253,31 @@ func TestParseSubqueryUnionFrom(t *testing.T) {
 	}
 }
 
+func TestParseILike(t *testing.T) {
+	for _, c := range []struct {
+		q           string
+		insensitive bool
+		negate      bool
+	}{
+		{"SELECT a FROM t WHERE a LIKE 'x%'", false, false},
+		{"SELECT a FROM t WHERE a ILIKE 'x%'", true, false},
+		{"SELECT a FROM t WHERE a NOT ILIKE 'x%'", true, true},
+		{"SELECT a FROM t WHERE a NOT LIKE 'x%'", false, true},
+	} {
+		stmt, err := Parse(c.q)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.q, err)
+		}
+		le, ok := stmt.(*SelectStmt).Where.(*LikeExpr)
+		if !ok {
+			t.Fatalf("%q: where is %T, want *LikeExpr", c.q, stmt.(*SelectStmt).Where)
+		}
+		if le.Insensitive != c.insensitive || le.Negate != c.negate {
+			t.Errorf("%q: insensitive=%v negate=%v, want %v/%v", c.q, le.Insensitive, le.Negate, c.insensitive, c.negate)
+		}
+	}
+}
+
 func TestParseCountDistinct(t *testing.T) {
 	stmt, err := Parse("SELECT COUNT(DISTINCT region) FROM t")
 	if err != nil {

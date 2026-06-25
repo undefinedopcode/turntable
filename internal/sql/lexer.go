@@ -36,7 +36,7 @@ var keywords = map[string]bool{
 	"LEFT": true, "ON": true, "GROUP": true, "BY": true, "HAVING": true,
 	"ORDER": true, "ASC": true, "DESC": true, "LIMIT": true, "OFFSET": true,
 	"AND": true, "OR": true, "NOT": true, "IN": true, "BETWEEN": true,
-	"LIKE": true, "IS": true, "NULL": true, "CASE": true, "WHEN": true,
+	"LIKE": true, "ILIKE": true, "IS": true, "NULL": true, "CASE": true, "WHEN": true,
 	"THEN": true, "ELSE": true, "END": true, "CAST": true, "AS": true,
 	"DISTINCT": true, "COUNT": true, "SUM": true, "AVG": true, "MIN": true,
 	"MAX": true, "TRUE": true, "FALSE": true, "INTERVAL": true,

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/april/turntable/internal/sql"
@@ -156,6 +157,56 @@ func TestAggregateIter(t *testing.T) {
 	}
 	if got[0].Values[2] != FloatVal(4) {
 		t.Errorf("group a sum = %v, want 4", got[0].Values[2])
+	}
+}
+
+func TestComputeAggExtras(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "v", Type: TypeInt}, {Name: "s", Type: TypeString}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(v int64, s string) Row { return Row{Values: []Value{IntVal(v), StringVal(s)}} }
+	// values 2,4,4,6 -> mean 4; sample var = ((4+0+0+4)/3)=2.666..; pop var = 2.
+	rows := []Row{mk(2, "a"), mk(4, "b"), mk(4, "b"), mk(6, "c")}
+	vcol := &sql.ColRef{Name: "v"}
+	scol := &sql.ColRef{Name: "s"}
+
+	cases := []struct {
+		spec AggSpec
+		want Value
+	}{
+		{AggSpec{Func: "MEDIAN", Arg: vcol}, FloatVal(4)},                 // (4+4)/2
+		{AggSpec{Func: "VAR_POP", Arg: vcol}, FloatVal(2)},                // ((−2)²+0+0+2²)/4
+		{AggSpec{Func: "STDDEV_POP", Arg: vcol}, FloatVal(math.Sqrt(2))},  // sqrt(var_pop)
+		{AggSpec{Func: "VAR_SAMP", Arg: vcol}, FloatVal(8.0 / 3.0)},       // /(n-1)=3
+		{AggSpec{Func: "MEDIAN", Arg: vcol, Distinct: true}, FloatVal(4)}, // {2,4,6} -> 4
+		{AggSpec{Func: "STRING_AGG", Arg: scol, Arg2: &sql.LitString{V: ","}}, StringVal("a,b,b,c")},
+		{AggSpec{Func: "STRING_AGG", Arg: scol, Arg2: &sql.LitString{V: "-"}, Distinct: true}, StringVal("a-b-c")},
+	}
+	for _, c := range cases {
+		got, err := computeAgg(c.spec, rows, eval)
+		if err != nil {
+			t.Errorf("%s: %v", c.spec.Func, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s (distinct=%v) = %v, want %v", c.spec.Func, c.spec.Distinct, got, c.want)
+		}
+	}
+
+	// Sample stddev/variance of a single value is NULL (n-1 == 0).
+	one := []Row{mk(5, "x")}
+	for _, f := range []string{"STDDEV", "STDDEV_SAMP", "VARIANCE", "VAR_SAMP"} {
+		got, err := computeAgg(AggSpec{Func: f, Arg: vcol}, one, eval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.IsNull() {
+			t.Errorf("%s of one value = %v, want NULL", f, got)
+		}
+	}
+	// Population forms of a single value are defined (variance 0).
+	got, _ := computeAgg(AggSpec{Func: "VAR_POP", Arg: vcol}, one, eval)
+	if got != FloatVal(0) {
+		t.Errorf("VAR_POP of one value = %v, want 0", got)
 	}
 }
 

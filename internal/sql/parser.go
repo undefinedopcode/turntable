@@ -480,8 +480,8 @@ func (p *Parser) parseCompare() (Expr, error) {
 	// [NOT] IN / BETWEEN / LIKE
 	neg := false
 	if p.kw("NOT") {
-		// only if followed by IN/BETWEEN/LIKE
-		if p.peek().Kind == TKKeyword && (strings.EqualFold(p.peek().Value, "IN") || strings.EqualFold(p.peek().Value, "BETWEEN") || strings.EqualFold(p.peek().Value, "LIKE")) {
+		// only if followed by IN/BETWEEN/LIKE/ILIKE
+		if p.peek().Kind == TKKeyword && (strings.EqualFold(p.peek().Value, "IN") || strings.EqualFold(p.peek().Value, "BETWEEN") || strings.EqualFold(p.peek().Value, "LIKE") || strings.EqualFold(p.peek().Value, "ILIKE")) {
 			neg = true
 			p.advance()
 		}
@@ -537,13 +537,14 @@ func (p *Parser) parseCompare() (Expr, error) {
 		}
 		return &BetweenExpr{Expr: left, Low: lo, High: hi, Negate: neg}, nil
 	}
-	if p.kw("LIKE") {
+	if p.kw("LIKE") || p.kw("ILIKE") {
+		insensitive := p.kw("ILIKE")
 		p.advance()
 		pat, err := p.parseAdd()
 		if err != nil {
 			return nil, err
 		}
-		return &LikeExpr{Expr: left, Pat: pat, Negate: neg}, nil
+		return &LikeExpr{Expr: left, Pat: pat, Negate: neg, Insensitive: insensitive}, nil
 	}
 	return left, nil
 }

@@ -141,6 +141,8 @@ func TestTranslateExprPushdown(t *testing.T) {
 		{`name = "alice"`, `("name" = 'alice')`, true},
 		{`qty > 5 AND price < 100`, `(("qty" > 5) AND ("price" < 100))`, true},
 		{`name LIKE 'a%'`, `"name" LIKE 'a%'`, true},
+		{`name ILIKE 'a%'`, `"name" LIKE 'a%'`, true}, // sqlite LIKE is case-insensitive
+		{`name NOT ILIKE 'a%'`, `"name" NOT LIKE 'a%'`, true},
 		{`id IN (1, 2, 3)`, `"id" IN (1, 2, 3)`, true},
 		{`id IS NULL`, `"id" IS NULL`, true},
 		{`LOWER(name) = 'alice'`, "", false},
@@ -157,6 +159,44 @@ func TestTranslateExprPushdown(t *testing.T) {
 		}
 		if ok && got != tc.want {
 			t.Errorf("translate %q:\n got  %s\n want %s", tc.expr, got, tc.want)
+		}
+	}
+}
+
+func TestTranslateILikePostgres(t *testing.T) {
+	// Postgres has a native, case-insensitive ILIKE.
+	e, _ := sql.ParseExpr(`name ILIKE 'a%'`)
+	got, ok := translateExpr(e, dialectFor("postgres"))
+	if !ok || got != `"name" ILIKE 'a%'` {
+		t.Errorf("postgres ILIKE = %q (ok=%v), want \"name\" ILIKE 'a%%'", got, ok)
+	}
+}
+
+func TestPredicateExactGatesLikeLimit(t *testing.T) {
+	// LIKE (case-sensitive in the engine) cannot be reproduced exactly by the
+	// case-insensitive LIKE of sqlite/mysql, so it must not be treated as fully
+	// handled (which would push LIMIT). ILIKE matches their LIKE, so it is exact.
+	// Postgres reproduces both exactly.
+	cases := []struct {
+		expr   string
+		driver string
+		exact  bool
+	}{
+		{`name LIKE 'a%'`, "sqlite", false},
+		{`name ILIKE 'a%'`, "sqlite", true},
+		{`name LIKE 'a%'`, "mysql", false},
+		{`name LIKE 'a%'`, "postgres", true},
+		{`name ILIKE 'a%'`, "postgres", true},
+		{`qty > 5`, "sqlite", true},
+		{`qty > 5 AND name LIKE 'a%'`, "sqlite", false}, // one inexact term taints the AND
+	}
+	for _, c := range cases {
+		e, err := sql.ParseExpr(c.expr)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.expr, err)
+		}
+		if got := predicateExact(e, dialectFor(c.driver)); got != c.exact {
+			t.Errorf("predicateExact(%q, %s) = %v, want %v", c.expr, c.driver, got, c.exact)
 		}
 	}
 }

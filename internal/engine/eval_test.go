@@ -110,18 +110,22 @@ func TestEvaluator_Functions(t *testing.T) {
 func TestLikeMatch(t *testing.T) {
 	cases := []struct {
 		s, pat string
+		fold   bool
 		want   bool
 	}{
-		{"abc", "a%", true},
-		{"abc", "%c", true},
-		{"abc", "a_c", true},
-		{"abc", "a__", true},
-		{"abc", "b%", false},
-		{"ABC", "abc", true}, // case-insensitive
+		{"abc", "a%", false, true},
+		{"abc", "%c", false, true},
+		{"abc", "a_c", false, true},
+		{"abc", "a__", false, true},
+		{"abc", "b%", false, false},
+		{"ABC", "abc", false, false}, // LIKE is case-sensitive
+		{"ABC", "abc", true, true},   // ILIKE folds case
+		{"abc", "ABC", true, true},
+		{"ABC", "a%", true, true},
 	}
 	for _, c := range cases {
-		if got := likeMatch(c.s, c.pat); got != c.want {
-			t.Errorf("likeMatch(%q,%q)=%v, want %v", c.s, c.pat, got, c.want)
+		if got := likeMatch(c.s, c.pat, c.fold); got != c.want {
+			t.Errorf("likeMatch(%q,%q,fold=%v)=%v, want %v", c.s, c.pat, c.fold, got, c.want)
 		}
 	}
 }

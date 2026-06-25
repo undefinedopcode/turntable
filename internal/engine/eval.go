@@ -300,7 +300,7 @@ func (e Evaluator) evalLike(ex *sql.LikeExpr, row Row) (Value, error) {
 	if v.IsNull() || p.IsNull() {
 		return Null(), nil
 	}
-	matched := likeMatch(v.AsString(), p.AsString())
+	matched := likeMatch(v.AsString(), p.AsString(), ex.Insensitive)
 	if ex.Negate {
 		return BoolVal(!matched), nil
 	}
@@ -308,9 +308,13 @@ func (e Evaluator) evalLike(ex *sql.LikeExpr, row Row) (Value, error) {
 }
 
 // likeMatch implements SQL LIKE: % matches any sequence, _ matches one char.
-// The match is case-insensitive (a pragmatic choice for v0.1).
-func likeMatch(s, pattern string) bool {
-	return likeRunes([]rune(strings.ToLower(s)), []rune(strings.ToLower(pattern)))
+// LIKE is case-sensitive; ILIKE (fold=true) folds both sides to lower case.
+func likeMatch(s, pattern string, fold bool) bool {
+	if fold {
+		s = strings.ToLower(s)
+		pattern = strings.ToLower(pattern)
+	}
+	return likeRunes([]rune(s), []rune(pattern))
 }
 
 func likeRunes(s, p []rune) bool {

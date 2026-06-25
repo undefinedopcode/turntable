@@ -96,9 +96,10 @@ nullable; SQL `NULL` propagates through most expressions.
 | Arithmetic | `+` `-` `*` `/` (and unary `-`) |
 | Comparison | `=` `<>` `<` `<=` `>` `>=` |
 | Boolean | `AND` `OR` `NOT` |
-| Predicates | `IN` `BETWEEN` `LIKE` `IS [NOT] NULL` |
+| Predicates | `IN` `BETWEEN` `LIKE` `ILIKE` `IS [NOT] NULL` |
 
-- `LIKE` uses SQL wildcards `%` (any run) and `_` (one char).
+- `LIKE` uses SQL wildcards `%` (any run) and `_` (one char). `LIKE` is
+  case-sensitive; `ILIKE` is the case-insensitive form. Both negate with `NOT`.
 - `BETWEEN x AND y` is inclusive.
 - `x IN (a, b, c)` or `x IN (SELECT …)`; negate with `NOT IN`.
 
@@ -177,10 +178,24 @@ Run `.functions` in the REPL for the live list.
 
 ### Aggregates
 
-Used with (or without) `GROUP BY`: `COUNT(*)`, `COUNT(expr)`, `SUM(expr)`,
-`AVG(expr)`, `MIN(expr)`, `MAX(expr)`. Each accepts a leading `DISTINCT`
-(`COUNT(DISTINCT region)`, `SUM(DISTINCT amount)`), which deduplicates the
-argument values before aggregating. Filter groups with `HAVING`.
+Used with (or without) `GROUP BY`:
+
+| Aggregate | Result |
+|-----------|--------|
+| `COUNT(*)` / `COUNT(expr)` | row count / non-null count |
+| `SUM` / `AVG` / `MIN` / `MAX` | the usual |
+| `MEDIAN(expr)` | middle value (mean of the two middle for an even count) |
+| `STDDEV` / `STDDEV_SAMP` / `STDDEV_POP` | standard deviation (`STDDEV` = sample) |
+| `VARIANCE` / `VAR_SAMP` / `VAR_POP` | variance (`VARIANCE` = sample) |
+| `STRING_AGG(expr, sep)` | concatenate values, separated by `sep` (input order) |
+
+Each accepts a leading `DISTINCT` (`COUNT(DISTINCT region)`,
+`SUM(DISTINCT amount)`, `STRING_AGG(DISTINCT tag, ',')`), which deduplicates the
+argument values first. Sample `STDDEV`/`VARIANCE` of a single value is `NULL`.
+Filter groups with `HAVING`.
+
+> Aggregates must currently be a top-level select item — `STDDEV(x)` works,
+> but wrapping one in a scalar call (`ROUND(STDDEV(x), 2)`) does not yet.
 
 ---
 

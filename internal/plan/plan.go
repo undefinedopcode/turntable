@@ -725,15 +725,18 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 		}
 		fc, ok := it.Expr.(*sql.FuncCall)
 		if ok && engine.IsAggregate(fc.Name) {
-			var arg sql.Expr
-			if len(fc.Args) == 1 {
+			var arg, arg2 sql.Expr
+			if len(fc.Args) >= 1 {
 				arg = fc.Args[0]
+			}
+			if len(fc.Args) >= 2 {
+				arg2 = fc.Args[1] // e.g. the STRING_AGG delimiter
 			}
 			name := it.As
 			if name == "" {
 				name = inferExprName(it.Expr)
 			}
-			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name, Distinct: fc.Distinct})
+			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Arg2: arg2, Name: name, Distinct: fc.Distinct})
 			aggCols = append(aggCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 			continue
 		}
