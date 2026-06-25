@@ -555,6 +555,12 @@ func formatPlan(n plan.Node, depth int) string {
 			kind += " all"
 		}
 		return indent + kind + "\n" + formatPlan(node.Left, depth+1) + "\n" + formatPlan(node.Right, depth+1)
+	case *plan.Window:
+		var names []string
+		for _, s := range node.Specs {
+			names = append(names, s.Func)
+		}
+		return indent + "Window [" + strings.Join(names, ", ") + "]\n" + formatPlan(node.Child, depth+1)
 	case *plan.Filter:
 		return indent + "Filter\n" + formatPlan(node.Child, depth+1)
 	case *plan.Project:

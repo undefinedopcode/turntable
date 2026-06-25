@@ -71,6 +71,15 @@ type SetOp struct {
 	Schema engine.Schema
 }
 
+// Window computes window-function columns and appends them to its child's rows
+// (Schema is the child schema followed by one column per spec). A projection
+// above references the appended columns by name.
+type Window struct {
+	Child  Node
+	Specs  []engine.WindowSpec
+	Schema engine.Schema
+}
+
 // Filter applies a residual predicate.
 type Filter struct {
 	Child     Node
@@ -120,6 +129,7 @@ type Limit struct {
 func (*Scan) planNode()      {}
 func (*Subquery) planNode()  {}
 func (*SetOp) planNode()     {}
+func (*Window) planNode()    {}
 func (*Filter) planNode()    {}
 func (*Project) planNode()   {}
 func (*Join) planNode()      {}
@@ -478,6 +488,26 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		}
 	}
 
+	// Window functions in the select list or ORDER BY get their own stage.
+	hasWindow := false
+	for _, it := range stmt.Items.Items {
+		if exprHasWindow(it.Expr) {
+			hasWindow = true
+			break
+		}
+	}
+	if !hasWindow {
+		for _, ot := range stmt.OrderBy {
+			if exprHasWindow(ot.Expr) {
+				hasWindow = true
+				break
+			}
+		}
+	}
+	if hasWindow && hasAgg {
+		return nil, engine.Schema{}, fmt.Errorf("window functions combined with GROUP BY/aggregates are not yet supported")
+	}
+
 	// Resolve positional ORDER BY / GROUP BY references (e.g. `ORDER BY 2`) to
 	// the matching select item before they reach Sort/Aggregate, so an integer
 	// term sorts/groups by that output column instead of being a silent no-op.
@@ -495,7 +525,7 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		// A LIMIT can only be pushed when nothing between the scan and the
 		// engine's Limit changes the row count or order: no ORDER BY (needs all
 		// rows to sort), no aggregation (needs all rows to group), no OFFSET.
-		if stmt.Limit != nil && stmt.Offset == nil && len(stmt.OrderBy) == 0 && !hasAgg {
+		if stmt.Limit != nil && stmt.Offset == nil && len(stmt.OrderBy) == 0 && !hasAgg && !hasWindow {
 			scan.Limit = stmt.Limit
 		}
 		// ORDER BY is offered to the connector only when every term is a plain
@@ -527,6 +557,20 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 			return nil, engine.Schema{}, err
 		}
 		projectBase := Node(aggNode)
+		if len(orderTerms) > 0 {
+			projectBase = &Sort{Child: projectBase, Terms: orderTerms}
+		}
+		root = &Project{Child: projectBase, Outputs: outs, Distinct: stmt.Distinct}
+		outSchema = projSchema
+	} else if hasWindow {
+		// Window stage: compute window columns over the (post-WHERE) rows, then
+		// Sort, then Project. Window calls in the select list and ORDER BY are
+		// rewritten to reference the appended $winN columns.
+		node, outs, projSchema, orderTerms, err := bc.buildWindow(stmt, base, baseSchema)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		projectBase := node
 		if len(orderTerms) > 0 {
 			projectBase = &Sort{Child: projectBase, Terms: orderTerms}
 		}
@@ -818,14 +862,14 @@ func (x *aggExtractor) synth() string {
 func (x *aggExtractor) rewrite(e sql.Expr) sql.Expr {
 	switch ex := e.(type) {
 	case *sql.FuncCall:
-		if engine.IsAggregate(ex.Name) {
+		if engine.IsAggregate(ex.Name) && ex.Over == nil {
 			return x.register(ex, x.synth())
 		}
 		args := make([]sql.Expr, len(ex.Args))
 		for i, a := range ex.Args {
 			args[i] = x.rewrite(a)
 		}
-		return &sql.FuncCall{Name: ex.Name, Args: args, Distinct: ex.Distinct}
+		return &sql.FuncCall{Name: ex.Name, Args: args, Distinct: ex.Distinct, Over: ex.Over}
 	case *sql.BinaryOp:
 		return &sql.BinaryOp{Op: ex.Op, Left: x.rewrite(ex.Left), Right: x.rewrite(ex.Right)}
 	case *sql.UnaryOp:
@@ -925,7 +969,169 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node) (Node, []eng
 // expression that merely contains one).
 func isTopLevelAgg(e sql.Expr) bool {
 	fc, ok := e.(*sql.FuncCall)
-	return ok && engine.IsAggregate(fc.Name)
+	return ok && fc.Over == nil && engine.IsAggregate(fc.Name)
+}
+
+// buildWindow constructs the Window node plus the projection above it. Window
+// calls in the SELECT list and ORDER BY are extracted into appended $winN
+// columns; the returned projection (and rewritten ORDER BY terms) reference
+// them. A plain (non-window) select item is projected as its own expression
+// over the window output, which still carries every base column.
+func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
+	win := &winExtractor{}
+	var outs []engine.ProjectedExpr
+	var outCols []engine.Column
+	for _, it := range stmt.Items.Items {
+		if it.Star {
+			// Expand to the base relation's columns (window outputs are named
+			// select items, not part of *).
+			for _, c := range baseSchema.Columns {
+				outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: c.Name}, Name: c.Name})
+				outCols = append(outCols, c)
+			}
+			continue
+		}
+		name := it.As
+		if name == "" {
+			name = inferExprName(it.Expr)
+		}
+		outs = append(outs, engine.ProjectedExpr{Expr: win.rewrite(it.Expr), Name: name})
+		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+	}
+	var orderTerms []sql.OrderTerm
+	for _, ot := range stmt.OrderBy {
+		orderTerms = append(orderTerms, sql.OrderTerm{Expr: win.rewrite(ot.Expr), Desc: ot.Desc})
+	}
+	winSchema := engine.Schema{Columns: append(append([]engine.Column{}, baseSchema.Columns...), win.cols...)}
+	node := &Window{Child: base, Specs: win.specs, Schema: winSchema}
+	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
+}
+
+// exprHasWindow reports whether the expression tree contains a window-function
+// call (a FuncCall with an OVER clause).
+func exprHasWindow(e sql.Expr) bool {
+	switch ex := e.(type) {
+	case *sql.FuncCall:
+		if ex.Over != nil {
+			return true
+		}
+		for _, a := range ex.Args {
+			if exprHasWindow(a) {
+				return true
+			}
+		}
+	case *sql.BinaryOp:
+		return exprHasWindow(ex.Left) || exprHasWindow(ex.Right)
+	case *sql.UnaryOp:
+		return exprHasWindow(ex.Expr)
+	case *sql.InExpr:
+		if exprHasWindow(ex.Expr) {
+			return true
+		}
+		for _, x := range ex.List {
+			if exprHasWindow(x) {
+				return true
+			}
+		}
+	case *sql.BetweenExpr:
+		return exprHasWindow(ex.Expr) || exprHasWindow(ex.Low) || exprHasWindow(ex.High)
+	case *sql.LikeExpr:
+		return exprHasWindow(ex.Expr) || exprHasWindow(ex.Pat)
+	case *sql.IsNullExpr:
+		return exprHasWindow(ex.Expr)
+	case *sql.CaseExpr:
+		for _, w := range ex.Whens {
+			if exprHasWindow(w.Cond) || exprHasWindow(w.Then) {
+				return true
+			}
+		}
+		return ex.Else != nil && exprHasWindow(ex.Else)
+	case *sql.CastExpr:
+		return exprHasWindow(ex.Expr)
+	case *sql.ExtractExpr:
+		return exprHasWindow(ex.Source)
+	case *sql.PositionExpr:
+		return exprHasWindow(ex.Substr) || exprHasWindow(ex.Str)
+	}
+	return false
+}
+
+// rewriteFuncs deep-copies e, replacing any FuncCall for which sub returns a
+// non-nil node with that node (without descending into it); other nodes are
+// rebuilt with rewritten children. Used to lift window calls into precomputed
+// columns.
+func rewriteFuncs(e sql.Expr, sub func(*sql.FuncCall) sql.Expr) sql.Expr {
+	switch ex := e.(type) {
+	case *sql.FuncCall:
+		if r := sub(ex); r != nil {
+			return r
+		}
+		args := make([]sql.Expr, len(ex.Args))
+		for i, a := range ex.Args {
+			args[i] = rewriteFuncs(a, sub)
+		}
+		return &sql.FuncCall{Name: ex.Name, Args: args, Distinct: ex.Distinct, Over: ex.Over}
+	case *sql.BinaryOp:
+		return &sql.BinaryOp{Op: ex.Op, Left: rewriteFuncs(ex.Left, sub), Right: rewriteFuncs(ex.Right, sub)}
+	case *sql.UnaryOp:
+		return &sql.UnaryOp{Op: ex.Op, Expr: rewriteFuncs(ex.Expr, sub)}
+	case *sql.InExpr:
+		list := make([]sql.Expr, len(ex.List))
+		for i, v := range ex.List {
+			list[i] = rewriteFuncs(v, sub)
+		}
+		return &sql.InExpr{Expr: rewriteFuncs(ex.Expr, sub), List: list, Subquery: ex.Subquery, Negate: ex.Negate}
+	case *sql.BetweenExpr:
+		return &sql.BetweenExpr{Expr: rewriteFuncs(ex.Expr, sub), Low: rewriteFuncs(ex.Low, sub), High: rewriteFuncs(ex.High, sub), Negate: ex.Negate}
+	case *sql.LikeExpr:
+		return &sql.LikeExpr{Expr: rewriteFuncs(ex.Expr, sub), Pat: rewriteFuncs(ex.Pat, sub), Negate: ex.Negate, Insensitive: ex.Insensitive}
+	case *sql.IsNullExpr:
+		return &sql.IsNullExpr{Expr: rewriteFuncs(ex.Expr, sub), Negate: ex.Negate}
+	case *sql.CaseExpr:
+		whens := make([]sql.CaseWhen, len(ex.Whens))
+		for i, w := range ex.Whens {
+			whens[i] = sql.CaseWhen{Cond: rewriteFuncs(w.Cond, sub), Then: rewriteFuncs(w.Then, sub)}
+		}
+		var els sql.Expr
+		if ex.Else != nil {
+			els = rewriteFuncs(ex.Else, sub)
+		}
+		return &sql.CaseExpr{Whens: whens, Else: els}
+	case *sql.CastExpr:
+		return &sql.CastExpr{Expr: rewriteFuncs(ex.Expr, sub), Type: ex.Type}
+	case *sql.ExtractExpr:
+		return &sql.ExtractExpr{Field: ex.Field, Source: rewriteFuncs(ex.Source, sub)}
+	case *sql.PositionExpr:
+		return &sql.PositionExpr{Substr: rewriteFuncs(ex.Substr, sub), Str: rewriteFuncs(ex.Str, sub)}
+	}
+	return e
+}
+
+// winExtractor lifts window-function calls out of expressions into Window output
+// columns ($winN), returning expressions that reference those columns.
+type winExtractor struct {
+	specs []engine.WindowSpec
+	cols  []engine.Column
+	n     int
+}
+
+func (x *winExtractor) rewrite(e sql.Expr) sql.Expr {
+	return rewriteFuncs(e, func(fc *sql.FuncCall) sql.Expr {
+		if fc.Over == nil {
+			return nil
+		}
+		name := fmt.Sprintf("$win%d", x.n)
+		x.n++
+		x.specs = append(x.specs, engine.WindowSpec{
+			Name:        name,
+			Func:        fc.Name,
+			Args:        fc.Args,
+			PartitionBy: fc.Over.PartitionBy,
+			OrderBy:     fc.Over.OrderBy,
+		})
+		x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+		return &sql.ColRef{Name: name}
+	})
 }
 
 // buildProjection expands a non-aggregate select list into engine.ProjectedExpr
@@ -994,7 +1200,9 @@ func inferExprName(e sql.Expr) string {
 func exprHasAgg(e sql.Expr) bool {
 	switch ex := e.(type) {
 	case *sql.FuncCall:
-		if engine.IsAggregate(ex.Name) {
+		// A windowed aggregate (SUM(x) OVER (...)) is a window function, not a
+		// grouping aggregate.
+		if engine.IsAggregate(ex.Name) && ex.Over == nil {
 			return true
 		}
 		for _, a := range ex.Args {

@@ -643,19 +643,37 @@ func (p *Parser) parseAdd() (Expr, error) {
 }
 
 func (p *Parser) parseMul() (Expr, error) {
-	left, err := p.parsePrimary()
+	left, err := p.parseUnary()
 	if err != nil {
 		return nil, err
 	}
 	for p.op("*") || p.op("/") {
 		op := p.advance().Value
-		right, err := p.parsePrimary()
+		right, err := p.parseUnary()
 		if err != nil {
 			return nil, err
 		}
 		left = &BinaryOp{Op: op, Left: left, Right: right}
 	}
 	return left, nil
+}
+
+// parseUnary handles prefix - and + (unary plus is a no-op), binding tighter
+// than * and /.
+func (p *Parser) parseUnary() (Expr, error) {
+	if p.op("-") {
+		p.advance()
+		e, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryOp{Op: "-", Expr: e}, nil
+	}
+	if p.op("+") {
+		p.advance()
+		return p.parseUnary()
+	}
+	return p.parsePrimary()
 }
 
 func (p *Parser) parsePrimary() (Expr, error) {
@@ -729,6 +747,14 @@ func (p *Parser) parsePrimary() (Expr, error) {
 			}
 			if err := p.expectOp(")"); err != nil {
 				return nil, err
+			}
+			// An OVER (...) clause makes this a window function.
+			if p.kw("OVER") {
+				over, err := p.parseWindowSpec()
+				if err != nil {
+					return nil, err
+				}
+				fc.Over = over
 			}
 			return fc, nil
 		}
@@ -892,4 +918,60 @@ func (p *Parser) parsePosition() (Expr, error) {
 		return nil, err
 	}
 	return &PositionExpr{Substr: sub, Str: str}, nil
+}
+
+// parseWindowSpec parses an OVER ( [PARTITION BY ...] [ORDER BY ...] ) clause.
+// The leading OVER keyword is at the cursor. Explicit frame clauses are not
+// supported.
+func (p *Parser) parseWindowSpec() (*WindowSpec, error) {
+	p.advance() // OVER
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	w := &WindowSpec{}
+	if p.kw("PARTITION") {
+		p.advance()
+		if err := p.expectKW("BY"); err != nil {
+			return nil, err
+		}
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			w.PartitionBy = append(w.PartitionBy, e)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+	}
+	if p.kw("ORDER") {
+		p.advance()
+		if err := p.expectKW("BY"); err != nil {
+			return nil, err
+		}
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			ot := OrderTerm{Expr: e}
+			if p.kw("DESC") {
+				ot.Desc = true
+				p.advance()
+			} else if p.kw("ASC") {
+				p.advance()
+			}
+			w.OrderBy = append(w.OrderBy, ot)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return w, nil
 }

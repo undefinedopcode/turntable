@@ -77,7 +77,14 @@ A query moves through fixed stages, one package each:
    column qualification. `buildWith` registers each CTE in `buildCtx.ctes`, then
    `buildTableRef` resolves a bare name to a CTE (shadowing a registered source)
    before the registry, expanding it as a `Subquery` per reference (with a
-   `visiting` guard rejecting recursion).
+   `visiting` guard rejecting recursion). Window functions (`f(...) OVER (...)`,
+   `FuncCall.Over` set) get a `Window` node between the post-WHERE rows and the
+   projection: `buildWindow` lifts each window call into an appended `$winN`
+   column (mirroring the aggregate `$aggN` extraction via the shared
+   `rewriteFuncs`), and the projection/ORDER BY reference those columns. The
+   `WindowIter` materializes, partitions, orders, and computes per spec
+   (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD and aggregate windows; default frames
+   only). Window + GROUP BY in one query is rejected for now.
    A `WHERE/HAVING x IN (SELECT ...)` is handled differently: `resolveInSubqueries`
    executes the (non-correlated) subquery at build time and folds its one column
    into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no

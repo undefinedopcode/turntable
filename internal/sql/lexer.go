@@ -42,7 +42,7 @@ var keywords = map[string]bool{
 	"DISTINCT": true, "COUNT": true, "SUM": true, "AVG": true, "MIN": true,
 	"MAX": true, "TRUE": true, "FALSE": true, "INTERVAL": true,
 	"EXTRACT": true, "POSITION": true, "UNION": true, "WITH": true,
-	"INTERSECT": true, "EXCEPT": true,
+	"INTERSECT": true, "EXCEPT": true, "OVER": true, "PARTITION": true,
 }
 
 // Lex tokenizes src into a slice of Tokens, including a trailing TKEOF.

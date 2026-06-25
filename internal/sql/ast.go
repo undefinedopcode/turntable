@@ -185,14 +185,24 @@ func (*BetweenExpr) exprNode()  {}
 func (*LikeExpr) exprNode()     {}
 func (*IsNullExpr) exprNode()   {}
 
-// Function call (scalar or aggregate; planner distinguishes by name).
+// Function call (scalar or aggregate; planner distinguishes by name). When Over
+// is set, it is a window-function call (func(...) OVER (...)).
 type FuncCall struct {
 	Name     string
 	Args     []Expr
 	Distinct bool
+	Over     *WindowSpec
 }
 
 func (*FuncCall) exprNode() {}
+
+// WindowSpec is the OVER (...) clause of a window function: an optional
+// PARTITION BY and an optional ORDER BY. (Explicit frame clauses are not yet
+// supported; default frames apply.)
+type WindowSpec struct {
+	PartitionBy []Expr
+	OrderBy     []OrderTerm
+}
 
 // CASE WHEN ... THEN ... ELSE ... END
 type CaseExpr struct {

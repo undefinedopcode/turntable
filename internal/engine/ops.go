@@ -959,3 +959,377 @@ func (it *ExceptIter) Close() error {
 	}
 	return err2
 }
+
+// ---- Window -----------------------------------------------------------------
+
+// WindowSpec describes one window-function output column. Args are evaluated
+// against the input rows; PartitionBy/OrderBy define the window. There is no
+// explicit frame: aggregates use the whole partition when OrderBy is empty, and
+// a running RANGE frame (cumulative through each peer group) when it is present.
+type WindowSpec struct {
+	Name        string
+	Func        string
+	Args        []sql.Expr
+	PartitionBy []sql.Expr
+	OrderBy     []sql.OrderTerm
+}
+
+// WindowIter computes window-function columns and appends them to each child
+// row, preserving the child's row order. All rows are materialized up front.
+type WindowIter struct {
+	child  RowIterator
+	specs  []WindowSpec
+	eval   Evaluator
+	rows   []Row
+	pos    int
+	built  bool
+	closed bool
+}
+
+// NewWindowIter returns an iterator that appends the window columns to its rows.
+func NewWindowIter(child RowIterator, specs []WindowSpec, eval Evaluator) *WindowIter {
+	return &WindowIter{child: child, specs: specs, eval: eval}
+}
+
+func (w *WindowIter) build() error {
+	for {
+		r, ok, err := w.child.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		w.rows = append(w.rows, r)
+	}
+	cols := make([][]Value, len(w.specs))
+	for si, spec := range w.specs {
+		vals, err := computeWindow(spec, w.rows, w.eval)
+		if err != nil {
+			return err
+		}
+		cols[si] = vals
+	}
+	for i := range w.rows {
+		for si := range w.specs {
+			w.rows[i].Values = append(w.rows[i].Values, cols[si][i])
+		}
+	}
+	w.built = true
+	return nil
+}
+
+func (w *WindowIter) Next() (Row, bool, error) {
+	if !w.built {
+		if err := w.build(); err != nil {
+			return Row{}, false, err
+		}
+	}
+	if w.pos >= len(w.rows) {
+		return Row{}, false, nil
+	}
+	r := w.rows[w.pos]
+	w.pos++
+	return r, true, nil
+}
+
+func (w *WindowIter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	return w.child.Close()
+}
+
+// computeWindow returns one value per input row (indexed by original position)
+// for a single window spec.
+func computeWindow(spec WindowSpec, rows []Row, eval Evaluator) ([]Value, error) {
+	result := make([]Value, len(rows))
+	partitions := map[string][]int{}
+	var order []string
+	for i, r := range rows {
+		k, err := windowPartitionKey(spec.PartitionBy, r, eval)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := partitions[k]; !ok {
+			order = append(order, k)
+		}
+		partitions[k] = append(partitions[k], i)
+	}
+	for _, k := range order {
+		idxs := partitions[k]
+		if len(spec.OrderBy) > 0 {
+			if err := sortPartition(idxs, rows, spec.OrderBy, eval); err != nil {
+				return nil, err
+			}
+		}
+		if err := computeWindowPartition(spec, idxs, rows, eval, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func windowPartitionKey(exprs []sql.Expr, r Row, eval Evaluator) (string, error) {
+	var b strings.Builder
+	for _, e := range exprs {
+		v, err := eval.Eval(e, r)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(keyString(v))
+		b.WriteString("\x01")
+	}
+	return b.String(), nil
+}
+
+// sortPartition stably sorts the partition's row indices by the window ORDER BY.
+func sortPartition(idxs []int, rows []Row, terms []sql.OrderTerm, eval Evaluator) error {
+	var sortErr error
+	sort.SliceStable(idxs, func(a, b int) bool {
+		for _, t := range terms {
+			va, err := eval.Eval(t.Expr, rows[idxs[a]])
+			if err != nil {
+				sortErr = err
+				return false
+			}
+			vb, err := eval.Eval(t.Expr, rows[idxs[b]])
+			if err != nil {
+				sortErr = err
+				return false
+			}
+			c := Compare(va, vb)
+			if c == 0 {
+				continue
+			}
+			if t.Desc {
+				return c > 0
+			}
+			return c < 0
+		}
+		return false
+	})
+	return sortErr
+}
+
+// windowPeers reports whether two rows tie on every window ORDER BY term.
+func windowPeers(terms []sql.OrderTerm, r1, r2 Row, eval Evaluator) (bool, error) {
+	for _, t := range terms {
+		v1, err := eval.Eval(t.Expr, r1)
+		if err != nil {
+			return false, err
+		}
+		v2, err := eval.Eval(t.Expr, r2)
+		if err != nil {
+			return false, err
+		}
+		if Compare(v1, v2) != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func computeWindowPartition(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value) error {
+	switch strings.ToUpper(spec.Func) {
+	case "ROW_NUMBER":
+		for pos, ri := range idxs {
+			result[ri] = IntVal(int64(pos + 1))
+		}
+		return nil
+	case "RANK", "DENSE_RANK":
+		dense, rank := 0, 0
+		for pos, ri := range idxs {
+			newGroup := pos == 0
+			if !newGroup {
+				eq, err := windowPeers(spec.OrderBy, rows[idxs[pos-1]], rows[ri], eval)
+				if err != nil {
+					return err
+				}
+				newGroup = !eq
+			}
+			if newGroup {
+				dense++
+				rank = pos + 1
+			}
+			if strings.EqualFold(spec.Func, "RANK") {
+				result[ri] = IntVal(int64(rank))
+			} else {
+				result[ri] = IntVal(int64(dense))
+			}
+		}
+		return nil
+	case "LAG", "LEAD":
+		return computeWindowOffset(spec, idxs, rows, eval, result, strings.EqualFold(spec.Func, "LEAD"))
+	case "SUM", "AVG", "COUNT", "MIN", "MAX":
+		return computeWindowAgg(spec, idxs, rows, eval, result)
+	}
+	return fmt.Errorf("unknown window function %s", spec.Func)
+}
+
+// computeWindowOffset implements LAG/LEAD: the argument value of the row `offset`
+// positions back (LAG) or forward (LEAD) in the window order, else the default
+// (3rd arg) or NULL.
+func computeWindowOffset(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, lead bool) error {
+	if len(spec.Args) == 0 {
+		return fmt.Errorf("%s requires an argument", spec.Func)
+	}
+	offset := 1
+	if len(spec.Args) >= 2 {
+		v, err := eval.Eval(spec.Args[1], rows[idxs[0]])
+		if err != nil {
+			return err
+		}
+		if n, ok := v.AsInt(); ok {
+			offset = int(n)
+		}
+	}
+	for pos, ri := range idxs {
+		src := pos - offset
+		if lead {
+			src = pos + offset
+		}
+		switch {
+		case src >= 0 && src < len(idxs):
+			v, err := eval.Eval(spec.Args[0], rows[idxs[src]])
+			if err != nil {
+				return err
+			}
+			result[ri] = v
+		case len(spec.Args) >= 3:
+			v, err := eval.Eval(spec.Args[2], rows[ri])
+			if err != nil {
+				return err
+			}
+			result[ri] = v
+		default:
+			result[ri] = Null()
+		}
+	}
+	return nil
+}
+
+// computeWindowAgg implements SUM/AVG/COUNT/MIN/MAX as window functions: the
+// whole partition when there is no ORDER BY, else a running RANGE frame whose
+// value advances at each peer-group boundary.
+func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value) error {
+	star := false
+	if len(spec.Args) == 1 {
+		if cr, ok := spec.Args[0].(*sql.ColRef); ok && cr.Name == "*" {
+			star = true
+		}
+	}
+	add := func(acc *winAcc, ri int) error {
+		if star {
+			acc.count++
+			return nil
+		}
+		v, err := eval.Eval(spec.Args[0], rows[ri])
+		if err != nil {
+			return err
+		}
+		return acc.add(v)
+	}
+
+	if len(spec.OrderBy) == 0 {
+		acc := winAcc{fn: strings.ToUpper(spec.Func)}
+		for _, ri := range idxs {
+			if err := add(&acc, ri); err != nil {
+				return err
+			}
+		}
+		v := acc.result()
+		for _, ri := range idxs {
+			result[ri] = v
+		}
+		return nil
+	}
+
+	acc := winAcc{fn: strings.ToUpper(spec.Func)}
+	groupStart := 0
+	for pos := 0; pos < len(idxs); pos++ {
+		if err := add(&acc, idxs[pos]); err != nil {
+			return err
+		}
+		end := pos == len(idxs)-1
+		if !end {
+			eq, err := windowPeers(spec.OrderBy, rows[idxs[pos]], rows[idxs[pos+1]], eval)
+			if err != nil {
+				return err
+			}
+			end = !eq
+		}
+		if end {
+			v := acc.result()
+			for j := groupStart; j <= pos; j++ {
+				result[idxs[j]] = v
+			}
+			groupStart = pos + 1
+		}
+	}
+	return nil
+}
+
+// winAcc accumulates a window aggregate. NULLs are skipped (except COUNT(*),
+// which the caller counts directly into count).
+type winAcc struct {
+	fn         string
+	sum        float64
+	count      int64
+	have       bool
+	minV, maxV Value
+}
+
+func (a *winAcc) add(v Value) error {
+	if v.IsNull() {
+		return nil
+	}
+	a.count++
+	switch a.fn {
+	case "SUM", "AVG":
+		f, ok := v.AsFloat()
+		if !ok {
+			return fmt.Errorf("%s requires numeric arg", a.fn)
+		}
+		a.sum += f
+	case "MIN":
+		if !a.have || Compare(v, a.minV) < 0 {
+			a.minV = v
+		}
+	case "MAX":
+		if !a.have || Compare(v, a.maxV) > 0 {
+			a.maxV = v
+		}
+	}
+	a.have = true
+	return nil
+}
+
+func (a *winAcc) result() Value {
+	switch a.fn {
+	case "COUNT":
+		return IntVal(a.count)
+	case "SUM":
+		if a.count == 0 {
+			return Null()
+		}
+		return FloatVal(a.sum)
+	case "AVG":
+		if a.count == 0 {
+			return Null()
+		}
+		return FloatVal(a.sum / float64(a.count))
+	case "MIN":
+		if !a.have {
+			return Null()
+		}
+		return a.minV
+	case "MAX":
+		if !a.have {
+			return Null()
+		}
+		return a.maxV
+	}
+	return Null()
+}

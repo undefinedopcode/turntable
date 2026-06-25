@@ -113,6 +113,14 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 
 	case *Aggregate:
 		return execAggregate(ctx, node, funcs, strict)
+
+	case *Window:
+		child, childSchema, err := execNode(ctx, node.Child, funcs, strict)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		eval := engine.Evaluator{Resolve: resolverFor(node.Child, childSchema), Funcs: funcs, Strict: strict}
+		return engine.NewWindowIter(child, node.Specs, eval), node.Schema, nil
 	}
 	return nil, engine.Schema{}, fmt.Errorf("unknown plan node %T", n)
 }
@@ -150,6 +158,8 @@ func baseRelation(n Node) Node {
 		case *Project:
 			n = x.Child
 		case *Aggregate:
+			n = x.Child
+		case *Window:
 			n = x.Child
 		default:
 			return n

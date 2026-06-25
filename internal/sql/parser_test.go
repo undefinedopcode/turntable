@@ -56,6 +56,40 @@ func TestParseJoin(t *testing.T) {
 	}
 }
 
+func TestParseWindowFunction(t *testing.T) {
+	stmt, err := Parse("SELECT ROW_NUMBER() OVER (PARTITION BY a, b ORDER BY c DESC, d) AS rn FROM t")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	fc, ok := stmt.(*SelectStmt).Items.Items[0].Expr.(*FuncCall)
+	if !ok || fc.Over == nil {
+		t.Fatalf("expected a window FuncCall, got %T", stmt.(*SelectStmt).Items.Items[0].Expr)
+	}
+	if len(fc.Over.PartitionBy) != 2 {
+		t.Errorf("PARTITION BY = %d exprs, want 2", len(fc.Over.PartitionBy))
+	}
+	if len(fc.Over.OrderBy) != 2 || !fc.Over.OrderBy[0].Desc || fc.Over.OrderBy[1].Desc {
+		t.Errorf("ORDER BY = %+v, want [c DESC, d ASC]", fc.Over.OrderBy)
+	}
+}
+
+func TestParseUnaryMinus(t *testing.T) {
+	stmt, err := Parse("SELECT -1 AS a, 2 * -3 AS b")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	items := stmt.(*SelectStmt).Items.Items
+	if u, ok := items[0].Expr.(*UnaryOp); !ok || u.Op != "-" {
+		t.Errorf("item0 = %T, want UnaryOp -", items[0].Expr)
+	}
+	// 2 * -3 parses as 2 * (-3), unary binding tighter than *.
+	if b, ok := items[1].Expr.(*BinaryOp); !ok || b.Op != "*" {
+		t.Fatalf("item1 = %T, want BinaryOp *", items[1].Expr)
+	} else if _, ok := b.Right.(*UnaryOp); !ok {
+		t.Errorf("rhs = %T, want UnaryOp", b.Right)
+	}
+}
+
 func TestParseJoinKinds(t *testing.T) {
 	cases := []struct {
 		q    string

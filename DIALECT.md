@@ -235,6 +235,35 @@ HAVING SUM(salary) > 100000
 ORDER BY COUNT(*) DESC
 ```
 
+### Window functions
+
+A function with an `OVER (...)` clause computes a value per row over a window of
+related rows, without collapsing them:
+
+```sql
+SELECT name, dept, salary,
+       ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rank_in_dept,
+       SUM(salary)  OVER (PARTITION BY dept)                      AS dept_total,
+       salary - LAG(salary) OVER (ORDER BY salary)                AS gap
+FROM emp
+```
+
+`OVER ( [PARTITION BY ...] [ORDER BY ...] )` — both clauses optional. Supported
+functions:
+
+| Function | Result |
+|----------|--------|
+| `ROW_NUMBER()` | 1-based position within the partition |
+| `RANK()` / `DENSE_RANK()` | rank by the `ORDER BY` (with / without gaps for ties) |
+| `LAG(expr[, n[, default]])` / `LEAD(...)` | value `n` rows back / forward (default `1`; `default` or `NULL` past the edge) |
+| `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` `(expr)` | aggregate over the window |
+
+A window aggregate covers the whole partition when there is no `ORDER BY`, or a
+running frame (cumulative through the current row, ties sharing one value) when
+there is. Window calls may be wrapped in scalar expressions and used in
+`ORDER BY`. Explicit frame clauses (`ROWS`/`RANGE BETWEEN …`) and combining
+window functions with `GROUP BY` in one query are not yet supported.
+
 ---
 
 ## Pushdown
@@ -252,6 +281,7 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Window functions, recursive CTEs (`WITH RECURSIVE`), parenthesized set-op
+Explicit window frames (`ROWS`/`RANGE BETWEEN …`), window functions together
+with `GROUP BY`, recursive CTEs (`WITH RECURSIVE`), parenthesized set-op
 grouping, non-equality / compound join conditions, scalar/`EXISTS`/correlated
 subqueries, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
