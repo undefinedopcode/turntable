@@ -192,10 +192,19 @@ Used with (or without) `GROUP BY`:
 Each accepts a leading `DISTINCT` (`COUNT(DISTINCT region)`,
 `SUM(DISTINCT amount)`, `STRING_AGG(DISTINCT tag, ',')`), which deduplicates the
 argument values first. Sample `STDDEV`/`VARIANCE` of a single value is `NULL`.
-Filter groups with `HAVING`.
 
-> Aggregates must currently be a top-level select item — `STDDEV(x)` works,
-> but wrapping one in a scalar call (`ROUND(STDDEV(x), 2)`) does not yet.
+Aggregates may be nested inside scalar expressions and combined, and may appear
+in `HAVING` and `ORDER BY`:
+
+```sql
+SELECT dept,
+       ROUND(STDDEV(salary), 2)        AS sd,
+       SUM(salary) * 100.0 / COUNT(*)  AS weighted
+FROM emp
+GROUP BY dept
+HAVING SUM(salary) > 100000
+ORDER BY COUNT(*) DESC
+```
 
 ---
 

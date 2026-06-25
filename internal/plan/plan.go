@@ -411,7 +411,7 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 	// Resolve positional ORDER BY / GROUP BY references (e.g. `ORDER BY 2`) to
 	// the matching select item before they reach Sort/Aggregate, so an integer
 	// term sorts/groups by that output column instead of being a silent no-op.
-	if err := resolveOrdinals(stmt, hasAgg); err != nil {
+	if err := resolveOrdinals(stmt); err != nil {
 		return nil, engine.Schema{}, err
 	}
 
@@ -445,39 +445,37 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		base = &Filter{Child: base, Predicate: stmt.Where}
 	}
 
-	var projectBase Node
-	var projectSchema engine.Schema
+	var root Node
+	var outSchema engine.Schema
 
 	if hasAgg {
-		agg, schema, err := bc.buildAggregate(stmt, base, baseSchema)
+		// Aggregate, then (optionally) Sort over its output, then Project. The
+		// aggregate builder rewrites ORDER BY/HAVING to reference aggregate output
+		// columns, so a Sort by an aggregate or a scalar-of-aggregate works.
+		aggNode, outs, projSchema, orderTerms, err := bc.buildAggregate(stmt, base)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		projectBase = agg
-		projectSchema = schema
+		projectBase := Node(aggNode)
+		if len(orderTerms) > 0 {
+			projectBase = &Sort{Child: projectBase, Terms: orderTerms}
+		}
+		root = &Project{Child: projectBase, Outputs: outs, Distinct: stmt.Distinct}
+		outSchema = projSchema
 	} else {
-		projectBase = base
-		projectSchema = baseSchema
+		// ORDER BY runs before Project so it can reference input columns that are
+		// not in the select list.
+		projectBase := base
+		if len(stmt.OrderBy) > 0 {
+			projectBase = &Sort{Child: projectBase, Terms: stmt.OrderBy}
+		}
+		outs, sch, err := bc.buildProjection(stmt, baseSchema)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		root = &Project{Child: projectBase, Outputs: outs, Distinct: stmt.Distinct}
+		outSchema = sch
 	}
-
-	// 4. ORDER BY (may reference output aliases or input columns; for v0.1 we
-	//    resolve against the pre-projection schema when no aggregation, else
-	//    against the aggregate output schema). We apply Sort before Project so
-	//    it can reference input columns not in the select list. When there's an
-	//    aggregate, the sort must reference aggregate output; we resolve there.
-	if len(stmt.OrderBy) > 0 {
-		projectBase = &Sort{Child: projectBase, Terms: stmt.OrderBy}
-	}
-
-	// 5. Project (select list).
-	outs, outSchema, err := bc.buildProjection(stmt, projectSchema, hasAgg)
-	if err != nil {
-		return nil, engine.Schema{}, err
-	}
-	root := Node(&Project{Child: projectBase, Outputs: outs, Distinct: stmt.Distinct})
-	// If DISTINCT, wrap with a distinct node conceptually; the engine Project
-	// doesn't dedupe, so we rely on the renderer/cli if needed. v0.1: support
-	// DISTINCT via a distinct wrapper applied in exec.
 
 	// 6. LIMIT/OFFSET.
 	if stmt.Limit != nil || stmt.Offset != nil {
@@ -653,13 +651,10 @@ func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAliases
 }
 
 // resolveOrdinals rewrites positional references in GROUP BY and ORDER BY (a
-// bare integer literal N, 1-based, refers to the N-th select item) into the
-// underlying item. An out-of-range or `*` position is an error rather than a
-// silent no-op. ORDER BY in an aggregate query references the output column by
-// name (the Sort runs over the aggregate output schema); otherwise — and for
-// GROUP BY — it substitutes the item's expression (resolved over input rows),
-// mirroring how buildProjection treats the two cases.
-func resolveOrdinals(stmt *sql.SelectStmt, hasAgg bool) error {
+// bare integer literal N, 1-based, refers to the N-th select item) into that
+// item's expression. An out-of-range or `*` position is an error rather than a
+// silent no-op.
+func resolveOrdinals(stmt *sql.SelectStmt) error {
 	items := stmt.Items.Items
 	itemFor := func(clause string, n int) (sql.SelectItem, error) {
 		if n < 1 || n > len(items) {
@@ -691,76 +686,168 @@ func resolveOrdinals(stmt *sql.SelectStmt, hasAgg bool) error {
 		if err != nil {
 			return err
 		}
-		if hasAgg {
-			name := it.As
-			if name == "" {
-				name = inferExprName(it.Expr)
-			}
-			stmt.OrderBy[i].Expr = &sql.ColRef{Name: name}
-		} else {
-			stmt.OrderBy[i].Expr = it.Expr
-		}
+		// Substitute the select item's expression. For an aggregate query
+		// buildAggregate rewrites this (and the rest of ORDER BY) to reference the
+		// aggregate output, so ordinals onto aggregates and scalars-of-aggregates
+		// resolve too.
+		stmt.OrderBy[i].Expr = it.Expr
 	}
 	return nil
 }
 
-// buildAggregate constructs the Aggregate node and its output schema. In
-// v0.1 the aggregate output schema mirrors the SELECT list: non-aggregate
-// select items become group keys (in select-list order) and aggregate items
-// become aggregate output columns. This lets SELECT aliases like
-// `p.name AS product` flow through correctly.
-func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, engine.Schema, error) {
+// aggExtractor pulls aggregate calls out of expressions. Each call it finds is
+// appended to specs/cols as an aggregate output column; rewrite() returns the
+// expression with every aggregate replaced by a reference to that column, so a
+// later projection can evaluate scalar wrappers (e.g. ROUND(STDDEV(x), 2)) over
+// the aggregate's output. A top-level aggregate select item keeps its alias as
+// the column name (so HAVING/ORDER BY can reference it); nested aggregates get a
+// synthetic "$aggN" name a user identifier can never collide with.
+type aggExtractor struct {
+	specs []engine.AggSpec
+	cols  []engine.Column
+	n     int
+}
+
+func (x *aggExtractor) register(fc *sql.FuncCall, name string) sql.Expr {
+	var arg, arg2 sql.Expr
+	if len(fc.Args) >= 1 {
+		arg = fc.Args[0]
+	}
+	if len(fc.Args) >= 2 {
+		arg2 = fc.Args[1] // e.g. the STRING_AGG delimiter
+	}
+	x.specs = append(x.specs, engine.AggSpec{Func: fc.Name, Arg: arg, Arg2: arg2, Name: name, Distinct: fc.Distinct})
+	x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+	return &sql.ColRef{Name: name}
+}
+
+func (x *aggExtractor) synth() string {
+	name := fmt.Sprintf("$agg%d", x.n)
+	x.n++
+	return name
+}
+
+// rewrite returns a copy of e with each aggregate call replaced by a ColRef to
+// its (synthetically named) output column. Aggregate arguments are left intact:
+// they are evaluated by the AggregateIter over the input rows, not here.
+func (x *aggExtractor) rewrite(e sql.Expr) sql.Expr {
+	switch ex := e.(type) {
+	case *sql.FuncCall:
+		if engine.IsAggregate(ex.Name) {
+			return x.register(ex, x.synth())
+		}
+		args := make([]sql.Expr, len(ex.Args))
+		for i, a := range ex.Args {
+			args[i] = x.rewrite(a)
+		}
+		return &sql.FuncCall{Name: ex.Name, Args: args, Distinct: ex.Distinct}
+	case *sql.BinaryOp:
+		return &sql.BinaryOp{Op: ex.Op, Left: x.rewrite(ex.Left), Right: x.rewrite(ex.Right)}
+	case *sql.UnaryOp:
+		return &sql.UnaryOp{Op: ex.Op, Expr: x.rewrite(ex.Expr)}
+	case *sql.InExpr:
+		list := make([]sql.Expr, len(ex.List))
+		for i, v := range ex.List {
+			list[i] = x.rewrite(v)
+		}
+		return &sql.InExpr{Expr: x.rewrite(ex.Expr), List: list, Subquery: ex.Subquery, Negate: ex.Negate}
+	case *sql.BetweenExpr:
+		return &sql.BetweenExpr{Expr: x.rewrite(ex.Expr), Low: x.rewrite(ex.Low), High: x.rewrite(ex.High), Negate: ex.Negate}
+	case *sql.LikeExpr:
+		return &sql.LikeExpr{Expr: x.rewrite(ex.Expr), Pat: x.rewrite(ex.Pat), Negate: ex.Negate, Insensitive: ex.Insensitive}
+	case *sql.IsNullExpr:
+		return &sql.IsNullExpr{Expr: x.rewrite(ex.Expr), Negate: ex.Negate}
+	case *sql.CaseExpr:
+		whens := make([]sql.CaseWhen, len(ex.Whens))
+		for i, w := range ex.Whens {
+			whens[i] = sql.CaseWhen{Cond: x.rewrite(w.Cond), Then: x.rewrite(w.Then)}
+		}
+		var els sql.Expr
+		if ex.Else != nil {
+			els = x.rewrite(ex.Else)
+		}
+		return &sql.CaseExpr{Whens: whens, Else: els}
+	case *sql.CastExpr:
+		return &sql.CastExpr{Expr: x.rewrite(ex.Expr), Type: ex.Type}
+	case *sql.ExtractExpr:
+		return &sql.ExtractExpr{Field: ex.Field, Source: x.rewrite(ex.Source)}
+	case *sql.PositionExpr:
+		return &sql.PositionExpr{Substr: x.rewrite(ex.Substr), Str: x.rewrite(ex.Str)}
+	}
+	// Literals and column refs are returned unchanged.
+	return e
+}
+
+// buildAggregate constructs the Aggregate node plus the projection that runs on
+// top of it. Aggregate calls anywhere in the SELECT list, HAVING, and ORDER BY
+// are extracted into aggregate output columns; the remaining (aggregate-free)
+// select items are the group keys. The Aggregate emits rows as
+// [group keys..., aggregates...]; the returned projection restores SELECT-list
+// order and evaluates any scalar wrappers around aggregates. The returned order
+// terms are rewritten to reference the aggregate output and are applied (as a
+// Sort) between the Aggregate and the projection by the caller.
+func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
+	ext := &aggExtractor{}
 	var keys []sql.Expr
-	var aggs []engine.AggSpec
-	// The AggregateIter emits each row as [group keys..., aggregates...], so the
-	// output schema must follow that layout — NOT the SELECT-list order — or the
-	// final projection (which references these columns by name) reads the wrong
-	// positions when a group key follows an aggregate in the SELECT list. The
-	// projection restores SELECT-list order.
-	var keyCols, aggCols []engine.Column
+	var keyCols []engine.Column
+	var outs []engine.ProjectedExpr
+	var outCols []engine.Column
 
 	for _, it := range stmt.Items.Items {
 		if it.Star {
-			return nil, engine.Schema{}, fmt.Errorf("SELECT * not valid with aggregation; name columns explicitly")
-		}
-		fc, ok := it.Expr.(*sql.FuncCall)
-		if ok && engine.IsAggregate(fc.Name) {
-			var arg, arg2 sql.Expr
-			if len(fc.Args) >= 1 {
-				arg = fc.Args[0]
-			}
-			if len(fc.Args) >= 2 {
-				arg2 = fc.Args[1] // e.g. the STRING_AGG delimiter
-			}
-			name := it.As
-			if name == "" {
-				name = inferExprName(it.Expr)
-			}
-			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Arg2: arg2, Name: name, Distinct: fc.Distinct})
-			aggCols = append(aggCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
-			continue
+			return nil, nil, engine.Schema{}, nil, fmt.Errorf("SELECT * not valid with aggregation; name columns explicitly")
 		}
 		name := it.As
 		if name == "" {
 			name = inferExprName(it.Expr)
 		}
-		keys = append(keys, it.Expr)
-		keyCols = append(keyCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+		switch {
+		case isTopLevelAgg(it.Expr):
+			// The whole item is an aggregate: name its column by the item's alias
+			// so HAVING/ORDER BY referencing that alias resolve directly.
+			ext.register(it.Expr.(*sql.FuncCall), name)
+			outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: name}, Name: name})
+		case exprHasAgg(it.Expr):
+			// A scalar expression wrapping one or more aggregates.
+			outs = append(outs, engine.ProjectedExpr{Expr: ext.rewrite(it.Expr), Name: name})
+		default:
+			// No aggregate: a group key. The projection reads the key column back.
+			keys = append(keys, it.Expr)
+			keyCols = append(keyCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+			outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: name}, Name: name})
+		}
+		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
-	aggSchema := engine.Schema{Columns: append(keyCols, aggCols...)}
-	node := &Aggregate{
-		Child: base, Keys: keys, Aggs: aggs, Having: stmt.Having, Schema: aggSchema,
+
+	having := stmt.Having
+	if having != nil {
+		having = ext.rewrite(having)
 	}
-	return node, aggSchema, nil
+	var orderTerms []sql.OrderTerm
+	for _, ot := range stmt.OrderBy {
+		orderTerms = append(orderTerms, sql.OrderTerm{Expr: ext.rewrite(ot.Expr), Desc: ot.Desc})
+	}
+
+	// The AggregateIter emits [group keys..., aggregates...]; the intermediate
+	// schema must follow that layout (not SELECT-list order) so name-based reads
+	// land on the right columns.
+	interSchema := engine.Schema{Columns: append(append([]engine.Column{}, keyCols...), ext.cols...)}
+	node := &Aggregate{Child: base, Keys: keys, Aggs: ext.specs, Having: having, Schema: interSchema}
+	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
 }
 
-// buildProjection expands the select list into engine.ProjectedExpr entries
-// and computes the output schema. When hasAgg is true the projection runs over
-// the aggregate output schema: every select item must correspond to a column
-// already present in inSchema (a group key or an aggregate alias). We emit a
-// ColRef to that column rather than re-evaluating the (possibly aggregate)
-// expression.
-func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema, hasAgg bool) ([]engine.ProjectedExpr, engine.Schema, error) {
+// isTopLevelAgg reports whether e is itself an aggregate call (vs. a scalar
+// expression that merely contains one).
+func isTopLevelAgg(e sql.Expr) bool {
+	fc, ok := e.(*sql.FuncCall)
+	return ok && engine.IsAggregate(fc.Name)
+}
+
+// buildProjection expands a non-aggregate select list into engine.ProjectedExpr
+// entries and computes the output schema. (Aggregate queries build their
+// projection in buildAggregate, where aggregate calls are rewritten to column
+// references first.)
+func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema) ([]engine.ProjectedExpr, engine.Schema, error) {
 	// Handle SELECT * (and alias.*).
 	if len(stmt.Items.Items) == 1 && stmt.Items.Items[0].Star {
 		var outs []engine.ProjectedExpr
@@ -794,16 +881,7 @@ func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema
 		if name == "" {
 			name = inferExprName(it.Expr)
 		}
-		if hasAgg {
-			// Reference the aggregate output column by its name. The aggregate
-			// builder emitted a column with this same name (alias or inferred).
-			outs = append(outs, engine.ProjectedExpr{
-				Expr: &sql.ColRef{Name: name},
-				Name: name,
-			})
-		} else {
-			outs = append(outs, engine.ProjectedExpr{Expr: it.Expr, Name: name})
-		}
+		outs = append(outs, engine.ProjectedExpr{Expr: it.Expr, Name: name})
 		cols = append(cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
 	return outs, engine.Schema{Columns: cols}, nil
@@ -869,6 +947,10 @@ func exprHasAgg(e sql.Expr) bool {
 		}
 	case *sql.CastExpr:
 		return exprHasAgg(ex.Expr)
+	case *sql.ExtractExpr:
+		return exprHasAgg(ex.Source)
+	case *sql.PositionExpr:
+		return exprHasAgg(ex.Substr) || exprHasAgg(ex.Str)
 	}
 	return false
 }
