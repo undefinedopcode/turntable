@@ -33,9 +33,11 @@ SELECT [DISTINCT] <select_list>
 
 ### Joins
 
-`INNER JOIN` (default) and `LEFT JOIN`, on an equality condition
-(`a.x = b.y`) — including across connectors. Right/full outer joins are not yet
-supported.
+`INNER JOIN` (default), `LEFT`, `RIGHT`, and `FULL` (the `OUTER` keyword is
+optional), on a single equality condition (`a.x = b.y`) — including across
+connectors. The unmatched side of an outer join is filled with `NULL`s. Compound
+or non-equality join conditions are not yet supported (put extra predicates in
+`WHERE`).
 
 ### Common table expressions (`WITH`)
 
@@ -240,6 +242,6 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Window functions, `INTERSECT`/`EXCEPT`, right/full outer joins, recursive CTEs
-(`WITH RECURSIVE`), scalar/`EXISTS`/correlated subqueries, and DML/DDL. See
-`DESIGN.md` §11 for the roadmap.
+Window functions, `INTERSECT`/`EXCEPT`, recursive CTEs (`WITH RECURSIVE`),
+non-equality / compound join conditions, scalar/`EXISTS`/correlated subqueries,
+and DML/DDL. See `DESIGN.md` §11 for the roadmap.

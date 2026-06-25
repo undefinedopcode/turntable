@@ -195,7 +195,7 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 	}
 
 	// JOINs
-	for p.kw("INNER") || p.kw("LEFT") || p.kw("JOIN") {
+	for p.kw("INNER") || p.kw("LEFT") || p.kw("RIGHT") || p.kw("FULL") || p.kw("JOIN") {
 		j, err := p.parseJoin()
 		if err != nil {
 			return nil, err
@@ -407,10 +407,21 @@ func urlScheme(url string) string {
 
 func (p *Parser) parseJoin() (Join, error) {
 	j := Join{Kind: JoinInner}
-	if p.kw("INNER") {
+	switch {
+	case p.kw("INNER"):
 		p.advance()
-	} else if p.kw("LEFT") {
+	case p.kw("LEFT"):
 		j.Kind = JoinLeft
+		p.advance()
+	case p.kw("RIGHT"):
+		j.Kind = JoinRight
+		p.advance()
+	case p.kw("FULL"):
+		j.Kind = JoinFull
+		p.advance()
+	}
+	// An optional OUTER keyword (LEFT/RIGHT/FULL OUTER JOIN) is accepted noise.
+	if p.kw("OUTER") {
 		p.advance()
 	}
 	if err := p.expectKW("JOIN"); err != nil {

@@ -247,46 +247,53 @@ func (l *LimitIter) Close() error {
 // column names or know about aliases/schemas.
 type KeyExtractor func(row Row) Value
 
-// HashJoinIter implements an in-memory hash equi-join. The left side is
-// materialized as the build side; the right side is streamed as the probe side.
-// Only equi-join predicates (a.col = b.col) are supported; residual non-equi
-// predicates should be applied by a separate Filter above the join.
+// HashJoinIter implements an in-memory hash equi-join supporting INNER, LEFT,
+// RIGHT, and FULL kinds. The left side is materialized as the build side; the
+// right side is streamed as the probe side. Only equi-join predicates
+// (a.col = b.col) are supported; residual non-equi predicates should be applied
+// by a separate Filter above the join. Output rows are always [left..., right...]
+// with the unmatched side NULL-padded.
 type HashJoinIter struct {
-	left, right RowIterator
+	left, right       RowIterator
 	leftKey, rightKey KeyExtractor
 
-	kind      sql.JoinKind // inner or left
-	rightWidth int          // number of right-side columns (for NULL padding)
+	kind                  sql.JoinKind
+	leftWidth, rightWidth int // column counts, for NULL padding the missing side
 
-	bucket  map[string][]Row
-	keys    []string // ordered build keys for deterministic left order
-	matched map[string]bool
+	leftRows []Row
+	// leftMatched is parallel to leftRows, set as probe rows match; bucket maps a
+	// join key to indices into leftRows.
+	leftMatched []bool
+	bucket      map[string][]int
+	built       bool
 
-	pending []Row // matched build rows for current probe row
+	pending []Row // join rows produced for the current probe row
 	pendi   int
+
+	rightDone bool
+	ui        int // scan cursor for emitting unmatched left rows (LEFT/FULL)
 
 	closed bool
 }
 
-// NewHashJoinIter builds a hash join. leftKey/rightKey extract the join key
-// from each side's rows; rightWidth pads NULLs for unmatched left rows in a
-// LEFT JOIN.
+// NewHashJoinIter builds a hash join. leftKey/rightKey extract the join key from
+// each side's rows; leftWidth/rightWidth give the column counts used to NULL-pad
+// the missing side for outer joins.
 func NewHashJoinIter(
 	left, right RowIterator,
 	leftKey, rightKey KeyExtractor,
 	kind sql.JoinKind,
-	rightWidth int,
+	leftWidth, rightWidth int,
 ) *HashJoinIter {
 	return &HashJoinIter{
 		left: left, right: right,
 		leftKey: leftKey, rightKey: rightKey,
-		kind: kind, rightWidth: rightWidth,
+		kind: kind, leftWidth: leftWidth, rightWidth: rightWidth,
 	}
 }
 
 func (j *HashJoinIter) build() error {
-	j.bucket = map[string][]Row{}
-	j.matched = map[string]bool{}
+	j.bucket = map[string][]int{}
 	for {
 		r, ok, err := j.left.Next()
 		if err != nil {
@@ -295,10 +302,13 @@ func (j *HashJoinIter) build() error {
 		if !ok {
 			break
 		}
+		idx := len(j.leftRows)
+		j.leftRows = append(j.leftRows, r)
 		k := keyString(j.leftKey(r))
-		j.bucket[k] = append(j.bucket[k], r)
-		j.keys = append(j.keys, k)
+		j.bucket[k] = append(j.bucket[k], idx)
 	}
+	j.leftMatched = make([]bool, len(j.leftRows))
+	j.built = true
 	return nil
 }
 
@@ -309,39 +319,67 @@ func keyString(v Value) string {
 	return v.AsString()
 }
 
+func (j *HashJoinIter) keepsUnmatchedLeft() bool {
+	return j.kind == sql.JoinLeft || j.kind == sql.JoinFull
+}
+
+func (j *HashJoinIter) keepsUnmatchedRight() bool {
+	return j.kind == sql.JoinRight || j.kind == sql.JoinFull
+}
+
 func (j *HashJoinIter) Next() (Row, bool, error) {
-	if j.bucket == nil {
+	if !j.built {
 		if err := j.build(); err != nil {
 			return Row{}, false, err
 		}
 	}
 	for {
-		if len(j.pending) > 0 && j.pendi < len(j.pending) {
+		// Drain join rows buffered for the current probe row.
+		if j.pendi < len(j.pending) {
 			r := j.pending[j.pendi]
 			j.pendi++
 			return r, true, nil
 		}
-		rr, ok, err := j.right.Next()
-		if err != nil {
-			return Row{}, false, err
-		}
-		if !ok {
-			if j.kind == sql.JoinLeft {
-				return j.emitUnmatchedLeft()
+
+		if !j.rightDone {
+			rr, ok, err := j.right.Next()
+			if err != nil {
+				return Row{}, false, err
 			}
-			return Row{}, false, nil
-		}
-		k := keyString(j.rightKey(rr))
-		matches := j.bucket[k]
-		if len(matches) == 0 {
+			if !ok {
+				j.rightDone = true
+				continue
+			}
+			idxs := j.bucket[keyString(j.rightKey(rr))]
+			if len(idxs) == 0 {
+				// Unmatched right row: emit it NULL-padded on the left for
+				// RIGHT/FULL; otherwise drop it.
+				if j.keepsUnmatchedRight() {
+					return mergeRows(nullRow(j.leftWidth), rr), true, nil
+				}
+				continue
+			}
+			j.pending = j.pending[:0]
+			for _, i := range idxs {
+				j.leftMatched[i] = true
+				j.pending = append(j.pending, mergeRows(j.leftRows[i], rr))
+			}
+			j.pendi = 0
 			continue
 		}
-		j.matched[k] = true
-		j.pending = make([]Row, 0, len(matches))
-		for _, lr := range matches {
-			j.pending = append(j.pending, mergeRows(lr, rr))
+
+		// Right side exhausted: emit unmatched left rows for LEFT/FULL.
+		if !j.keepsUnmatchedLeft() {
+			return Row{}, false, nil
 		}
-		j.pendi = 0
+		for j.ui < len(j.leftRows) {
+			i := j.ui
+			j.ui++
+			if !j.leftMatched[i] {
+				return mergeRows(j.leftRows[i], nullRow(j.rightWidth)), true, nil
+			}
+		}
+		return Row{}, false, nil
 	}
 }
 
@@ -352,20 +390,14 @@ func mergeRows(l, r Row) Row {
 	return Row{Values: vals}
 }
 
-func (j *HashJoinIter) emitUnmatchedLeft() (Row, bool, error) {
-	for _, k := range j.keys {
-		if j.matched[k] {
-			continue
-		}
-		j.matched[k] = true
-		lr := j.bucket[k][0]
-		nulls := make([]Value, j.rightWidth)
-		for i := range nulls {
-			nulls[i] = Null()
-		}
-		return mergeRows(lr, Row{Values: nulls}), true, nil
+// nullRow returns a row of width NULL values, used to pad the absent side of an
+// outer-join output row.
+func nullRow(width int) Row {
+	vals := make([]Value, width)
+	for i := range vals {
+		vals[i] = Null()
 	}
-	return Row{}, false, nil
+	return Row{Values: vals}
 }
 
 func (j *HashJoinIter) Close() error {

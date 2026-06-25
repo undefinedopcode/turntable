@@ -33,7 +33,8 @@ type Token struct {
 // keywords recognized by the lexer (uppercased on match).
 var keywords = map[string]bool{
 	"SELECT": true, "FROM": true, "WHERE": true, "JOIN": true, "INNER": true,
-	"LEFT": true, "ON": true, "GROUP": true, "BY": true, "HAVING": true,
+	"LEFT": true, "RIGHT": true, "FULL": true, "OUTER": true,
+	"ON": true, "GROUP": true, "BY": true, "HAVING": true,
 	"ORDER": true, "ASC": true, "DESC": true, "LIMIT": true, "OFFSET": true,
 	"AND": true, "OR": true, "NOT": true, "IN": true, "BETWEEN": true,
 	"LIKE": true, "ILIKE": true, "IS": true, "NULL": true, "CASE": true, "WHEN": true,

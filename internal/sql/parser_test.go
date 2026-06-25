@@ -56,6 +56,35 @@ func TestParseJoin(t *testing.T) {
 	}
 }
 
+func TestParseJoinKinds(t *testing.T) {
+	cases := []struct {
+		q    string
+		kind JoinKind
+	}{
+		{"SELECT * FROM a JOIN b ON a.id = b.id", JoinInner},
+		{"SELECT * FROM a INNER JOIN b ON a.id = b.id", JoinInner},
+		{"SELECT * FROM a LEFT JOIN b ON a.id = b.id", JoinLeft},
+		{"SELECT * FROM a LEFT OUTER JOIN b ON a.id = b.id", JoinLeft},
+		{"SELECT * FROM a RIGHT JOIN b ON a.id = b.id", JoinRight},
+		{"SELECT * FROM a RIGHT OUTER JOIN b ON a.id = b.id", JoinRight},
+		{"SELECT * FROM a FULL JOIN b ON a.id = b.id", JoinFull},
+		{"SELECT * FROM a FULL OUTER JOIN b ON a.id = b.id", JoinFull},
+	}
+	for _, c := range cases {
+		stmt, err := Parse(c.q)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.q, err)
+		}
+		j := stmt.(*SelectStmt).Joins
+		if len(j) != 1 {
+			t.Fatalf("%q: joins = %d, want 1", c.q, len(j))
+		}
+		if j[0].Kind != c.kind {
+			t.Errorf("%q: kind = %d, want %d", c.q, j[0].Kind, c.kind)
+		}
+	}
+}
+
 func TestParseGroupByAndAgg(t *testing.T) {
 	stmt, err := Parse("SELECT region, COUNT(*) AS n FROM sales GROUP BY region HAVING n > 1")
 	if err != nil {

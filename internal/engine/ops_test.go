@@ -106,7 +106,9 @@ func TestHashJoinIter(t *testing.T) {
 	}
 	lk := func(r Row) Value { return r.Values[0] }
 	rk := func(r Row) Value { return r.Values[0] }
-	it := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinInner, 2)
+	// left = {(1,a),(2,b)}, right = {(1,x),(1,y),(9,z)}: id=1 yields 2 matches,
+	// left id=2 and right id=9 are unmatched.
+	it := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinInner, 2, 2)
 	got, err := Materialize(context.Background(), it)
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +116,42 @@ func TestHashJoinIter(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("inner join got %d rows, want 2", len(got))
 	}
-	// Left join: unmatched left row (id=2) should appear with NULLs.
-	it2 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinLeft, 2)
+	// Left join: + unmatched left (id=2), NULL-padded right.
+	it2 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinLeft, 2, 2)
 	got2, err := Materialize(context.Background(), it2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got2) != 3 {
 		t.Fatalf("left join got %d rows, want 3", len(got2))
+	}
+	// Right join: 2 matches + unmatched right (id=9), NULL-padded left.
+	it3 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinRight, 2, 2)
+	got3, err := Materialize(context.Background(), it3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got3) != 3 {
+		t.Fatalf("right join got %d rows, want 3", len(got3))
+	}
+	// The unmatched right row (9,z) must have NULL left columns and z on the right.
+	var sawNullLeft bool
+	for _, r := range got3 {
+		if r.Values[0].IsNull() && r.Values[1].IsNull() && r.Values[3].AsString() == "z" {
+			sawNullLeft = true
+		}
+	}
+	if !sawNullLeft {
+		t.Error("right join: expected an unmatched right row with NULL-padded left")
+	}
+	// Full join: 2 matches + unmatched left (id=2) + unmatched right (id=9) = 4.
+	it4 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinFull, 2, 2)
+	got4, err := Materialize(context.Background(), it4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got4) != 4 {
+		t.Fatalf("full join got %d rows, want 4", len(got4))
 	}
 }
 

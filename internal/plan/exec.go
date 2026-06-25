@@ -166,7 +166,7 @@ func execScan(ctx context.Context, node *Scan) (engine.RowIterator, engine.Schem
 // execJoin executes a hash join: build the left iterator, stream the right,
 // and merge row values. The output schema is node.Schema.
 func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry, strict bool) (engine.RowIterator, engine.Schema, error) {
-	left, _, err := execNode(ctx, node.Left, funcs, strict)
+	left, leftSchema, err := execNode(ctx, node.Left, funcs, strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
@@ -174,8 +174,9 @@ func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry, stric
 	if err != nil {
 		return nil, engine.Schema{}, err
 	}
+	leftWidth := len(leftSchema.Columns)
 	rightWidth := len(rightSchema.Columns)
-	it := engine.NewHashJoinIter(left, right, node.LeftKey, node.RightKey, node.Kind, rightWidth)
+	it := engine.NewHashJoinIter(left, right, node.LeftKey, node.RightKey, node.Kind, leftWidth, rightWidth)
 	return it, node.Schema, nil
 }
 

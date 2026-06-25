@@ -85,7 +85,10 @@ A query moves through fixed stages, one package each:
    aligned to a `Schema`. `ops.go` = operators, `eval.go` = expression
    evaluation, `funcs.go` = the scalar + aggregate **function registry**
    (`FuncRegistry`), `value.go`/`types.go` = the `Value`/`Type`/`Schema`/`Row`
-   model. Joins: hash for equi-joins, nested-loop fallback.
+   model. Joins: in-memory hash equi-join (`HashJoinIter`) supporting
+   INNER/LEFT/RIGHT/FULL; the `ON` must be a single `a.x = b.y` equality (no
+   compound/non-equi conditions) — the left side is the build side, the right is
+   streamed, and the unmatched side of an outer join is NULL-padded.
 4. **`internal/render`** — formats the final rows. `render.go` +
    `stream_test.go`; csv/json/ndjson/yaml/raw stream row-by-row (bounded
    memory), `table` buffers to compute column widths.

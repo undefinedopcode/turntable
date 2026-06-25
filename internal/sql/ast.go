@@ -87,6 +87,8 @@ type JoinKind int
 const (
 	JoinInner JoinKind = iota
 	JoinLeft
+	JoinRight
+	JoinFull
 )
 
 // OrderTerm is one element of ORDER BY.
