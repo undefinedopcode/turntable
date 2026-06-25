@@ -546,16 +546,15 @@ func formatPlan(n plan.Node, depth int) string {
 		return indent + "NoFrom"
 	case *plan.Subquery:
 		return indent + "Subquery " + node.Alias + "\n" + formatPlan(node.Child, depth+1)
-	case *plan.Union:
-		kind := "Union"
-		if !node.Distinct {
-			kind = "Union all"
+	case *plan.SetOp:
+		names := map[sql.SetOpKind]string{
+			sql.SetUnion: "Union", sql.SetIntersect: "Intersect", sql.SetExcept: "Except",
 		}
-		s := indent + kind
-		for _, b := range node.Branches {
-			s += "\n" + formatPlan(b, depth+1)
+		kind := names[node.Op]
+		if node.All {
+			kind += " all"
 		}
-		return s
+		return indent + kind + "\n" + formatPlan(node.Left, depth+1) + "\n" + formatPlan(node.Right, depth+1)
 	case *plan.Filter:
 		return indent + "Filter\n" + formatPlan(node.Child, depth+1)
 	case *plan.Project:

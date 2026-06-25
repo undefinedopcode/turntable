@@ -129,29 +129,34 @@ func (p *Parser) parseSelectOrSetOp() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !p.kw("UNION") {
+	op, isSetOp := p.setOpKind()
+	if !isSetOp {
 		return first, nil
 	}
 
-	// One or more UNION [ALL] branches follow. "ALL" is matched contextually
-	// (it is not a reserved word) so columns named "all" still work elsewhere.
+	// One or more UNION/INTERSECT/EXCEPT [ALL] branches follow. "ALL" is matched
+	// contextually (it is not a reserved word) so columns named "all" still work.
 	set := &SetOpStmt{Selects: []*SelectStmt{first}}
-	for p.kw("UNION") {
-		p.advance()
+	for {
 		all := false
 		if p.cur().Kind == TKIdent && strings.EqualFold(p.cur().Value, "all") {
 			all = true
 			p.advance()
 		}
 		if !p.kw("SELECT") {
-			return nil, p.errf("expected SELECT after UNION")
+			return nil, p.errf("expected SELECT after set operator")
 		}
 		next, err := p.parseSelect()
 		if err != nil {
 			return nil, err
 		}
-		set.All = append(set.All, all)
+		set.Ops = append(set.Ops, SetOpTerm{Kind: op, All: all})
 		set.Selects = append(set.Selects, next)
+		var more bool
+		op, more = p.setOpKind()
+		if !more {
+			break
+		}
 	}
 
 	// A trailing ORDER BY / LIMIT / OFFSET written after the last branch applies
@@ -162,6 +167,24 @@ func (p *Parser) parseSelectOrSetOp() (Statement, error) {
 	set.Limit, last.Limit = last.Limit, nil
 	set.Offset, last.Offset = last.Offset, nil
 	return set, nil
+}
+
+// setOpKind consumes a leading UNION/INTERSECT/EXCEPT keyword and reports which
+// (the ALL modifier, if any, is read by the caller). ok=false leaves the cursor
+// untouched.
+func (p *Parser) setOpKind() (SetOpKind, bool) {
+	switch {
+	case p.kw("UNION"):
+		p.advance()
+		return SetUnion, true
+	case p.kw("INTERSECT"):
+		p.advance()
+		return SetIntersect, true
+	case p.kw("EXCEPT"):
+		p.advance()
+		return SetExcept, true
+	}
+	return 0, false
 }
 
 func (p *Parser) parseSelect() (*SelectStmt, error) {

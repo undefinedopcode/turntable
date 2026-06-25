@@ -22,13 +22,30 @@ type SelectStmt struct {
 
 func (*SelectStmt) stmtNode() {}
 
-// SetOpStmt is a UNION of two or more SELECT branches. All[i] reports whether
-// the i-th UNION (joining Selects[i] to Selects[i+1]) is UNION ALL, so len(All)
-// == len(Selects)-1. OrderBy/Limit/Offset apply to the combined result (they
-// are lifted from the final branch during parsing, where SQL places them).
+// SetOpKind identifies a set operation.
+type SetOpKind int
+
+const (
+	SetUnion SetOpKind = iota
+	SetIntersect
+	SetExcept
+)
+
+// SetOpTerm is one set operator joining two adjacent branches. All distinguishes
+// the multiset (ALL) form from the distinct form.
+type SetOpTerm struct {
+	Kind SetOpKind
+	All  bool
+}
+
+// SetOpStmt is a chain of two or more SELECT branches combined by set operators.
+// Ops[i] joins Selects[i] to Selects[i+1], so len(Ops) == len(Selects)-1. The
+// operators are stored flat in source order; the planner applies SQL precedence
+// (INTERSECT binds tighter than UNION/EXCEPT). OrderBy/Limit/Offset apply to the
+// combined result (lifted from the final branch during parsing).
 type SetOpStmt struct {
 	Selects []*SelectStmt
-	All     []bool
+	Ops     []SetOpTerm
 	OrderBy []OrderTerm
 	Limit   *int
 	Offset  *int

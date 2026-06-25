@@ -277,8 +277,8 @@ func TestParseSubqueryUnionFrom(t *testing.T) {
 	if !ok {
 		t.Fatalf("subquery is %T, want *SetOpStmt", s.From.Subquery)
 	}
-	if len(set.Selects) != 2 || len(set.All) != 1 || !set.All[0] {
-		t.Errorf("union shape = %d selects, All=%v", len(set.Selects), set.All)
+	if len(set.Selects) != 2 || len(set.Ops) != 1 || set.Ops[0].Kind != SetUnion || !set.Ops[0].All {
+		t.Errorf("union shape = %d selects, Ops=%+v", len(set.Selects), set.Ops)
 	}
 }
 
@@ -430,8 +430,8 @@ func TestParseUnion(t *testing.T) {
 	if len(set.Selects) != 2 {
 		t.Fatalf("branches = %d, want 2", len(set.Selects))
 	}
-	if len(set.All) != 1 || set.All[0] {
-		t.Errorf("All = %v, want [false]", set.All)
+	if len(set.Ops) != 1 || set.Ops[0].Kind != SetUnion || set.Ops[0].All {
+		t.Errorf("Ops = %+v, want one distinct UNION", set.Ops)
 	}
 }
 
@@ -444,8 +444,25 @@ func TestParseUnionAllAndChain(t *testing.T) {
 	if len(set.Selects) != 3 {
 		t.Fatalf("branches = %d, want 3", len(set.Selects))
 	}
-	if !set.All[0] || set.All[1] {
-		t.Errorf("All = %v, want [true false]", set.All)
+	if !set.Ops[0].All || set.Ops[1].All {
+		t.Errorf("Ops = %+v, want [UNION ALL, UNION]", set.Ops)
+	}
+}
+
+func TestParseSetOpKinds(t *testing.T) {
+	stmt, err := Parse("SELECT a FROM t INTERSECT SELECT a FROM u EXCEPT ALL SELECT a FROM v")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	set := stmt.(*SetOpStmt)
+	if len(set.Ops) != 2 {
+		t.Fatalf("ops = %d, want 2", len(set.Ops))
+	}
+	if set.Ops[0].Kind != SetIntersect || set.Ops[0].All {
+		t.Errorf("op0 = %+v, want INTERSECT (distinct)", set.Ops[0])
+	}
+	if set.Ops[1].Kind != SetExcept || !set.Ops[1].All {
+		t.Errorf("op1 = %+v, want EXCEPT ALL", set.Ops[1])
 	}
 }
 

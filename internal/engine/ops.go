@@ -805,3 +805,157 @@ func rowKey(r Row) string {
 	}
 	return b.String()
 }
+
+// ---- Intersect / Except -----------------------------------------------------
+
+// IntersectIter yields rows present in both inputs (INTERSECT). With all=false it
+// yields each common row once; with all=true a row's multiplicity is the minimum
+// of its counts in the two inputs. The right side is consumed up front into a
+// count map; the left side then streams. NULLs compare equal (set-op semantics).
+type IntersectIter struct {
+	left, right RowIterator
+	all         bool
+	rightCount  map[string]int
+	emitted     map[string]bool // distinct mode: rows already yielded
+	built       bool
+	closed      bool
+}
+
+// NewIntersectIter returns an INTERSECT (all=false) or INTERSECT ALL iterator.
+func NewIntersectIter(left, right RowIterator, all bool) *IntersectIter {
+	return &IntersectIter{left: left, right: right, all: all}
+}
+
+func (it *IntersectIter) build() error {
+	it.rightCount = map[string]int{}
+	for {
+		r, ok, err := it.right.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		it.rightCount[rowKey(r)]++
+	}
+	if !it.all {
+		it.emitted = map[string]bool{}
+	}
+	it.built = true
+	return nil
+}
+
+func (it *IntersectIter) Next() (Row, bool, error) {
+	if !it.built {
+		if err := it.build(); err != nil {
+			return Row{}, false, err
+		}
+	}
+	for {
+		r, ok, err := it.left.Next()
+		if err != nil || !ok {
+			return Row{}, ok, err
+		}
+		k := rowKey(r)
+		if it.all {
+			if it.rightCount[k] > 0 {
+				it.rightCount[k]--
+				return r, true, nil
+			}
+			continue
+		}
+		if it.rightCount[k] > 0 && !it.emitted[k] {
+			it.emitted[k] = true
+			return r, true, nil
+		}
+	}
+}
+
+func (it *IntersectIter) Close() error {
+	if it.closed {
+		return nil
+	}
+	it.closed = true
+	err1 := it.left.Close()
+	err2 := it.right.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
+// ExceptIter yields rows of the left input not "cancelled" by the right (EXCEPT).
+// With all=false it yields each left row once when its key is absent from the
+// right; with all=true a row's multiplicity is max(0, leftCount - rightCount).
+// The right side is consumed up front; NULLs compare equal (set-op semantics).
+type ExceptIter struct {
+	left, right RowIterator
+	all         bool
+	rightCount  map[string]int
+	emitted     map[string]bool // distinct mode: rows already yielded
+	built       bool
+	closed      bool
+}
+
+// NewExceptIter returns an EXCEPT (all=false) or EXCEPT ALL iterator.
+func NewExceptIter(left, right RowIterator, all bool) *ExceptIter {
+	return &ExceptIter{left: left, right: right, all: all}
+}
+
+func (it *ExceptIter) build() error {
+	it.rightCount = map[string]int{}
+	for {
+		r, ok, err := it.right.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		it.rightCount[rowKey(r)]++
+	}
+	if !it.all {
+		it.emitted = map[string]bool{}
+	}
+	it.built = true
+	return nil
+}
+
+func (it *ExceptIter) Next() (Row, bool, error) {
+	if !it.built {
+		if err := it.build(); err != nil {
+			return Row{}, false, err
+		}
+	}
+	for {
+		r, ok, err := it.left.Next()
+		if err != nil || !ok {
+			return Row{}, ok, err
+		}
+		k := rowKey(r)
+		if it.all {
+			if it.rightCount[k] > 0 {
+				it.rightCount[k]-- // cancelled by a right-side copy
+				continue
+			}
+			return r, true, nil
+		}
+		if it.rightCount[k] == 0 && !it.emitted[k] {
+			it.emitted[k] = true
+			return r, true, nil
+		}
+	}
+}
+
+func (it *ExceptIter) Close() error {
+	if it.closed {
+		return nil
+	}
+	it.closed = true
+	err1 := it.left.Close()
+	err2 := it.right.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}

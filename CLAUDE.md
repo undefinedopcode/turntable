@@ -65,10 +65,14 @@ A query moves through fixed stages, one package each:
    `Registry`, infers/merges schemas, validates columns/types, and builds a
    tree of `plan.Node` (`Scan`, `Filter`, `Project`, `Join`, aggregate, etc.,
    plus `NoFrom` for `SELECT <expr>` with no FROM, `Subquery` for an aliased
-   FROM-clause derived table, and `Union` for `UNION`/`UNION ALL`). `Build`
-   takes a `sql.Statement` and dispatches on `*SelectStmt` vs `*SetOpStmt`
-   (UNION) vs `*WithStmt` (CTEs); `buildSetOp` lays a `Union` under the
-   union-level Sort/Limit. A `Subquery` passes its child plan's rows through
+   FROM-clause derived table, and `SetOp` (a binary `Op`/`All`/`Left`/`Right`
+   node) for `UNION`/`INTERSECT`/`EXCEPT`). `Build` takes a `sql.Statement` and
+   dispatches on `*SelectStmt` vs `*SetOpStmt` (set operations) vs `*WithStmt`
+   (CTEs); `buildSetOp` folds the flat branch list by precedence (INTERSECT
+   tightest, UNION/EXCEPT left-associative) into binary `SetOp` nodes under the
+   chain-level Sort/Limit — exec maps `UNION`→`ConcatIter`(+`DistinctIter`),
+   `INTERSECT`→`IntersectIter`, `EXCEPT`→`ExceptIter` (`*All` keep multiset
+   multiplicity). A `Subquery` passes its child plan's rows through
    under an alias, so `resolverFor`/`baseRelation` treat it like a Scan for
    column qualification. `buildWith` registers each CTE in `buildCtx.ctes`, then
    `buildTableRef` resolves a bare name to a CTE (shadowing a registered source)
@@ -79,8 +83,8 @@ A query moves through fixed stages, one package each:
    into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no
    subquery support and the folded list is even pushdown-eligible. (Build-time
    execution means `--explain` runs IN subqueries.) `exec.go` lowers the tree
-   into an `engine.RowIterator` pipeline (`Union` → `ConcatIter` + optional
-   `DistinctIter`).
+   into an `engine.RowIterator` pipeline (e.g. a `SetOp` → the matching
+   concat/intersect/except iterator).
 3. **`internal/engine`** — pull-based operator pipeline over `[]Value` rows
    aligned to a `Schema`. `ops.go` = operators, `eval.go` = expression
    evaluation, `funcs.go` = the scalar + aggregate **function registry**

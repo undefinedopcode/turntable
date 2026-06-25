@@ -58,13 +58,17 @@ type Subquery struct {
 	Alias  string
 }
 
-// Union concatenates the rows of its branches (which must share a column count).
-// Distinct is true for UNION (dedupe the combined result) and false for
-// UNION ALL. Any final ORDER BY/LIMIT is layered above as Sort/Limit nodes.
-type Union struct {
-	Branches []Node
-	Schema   engine.Schema
-	Distinct bool
+// SetOp combines two query plans by UNION, INTERSECT, or EXCEPT (its branches
+// must share a column count). All selects the multiset form (keep duplicates per
+// the operator's rule) over the default distinct form. A chain of set operations
+// is a left-/precedence-folded tree of these. Any final ORDER BY/LIMIT is layered
+// above as Sort/Limit nodes.
+type SetOp struct {
+	Op     sql.SetOpKind
+	All    bool
+	Left   Node
+	Right  Node
+	Schema engine.Schema
 }
 
 // Filter applies a residual predicate.
@@ -115,7 +119,7 @@ type Limit struct {
 
 func (*Scan) planNode()      {}
 func (*Subquery) planNode()  {}
-func (*Union) planNode()     {}
+func (*SetOp) planNode()     {}
 func (*Filter) planNode()    {}
 func (*Project) planNode()   {}
 func (*Join) planNode()      {}
@@ -172,15 +176,16 @@ func Build(ctx context.Context, stmt sql.Statement, reg *connector.Registry, opt
 	return p, nil
 }
 
-// buildSetOp builds the plan for a UNION of SELECT branches. Branches must agree
-// on column count; the first branch's output schema names the result. The union
-// dedupes (UNION) unless every branch is joined with UNION ALL. A trailing
-// ORDER BY/LIMIT is layered above the union.
+// buildSetOp builds the plan for a chain of set operations. Branches must agree
+// on column count; the first branch's output schema names the result. Operators
+// fold by SQL precedence — INTERSECT binds tighter than UNION/EXCEPT, which are
+// left-associative — into a tree of binary SetOp nodes. A trailing ORDER BY/LIMIT
+// is layered above.
 func (bc *buildCtx) buildSetOp(s *sql.SetOpStmt) (Node, engine.Schema, error) {
 	if len(s.Selects) == 0 {
 		return nil, engine.Schema{}, fmt.Errorf("empty set operation")
 	}
-	branches := make([]Node, len(s.Selects))
+	nodes := make([]Node, len(s.Selects))
 	var outSchema engine.Schema
 	for i, sel := range s.Selects {
 		n, sch, err := bc.buildSelect(sel)
@@ -191,20 +196,30 @@ func (bc *buildCtx) buildSetOp(s *sql.SetOpStmt) (Node, engine.Schema, error) {
 			outSchema = sch
 		} else if len(sch.Columns) != len(outSchema.Columns) {
 			return nil, engine.Schema{}, fmt.Errorf(
-				"each UNION branch must have the same number of columns (%d vs %d)",
+				"each set-operation branch must have the same number of columns (%d vs %d)",
 				len(outSchema.Columns), len(sch.Columns))
 		}
-		branches[i] = n
+		nodes[i] = n
 	}
-	// UNION dedupes; only stays UNION ALL if every connector is ALL.
-	distinct := false
-	for _, all := range s.All {
-		if !all {
-			distinct = true
-			break
+
+	// Pass 1: fold INTERSECT (highest precedence) into the preceding term.
+	terms := []Node{nodes[0]}
+	var lowOps []sql.SetOpTerm
+	for i, op := range s.Ops {
+		if op.Kind == sql.SetIntersect {
+			j := len(terms) - 1
+			terms[j] = &SetOp{Op: sql.SetIntersect, All: op.All, Left: terms[j], Right: nodes[i+1], Schema: outSchema}
+		} else {
+			terms = append(terms, nodes[i+1])
+			lowOps = append(lowOps, op)
 		}
 	}
-	var root Node = &Union{Branches: branches, Schema: outSchema, Distinct: distinct}
+	// Pass 2: fold the remaining UNION/EXCEPT left to right.
+	root := terms[0]
+	for i, op := range lowOps {
+		root = &SetOp{Op: op.Kind, All: op.All, Left: root, Right: terms[i+1], Schema: outSchema}
+	}
+
 	if len(s.OrderBy) > 0 {
 		root = &Sort{Child: root, Terms: s.OrderBy}
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/sql"
 )
 
 // Exec converts a Plan's root Node into an engine.RowIterator, threading the
@@ -34,21 +35,31 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		}
 		return child, node.Schema, nil
 
-	case *Union:
-		its := make([]engine.RowIterator, 0, len(node.Branches))
-		for _, b := range node.Branches {
-			it, _, err := execNode(ctx, b, funcs, strict)
-			if err != nil {
-				for _, opened := range its {
-					opened.Close()
-				}
-				return nil, engine.Schema{}, err
-			}
-			its = append(its, it)
+	case *SetOp:
+		left, _, err := execNode(ctx, node.Left, funcs, strict)
+		if err != nil {
+			return nil, engine.Schema{}, err
 		}
-		var it engine.RowIterator = engine.NewConcatIter(its)
-		if node.Distinct {
-			it = engine.NewDistinctIter(it)
+		right, _, err := execNode(ctx, node.Right, funcs, strict)
+		if err != nil {
+			left.Close()
+			return nil, engine.Schema{}, err
+		}
+		var it engine.RowIterator
+		switch node.Op {
+		case sql.SetUnion:
+			it = engine.NewConcatIter([]engine.RowIterator{left, right})
+			if !node.All {
+				it = engine.NewDistinctIter(it)
+			}
+		case sql.SetIntersect:
+			it = engine.NewIntersectIter(left, right, node.All)
+		case sql.SetExcept:
+			it = engine.NewExceptIter(left, right, node.All)
+		default:
+			left.Close()
+			right.Close()
+			return nil, engine.Schema{}, fmt.Errorf("unknown set operation %d", node.Op)
 		}
 		return it, node.Schema, nil
 

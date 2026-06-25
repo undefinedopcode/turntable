@@ -73,12 +73,22 @@ twice). Recursive CTEs (`WITH RECURSIVE`) are not supported.
   ```
   Scalar/`EXISTS` and correlated subqueries are not yet supported.
 
-### UNION
+### Set operations
 
-`UNION` (deduplicated) and `UNION ALL` (kept) combine branches with matching
-column counts; a trailing `ORDER BY`/`LIMIT` applies to the whole result. In a
-chain mixing the two, any plain `UNION` deduplicates the final result.
-`INTERSECT`/`EXCEPT` are not supported.
+`UNION`, `INTERSECT`, and `EXCEPT` combine branches with matching column counts;
+each has an `ALL` form:
+
+| Operator | Result | `ALL` form |
+|----------|--------|------------|
+| `UNION` | rows in either branch, deduplicated | keep all (no dedupe) |
+| `INTERSECT` | distinct rows in both | per-row min of the two counts |
+| `EXCEPT` | distinct rows in the left not in the right | left count minus right count (≥0) |
+
+`INTERSECT` binds tighter than `UNION`/`EXCEPT`, which are left-associative, so
+`a UNION b INTERSECT c` means `a UNION (b INTERSECT c)`. A trailing
+`ORDER BY`/`LIMIT` applies to the whole result. `NULL`s are treated as equal for
+duplicate elimination. (Parenthesized set-op grouping to override precedence is
+not yet supported — use a CTE or derived table.)
 
 ---
 
@@ -242,6 +252,6 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Window functions, `INTERSECT`/`EXCEPT`, recursive CTEs (`WITH RECURSIVE`),
-non-equality / compound join conditions, scalar/`EXISTS`/correlated subqueries,
-and DML/DDL. See `DESIGN.md` §11 for the roadmap.
+Window functions, recursive CTEs (`WITH RECURSIVE`), parenthesized set-op
+grouping, non-equality / compound join conditions, scalar/`EXISTS`/correlated
+subqueries, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
