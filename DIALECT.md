@@ -128,7 +128,7 @@ not yet supported — use a CTE or derived table.)
 | `(SELECT …) AS g` | derived table |
 
 The connector prefix is the connector's name: `csv`, `json`, `yaml`, `excel`,
-`parquet`, `sql`, `http`, `linear`, `trello`, `azuredevops`, `dynamodb`,
+`parquet`, `log`, `sql`, `http`, `linear`, `trello`, `azuredevops`, `dynamodb`,
 `azuretables`, `cloudwatchlogs`, `cloudwatch`.
 
 ---

@@ -404,7 +404,7 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 // interprets the "path" key.
 func isFileConnector(name string) bool {
 	switch name {
-	case "csv", "json", "yaml", "excel", "parquet":
+	case "csv", "json", "yaml", "excel", "parquet", "log":
 		return true
 	}
 	return false

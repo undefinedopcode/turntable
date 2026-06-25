@@ -47,6 +47,21 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
   },
   { name: "parquet", label: "Parquet file", file: true, fileExt: ".parquet", fields: [] },
   {
+    name: "log",
+    label: "Log file (auto-detect)",
+    file: true,
+    fileExt: ".log,.txt,.json,.jsonl",
+    fields: [
+      {
+        key: "format",
+        label: "Format",
+        type: "select",
+        options: ["auto", "json", "logfmt", "clf", "combined", "syslog", "leveled", "raw"],
+      },
+      { key: "pattern", label: "Custom pattern", placeholder: "regex with (?P<name>…) groups (overrides format)" },
+    ],
+  },
+  {
     name: "sql",
     label: "SQL database",
     fields: [

@@ -133,6 +133,13 @@ interfaces:
 - `connectors/<name>/` are the implementations, in three families:
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
+    `logc` is a plain-text log reader that **auto-detects** the format by
+    sampling the first ~200 lines and picking the first of json / Apache-combined
+    / common (CLF) / syslog / logfmt / leveled whose parse ratio clears a
+    threshold (else a `raw` line view). Each format yields a typed schema
+    (status/bytes/pid→int, time→time; json/logfmt get a dynamic key-union schema).
+    A `format` option forces one; a `pattern` option (a regexp with `(?P<name>…)`
+    groups → columns) overrides detection. Line-oriented (no multi-line joining).
     `claudelogsc` is a specialized local-JSONL reader for Claude Code transcripts
     (`~/.claude/projects/<slug>/*.jsonl`): text extraction from string-or-array
     `content`, a `path`/`project` option (or default to the cwd's project), and a

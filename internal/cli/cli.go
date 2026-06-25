@@ -23,6 +23,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
 	"github.com/april/turntable/internal/connector/connectors/linearc"
+	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/connector/connectors/parquetc"
 	"github.com/april/turntable/internal/connector/connectors/sqlc"
 	"github.com/april/turntable/internal/connector/connectors/trelloc"
@@ -68,6 +69,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(httpConn)
 	_ = reg.RegisterConnectorAs("https", httpConn) // https:// URL refs use the same connector
 	_ = reg.RegisterConnector(linearc.New())
+	_ = reg.RegisterConnector(logc.New())
 	_ = reg.RegisterConnector(parquetc.New())
 	_ = reg.RegisterConnector(cwlogsc.New())
 	_ = reg.RegisterConnector(cwmetricsc.New())
