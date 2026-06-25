@@ -90,10 +90,11 @@ func TestScalarSubqueryTooManyRowsErrors(t *testing.T) {
 	}
 }
 
-func TestSubqueryWithGroupByRejected(t *testing.T) {
+func TestScalarSubqueryWithGroupByRejected(t *testing.T) {
 	reg := rowsRegistry(t)
-	stmt, _ := sql.Parse("SELECT n, COUNT(*) FROM s1 AS a WHERE EXISTS (SELECT 1 FROM s2 AS b WHERE b.n = a.n) GROUP BY n")
+	// A scalar subquery (not decorrelatable) combined with GROUP BY is rejected.
+	stmt, _ := sql.Parse("SELECT n, COUNT(*) FROM s1 AS a WHERE (SELECT MAX(b.n) FROM s2 AS b WHERE b.n = a.n) > 1 GROUP BY n")
 	if _, err := Build(context.Background(), stmt, reg); err == nil {
-		t.Fatal("expected error: subquery combined with GROUP BY")
+		t.Fatal("expected error: scalar subquery combined with GROUP BY")
 	}
 }

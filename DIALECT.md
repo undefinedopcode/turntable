@@ -86,11 +86,15 @@ twice). Recursive CTEs (`WITH RECURSIVE`) are not supported.
   ```
   A correlated column must be **qualified** with the outer table's alias
   (`e.id`). A scalar subquery must return one column and at most one row (zero
-  rows → `NULL`; more than one → an error). Correlated subqueries are evaluated
-  per outer row (`O(rows)`), so they are correct but not fast on large inputs.
-  Not yet supported: subqueries combined with `GROUP BY`/aggregates/window
-  functions in the same query, correlation more than one level deep, and
-  subqueries in `HAVING`/`GROUP BY`.
+  rows → `NULL`; more than one → an error).
+
+  A correlated `[NOT] EXISTS` over a single table with an equality correlation is
+  **decorrelated** into a semi-/anti-join (one hash pass) — fast, and it may then
+  be combined with `GROUP BY`. Other correlated subqueries (scalar, `IN`,
+  non-equality or multi-key `EXISTS`) are evaluated per outer row (`O(rows)`):
+  correct, but slower on large inputs, and not combinable with
+  `GROUP BY`/aggregates/window in the same query. Correlation more than one level
+  deep, and subqueries in `HAVING`/`GROUP BY`, are not supported.
 
 ### Set operations
 

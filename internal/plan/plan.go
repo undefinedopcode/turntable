@@ -494,6 +494,15 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		return nil, engine.Schema{}, err
 	}
 
+	// Decorrelate top-level [NOT] EXISTS conjuncts into semi-/anti-joins (one
+	// hash pass vs. the per-row Apply). Runs before subquery detection so a fully
+	// decorrelated EXISTS leaves no subquery behind (and can coexist with GROUP
+	// BY). The output schema is unchanged (the join emits only the left columns).
+	base, err = bc.decorrelateExists(stmt, base, baseSchema)
+	if err != nil {
+		return nil, engine.Schema{}, err
+	}
+
 	// Determine if this is an aggregate query (GROUP BY present, or any
 	// aggregate function in the select list). Needed for pushdown gating below.
 	hasAgg := len(stmt.GroupBy) > 0
@@ -1056,6 +1065,175 @@ func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engi
 	winSchema := engine.Schema{Columns: append(append([]engine.Column{}, baseSchema.Columns...), win.cols...)}
 	node := &Window{Child: base, Specs: win.specs, Schema: winSchema}
 	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
+}
+
+// splitConjuncts flattens a top-level AND chain into its conjuncts.
+func splitConjuncts(e sql.Expr) []sql.Expr {
+	if b, ok := e.(*sql.BinaryOp); ok && b.Op == "AND" {
+		return append(splitConjuncts(b.Left), splitConjuncts(b.Right)...)
+	}
+	if e == nil {
+		return nil
+	}
+	return []sql.Expr{e}
+}
+
+// andConjuncts rebuilds an AND chain (nil for an empty slice).
+func andConjuncts(cs []sql.Expr) sql.Expr {
+	if len(cs) == 0 {
+		return nil
+	}
+	e := cs[0]
+	for _, c := range cs[1:] {
+		e = &sql.BinaryOp{Op: "AND", Left: e, Right: c}
+	}
+	return e
+}
+
+// baseAliasRanges returns the alias ranges of a (freshly built) base relation,
+// for feeding the join-key splitter during decorrelation.
+func baseAliasRanges(n Node, schema engine.Schema) []engine.AliasRange {
+	switch x := baseRelation(n).(type) {
+	case *Join:
+		return x.Aliases
+	case *Scan:
+		return []engine.AliasRange{{Alias: x.Alias, Start: 0, End: len(schema.Columns)}}
+	case *Subquery:
+		return []engine.AliasRange{{Alias: x.Alias, Start: 0, End: len(schema.Columns)}}
+	}
+	return []engine.AliasRange{{Alias: "", Start: 0, End: len(schema.Columns)}}
+}
+
+func isOuterCol(cr *sql.ColRef, inner map[string]bool, outer engine.Resolver) bool {
+	return cr.Qualifier != "" && !inner[cr.Qualifier] && outer(cr.Qualifier, cr.Name) >= 0
+}
+
+func isInnerCol(cr *sql.ColRef, inner map[string]bool) bool {
+	return cr.Qualifier == "" || inner[cr.Qualifier]
+}
+
+// anyOuterColRef reports whether e references any outer-scope column.
+func anyOuterColRef(e sql.Expr, inner map[string]bool, outer engine.Resolver) bool {
+	found := false
+	mapExpr(e, func(n sql.Expr) sql.Expr {
+		if cr, ok := n.(*sql.ColRef); ok && isOuterCol(cr, inner, outer) {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
+// correlationEq reports whether c is `outer.col = inner.col` (either order).
+func correlationEq(c sql.Expr, inner map[string]bool, outer engine.Resolver) bool {
+	b, ok := c.(*sql.BinaryOp)
+	if !ok || b.Op != "=" {
+		return false
+	}
+	l, lok := b.Left.(*sql.ColRef)
+	r, rok := b.Right.(*sql.ColRef)
+	if !lok || !rok {
+		return false
+	}
+	return (isOuterCol(l, inner, outer) && isInnerCol(r, inner)) ||
+		(isInnerCol(l, inner) && isOuterCol(r, inner, outer))
+}
+
+// decorrelateExists rewrites top-level `[NOT] EXISTS (correlated single-table
+// subquery)` conjuncts in WHERE into semi-/anti-joins (one hash pass instead of
+// re-running the subquery per outer row). Conjuncts it can't handle are left in
+// WHERE for the Apply path. It returns the (possibly join-wrapped) base.
+func (bc *buildCtx) decorrelateExists(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, error) {
+	if stmt.Where == nil {
+		return base, nil
+	}
+	var kept []sql.Expr
+	for _, c := range splitConjuncts(stmt.Where) {
+		joined, ok, err := bc.tryDecorrelate(c, base, baseSchema)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			base = joined
+			continue
+		}
+		kept = append(kept, c)
+	}
+	stmt.Where = andConjuncts(kept)
+	return base, nil
+}
+
+// tryDecorrelate converts one conjunct to a semi-/anti-join when it is a
+// correlated EXISTS / NOT EXISTS over a single table with exactly one equality
+// correlation. ok=false leaves it for the Apply path.
+func (bc *buildCtx) tryDecorrelate(c sql.Expr, base Node, baseSchema engine.Schema) (Node, bool, error) {
+	kind := sql.JoinSemi
+	exists, ok := c.(*sql.ExistsExpr)
+	if !ok {
+		if u, isNot := c.(*sql.UnaryOp); isNot && u.Op == "NOT" {
+			if exists, ok = u.Expr.(*sql.ExistsExpr); ok {
+				kind = sql.JoinAnti
+			}
+		}
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	q := exists.Query
+	// Only a simple single-table subquery (no joins/grouping/distinct/limit and
+	// no aggregate or window in the select list) decorrelates cleanly.
+	if len(q.Joins) > 0 || len(q.GroupBy) > 0 || q.Having != nil || q.Distinct ||
+		q.Limit != nil || q.Offset != nil || q.NoFrom {
+		return nil, false, nil
+	}
+	for _, it := range q.Items.Items {
+		if !it.Star && (exprHasAgg(it.Expr) || exprHasWindow(it.Expr) || exprHasSubquery(it.Expr)) {
+			return nil, false, nil
+		}
+	}
+
+	inner := tableAliases(q)
+	outerResolve := resolverFor(base, baseSchema)
+	var corr sql.Expr
+	var residual []sql.Expr
+	for _, w := range splitConjuncts(q.Where) {
+		switch {
+		case correlationEq(w, inner, outerResolve):
+			if corr != nil {
+				return nil, false, nil // more than one correlation key: leave to Apply
+			}
+			corr = w
+		case anyOuterColRef(w, inner, outerResolve):
+			return nil, false, nil // a non-equality correlation: leave to Apply
+		default:
+			residual = append(residual, w)
+		}
+	}
+	if corr == nil {
+		return nil, false, nil // not correlated: cheap via memoized Apply
+	}
+
+	// Build the right side: the subquery's table, filtered by the residual.
+	right, rightSchema, rightAlias, err := bc.buildTableRef(q.From)
+	if err != nil {
+		return nil, false, err
+	}
+	if res := andConjuncts(residual); res != nil {
+		if scan, isScan := right.(*Scan); isScan {
+			scan.Predicate = res // pushdown hint; engine re-applies below
+		}
+		right = &Filter{Child: right, Predicate: res}
+	}
+
+	leftAliases := baseAliasRanges(base, baseSchema)
+	lk, rk, err := bc.splitJoinKeys(corr, baseSchema, leftAliases, rightSchema, rightAlias)
+	if err != nil {
+		return nil, false, nil // not a plain a.x = b.y key: leave to Apply
+	}
+	return &Join{
+		Kind: kind, Left: base, Right: right, LeftKey: lk, RightKey: rk,
+		Schema: baseSchema, Aliases: leftAliases,
+	}, true, nil
 }
 
 // mapExpr deep-copies e, applying fn to every node first: a non-nil result

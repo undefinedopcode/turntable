@@ -585,7 +585,14 @@ func formatPlan(n plan.Node, depth int) string {
 	case *plan.Limit:
 		return indent + "Limit\n" + formatPlan(node.Child, depth+1)
 	case *plan.Join:
-		return indent + "Join\n" + formatPlan(node.Left, depth+1) + "\n" + formatPlan(node.Right, depth+1)
+		label := map[sql.JoinKind]string{
+			sql.JoinInner: "Join", sql.JoinLeft: "Left join", sql.JoinRight: "Right join",
+			sql.JoinFull: "Full join", sql.JoinSemi: "Semi join", sql.JoinAnti: "Anti join",
+		}[node.Kind]
+		if label == "" {
+			label = "Join"
+		}
+		return indent + label + "\n" + formatPlan(node.Left, depth+1) + "\n" + formatPlan(node.Right, depth+1)
 	case *plan.Aggregate:
 		var aggNames []string
 		for _, ag := range node.Aggs {

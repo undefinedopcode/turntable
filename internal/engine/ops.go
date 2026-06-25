@@ -333,6 +333,9 @@ func (j *HashJoinIter) Next() (Row, bool, error) {
 			return Row{}, false, err
 		}
 	}
+	if j.kind == sql.JoinSemi || j.kind == sql.JoinAnti {
+		return j.nextSemiAnti()
+	}
 	for {
 		// Drain join rows buffered for the current probe row.
 		if j.pendi < len(j.pending) {
@@ -381,6 +384,41 @@ func (j *HashJoinIter) Next() (Row, bool, error) {
 		}
 		return Row{}, false, nil
 	}
+}
+
+// nextSemiAnti drains the right side once (marking which left rows have a match)
+// then emits left rows: the matched ones for SEMI, the unmatched for ANTI. Output
+// is the left columns only. A NULL join key never matches (so a NULL-keyed left
+// row is kept by ANTI and dropped by SEMI), matching SQL EXISTS semantics.
+func (j *HashJoinIter) nextSemiAnti() (Row, bool, error) {
+	if !j.rightDone {
+		for {
+			rr, ok, err := j.right.Next()
+			if err != nil {
+				return Row{}, false, err
+			}
+			if !ok {
+				break
+			}
+			rk := j.rightKey(rr)
+			if rk.IsNull() {
+				continue
+			}
+			for _, i := range j.bucket[keyString(rk)] {
+				j.leftMatched[i] = true
+			}
+		}
+		j.rightDone = true
+	}
+	want := j.kind == sql.JoinSemi
+	for j.ui < len(j.leftRows) {
+		i := j.ui
+		j.ui++
+		if j.leftMatched[i] == want {
+			return j.leftRows[i], true, nil
+		}
+	}
+	return Row{}, false, nil
 }
 
 func mergeRows(l, r Row) Row {

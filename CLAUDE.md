@@ -99,7 +99,13 @@ A query moves through fixed stages, one package each:
    (`withOuter`/`outerFromCtx`); the engine's `Evaluator.Outer` resolves
    `OuterRef`. Non-correlated subqueries are memoized (run once). It is correct
    but `O(outer rows)`; subqueries can't combine with GROUP BY/aggregates/window
-   in one query, and correlation is single-level. `exec.go` lowers the tree into
+   in one query, and correlation is single-level. As an optimization,
+   `decorrelateExists` (run before subquery detection) turns a top-level
+   correlated `[NOT] EXISTS` over a single table with one equality correlation
+   into a semi/anti `HashJoinIter` (`sql.JoinSemi`/`JoinAnti` — planner-only join
+   kinds that emit each left row at most once, NULL keys never matching) — one
+   hash pass instead of `O(rows)`, and it composes with GROUP BY since no
+   subquery is left behind. `exec.go` lowers the tree into
    an `engine.RowIterator` pipeline (e.g. a `SetOp` → the matching
    concat/intersect/except iterator).
 3. **`internal/engine`** — pull-based operator pipeline over `[]Value` rows
@@ -107,7 +113,8 @@ A query moves through fixed stages, one package each:
    evaluation, `funcs.go` = the scalar + aggregate **function registry**
    (`FuncRegistry`), `value.go`/`types.go` = the `Value`/`Type`/`Schema`/`Row`
    model. Joins: in-memory hash equi-join (`HashJoinIter`) supporting
-   INNER/LEFT/RIGHT/FULL; the `ON` must be a single `a.x = b.y` equality (no
+   INNER/LEFT/RIGHT/FULL (plus planner-only SEMI/ANTI for decorrelated EXISTS);
+   the `ON` must be a single `a.x = b.y` equality (no
    compound/non-equi conditions) — the left side is the build side, the right is
    streamed, and the unmatched side of an outer join is NULL-padded.
 4. **`internal/render`** — formats the final rows. `render.go` +

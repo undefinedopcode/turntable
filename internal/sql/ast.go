@@ -106,6 +106,11 @@ const (
 	JoinLeft
 	JoinRight
 	JoinFull
+	// JoinSemi/JoinAnti are produced by the planner (decorrelating EXISTS / NOT
+	// EXISTS), never parsed. They emit each left row at most once — when it has
+	// (semi) or lacks (anti) a match — and output only the left columns.
+	JoinSemi
+	JoinAnti
 )
 
 // OrderTerm is one element of ORDER BY.
