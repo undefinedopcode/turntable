@@ -56,6 +56,18 @@ export async function getSchema(
   return res.json();
 }
 
+export interface FunctionList {
+  scalar: string[];
+  aggregate: string[];
+  keywords: string[];
+}
+
+export async function getFunctions(): Promise<FunctionList> {
+  const res = await fetch("/api/functions");
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 export function addSource(
   name: string,
   connector: string,

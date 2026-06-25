@@ -13,13 +13,28 @@ webui/
 ├── src/
 │   ├── main.tsx          React root
 │   ├── App.tsx           layout + top-level state
-│   ├── api.ts            typed client for the /api/* endpoints (incl. upload)
+│   ├── api.ts            typed client for the /api/* endpoints (functions, upload, …)
 │   ├── connectorSpecs.ts per-connector form field specs (drives Add Source)
-│   ├── csv.ts            client-side CSV export
+│   ├── export.ts         client-side CSV/JSON/NDJSON/TSV export + clipboard
+│   ├── storage.ts        localStorage: query history, saved queries, last query
+│   ├── completions.ts    CodeMirror autocomplete (sources, columns, functions)
 │   ├── styles.css        dark theme
-│   └── components/       Sidebar, Modal, AddSourceModal, Editor, Results
+│   └── components/       Sidebar, Modal, AddSourceModal, Editor (CodeMirror),
+│                         Results (sort/filter/export), Chart
 └── dist/                 built output (committed; embedded by Go)
 ```
+
+## Features
+
+- **Editor** — CodeMirror with SQL highlighting and autocomplete over the live
+  sources, their columns, and the dialect functions (`GET /api/functions`).
+  Ctrl/⌘+Enter runs.
+- **Sidebar** — source search, per-source schema, one-click **preview**
+  (`SELECT * … LIMIT 100`), plus **history** (click to reload) and **saved**
+  queries (localStorage). The editor content is restored on reload.
+- **Results** — click-to-sort columns, a row filter, click a cell to copy (or
+  expand a JSON cell), export to CSV/JSON/NDJSON or copy as TSV, and a **Chart**
+  view (category + numeric column → bars).
 
 ## Develop
 

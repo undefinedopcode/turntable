@@ -1,36 +1,31 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Completion } from "@codemirror/autocomplete";
 import { runQuery, type QueryResult } from "./api";
 import { Sidebar } from "./components/Sidebar";
-import { Editor } from "./components/Editor";
+import { Editor, type EditorHandle } from "./components/Editor";
 import { Results } from "./components/Results";
+import { loadLastQuery, pushHistory, saveLastQuery } from "./storage";
+import { buildCompletions } from "./completions";
 
 export function App() {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => loadLastQuery());
   const [result, setResult] = useState<QueryResult | null>(null);
   const [status, setStatus] = useState("");
   const [running, setRunning] = useState(false);
   const [sourcesVersion, setSourcesVersion] = useState(0);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [completions, setCompletions] = useState<Completion[]>([]);
+  const editorRef = useRef<EditorHandle>(null);
 
-  const insertAtCursor = useCallback((text: string) => {
-    const el = textareaRef.current;
-    if (!el) {
-      setQuery((q) => q + text);
-      return;
-    }
-    const { selectionStart: start, selectionEnd: end, value } = el;
-    const next = value.slice(0, start) + text + value.slice(end);
-    setQuery(next);
-    // Restore the caret just after the inserted text on the next tick.
-    requestAnimationFrame(() => {
-      el.focus();
-      el.selectionStart = el.selectionEnd = start + text.length;
-    });
-  }, []);
+  // Persist the editor content and (re)load autocompletion when sources change.
+  useEffect(() => saveLastQuery(query), [query]);
+  useEffect(() => {
+    buildCompletions().then(setCompletions);
+  }, [sourcesVersion]);
 
   const run = useCallback(
-    async (explain: boolean) => {
-      const q = query.trim();
+    async (explain: boolean, override?: string) => {
+      const q = (override ?? query).trim();
       if (!q) return;
       setRunning(true);
       setStatus("running…");
@@ -45,6 +40,8 @@ export function App() {
           setStatus(
             `${data.count} row${data.count === 1 ? "" : "s"} · ${data.elapsed_ms} ms`,
           );
+          pushHistory(q);
+          setHistoryVersion((v) => v + 1);
         }
       } catch (e) {
         setResult({
@@ -62,6 +59,14 @@ export function App() {
     [query],
   );
 
+  const runNow = useCallback(
+    (q: string) => {
+      setQuery(q);
+      run(false, q);
+    },
+    [run],
+  );
+
   return (
     <div className="app">
       <header>
@@ -70,20 +75,23 @@ export function App() {
       </header>
       <main>
         <Sidebar
-          key={sourcesVersion}
-          onInsert={insertAtCursor}
+          onInsert={(t) => editorRef.current?.insert(t)}
           onSourceAdded={() => setSourcesVersion((v) => v + 1)}
+          onLoadQuery={setQuery}
+          onRunQuery={runNow}
+          currentQuery={query}
+          historyVersion={historyVersion}
         />
         <section className="work">
           <Editor
-            ref={textareaRef}
+            ref={editorRef}
             value={query}
             onChange={setQuery}
             onRun={() => run(false)}
             onExplain={() => run(true)}
             running={running}
-            result={result}
             status={status}
+            completions={completions}
           />
           <Results result={result} />
         </section>

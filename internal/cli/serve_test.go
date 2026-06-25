@@ -99,6 +99,35 @@ func TestHandleSources(t *testing.T) {
 	}
 }
 
+func TestHandleFunctions(t *testing.T) {
+	a := NewApp()
+	req := httptest.NewRequest(http.MethodGet, "/api/functions", nil)
+	rec := httptest.NewRecorder()
+	a.handleFunctions(rec, req)
+	var out struct {
+		Scalar    []string `json:"scalar"`
+		Aggregate []string `json:"aggregate"`
+		Keywords  []string `json:"keywords"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Scalar) == 0 || len(out.Keywords) == 0 {
+		t.Fatalf("expected scalar + keyword lists, got %+v", out)
+	}
+	has := func(xs []string, want string) bool {
+		for _, x := range xs {
+			if x == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(out.Aggregate, "COUNT") || !has(out.Scalar, "COALESCE") {
+		t.Errorf("missing expected functions: agg=%v scalar=%v", out.Aggregate, out.Scalar)
+	}
+}
+
 func postSource(t *testing.T, a *App, body string) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/sources", strings.NewReader(body))

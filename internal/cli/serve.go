@@ -27,7 +27,6 @@ import (
 // so `go build` needs no Node toolchain.
 //
 //go:generate sh -c "cd webui && npm install && npm run build"
-//
 //go:embed all:webui/dist
 var webUIDist embed.FS
 
@@ -68,6 +67,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/schema", a.handleSchema)
 	mux.HandleFunc("/api/upload", a.handleUpload)
+	mux.HandleFunc("/api/functions", a.handleFunctions)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -316,6 +316,28 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 		cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
 	}
 	writeJSON(w, map[string]any{"source": name, "columns": cols})
+}
+
+// handleFunctions lists the SQL functions available in the dialect (the same
+// data as the REPL `.functions` command), for editor autocompletion and
+// discovery. Scalar and aggregate names are reported separately.
+func (a *App) handleFunctions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{
+		"scalar":    a.Funcs.Names(),
+		"aggregate": engine.Aggregates(),
+		"keywords":  sqlKeywords,
+	})
+}
+
+// sqlKeywords are the dialect keywords offered as editor completions (the
+// grammar lives in internal/sql; this list is for UX only).
+var sqlKeywords = []string{
+	"SELECT", "DISTINCT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY",
+	"ASC", "DESC", "LIMIT", "OFFSET", "JOIN", "INNER JOIN", "LEFT JOIN",
+	"RIGHT JOIN", "FULL JOIN", "ON", "AND", "OR", "NOT", "IN", "EXISTS",
+	"BETWEEN", "LIKE", "ILIKE", "IS NULL", "IS NOT NULL", "AS", "CASE", "WHEN",
+	"THEN", "ELSE", "END", "CAST", "UNION", "UNION ALL", "INTERSECT", "EXCEPT",
+	"WITH", "OVER", "PARTITION BY",
 }
 
 // maxUploadBytes bounds a single uploaded file (a guard, not a hard product
