@@ -160,6 +160,46 @@ func TestDetectLeveled(t *testing.T) {
 	}
 }
 
+func TestDetectBracketed(t *testing.T) {
+	// pacman/ALPM style: [timestamp] [component] message.
+	p := writeLog(t, `[2026-05-25T20:44:11-0700] [ALPM] installed glib2 (2.88.1-1)
+[2026-05-25T20:44:11-0700] [ALPM] warning: foo installed as foo.pacnew
+[2026-05-25T20:44:11-0700] [ALPM-SCRIPTLET] Initializing machine ID.
+`)
+	sc, rows := scan(t, p, nil)
+	if got := colNames(sc); len(got) != 3 || got[0] != "time" || got[1] != "component" || got[2] != "message" {
+		t.Fatalf("cols = %v", got)
+	}
+	if c, _ := col(sc, "time"); c.Type != engine.TypeTime {
+		t.Errorf("time type = %v, want time", c.Type)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(rows))
+	}
+	// the -0700 numeric offset parses (UTC hour is 03:44 next... just check non-null).
+	if rows[0].Values[0].IsNull() {
+		t.Error("time did not parse")
+	}
+	if rows[0].Values[1].V != "ALPM" || rows[0].Values[2].V != "installed glib2 (2.88.1-1)" {
+		t.Errorf("row0 = %v / %v", rows[0].Values[1].V, rows[0].Values[2].V)
+	}
+	if rows[2].Values[1].V != "ALPM-SCRIPTLET" {
+		t.Errorf("row2 component = %v", rows[2].Values[1].V)
+	}
+}
+
+func TestBracketedNeedsTimestamp(t *testing.T) {
+	// A bracketed line whose first field is NOT a timestamp must not be detected
+	// as the bracketed format (falls back to raw).
+	p := writeLog(t, `[module] [submodule] some text here
+[other] [thing] more text
+`)
+	sc, _ := scan(t, p, nil)
+	if got := colNames(sc); got[0] != "line" {
+		t.Fatalf("expected raw fallback, got cols %v", got)
+	}
+}
+
 func TestRawFallback(t *testing.T) {
 	// Free-form lines that match no structured format fall back to raw.
 	p := writeLog(t, `this is just some text

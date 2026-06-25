@@ -126,12 +126,12 @@ func detect(path string, opts map[string]any) (*format, error) {
 	if forced := stringOpt(opts, "format"); forced != "" && forced != "auto" {
 		f := buildFormat(forced, sample)
 		if f == nil {
-			return nil, fmt.Errorf("unknown log format %q (json|logfmt|clf|combined|syslog|leveled|raw)", forced)
+			return nil, fmt.Errorf("unknown log format %q (json|logfmt|clf|combined|syslog|bracketed|leveled|raw)", forced)
 		}
 		return f, nil
 	}
 	// Specificity order: the first format that parses enough of the sample wins.
-	for _, name := range []string{"json", "combined", "common", "syslog", "logfmt", "leveled"} {
+	for _, name := range []string{"json", "combined", "common", "syslog", "bracketed", "logfmt", "leveled"} {
 		f := buildFormat(name, sample)
 		if f != nil && matchRatio(f, sample) >= detectThreshold {
 			return f, nil
@@ -182,6 +182,8 @@ func buildFormat(name string, sample []string) *format {
 		return regexFormat("common", commonRe, commonCols)
 	case "syslog":
 		return syslogFormat()
+	case "bracketed":
+		return bracketedFormat()
 	case "leveled":
 		return leveledFormat()
 	case "raw":
@@ -370,6 +372,36 @@ func syslogFormat() *format {
 	return &format{name: "syslog", schema: engine.Schema{Columns: cols}, parse: parse, rawCol: 4}
 }
 
+// ---- bracketed (pacman/ALPM and similar) ------------------------------------
+
+// bracketedRe matches `[timestamp] [component] message`, used by pacman/ALPM,
+// some installers, and other tools, e.g.
+//
+//	[2026-05-25T20:44:11-0700] [ALPM] installed glib2 (2.88.1-1)
+var bracketedRe = regexp.MustCompile(`^\[([^\]]+)\] \[([^\]]+)\] (.*)$`)
+
+func bracketedFormat() *format {
+	cols := []engine.Column{
+		{Name: "time", Type: engine.TypeTime, Nullable: true},
+		{Name: "component", Type: engine.TypeString, Nullable: true},
+		{Name: "message", Type: engine.TypeString, Nullable: true},
+	}
+	parse := func(line string) ([]engine.Value, bool) {
+		m := bracketedRe.FindStringSubmatch(line)
+		if m == nil {
+			return nil, false
+		}
+		// Require the first bracket to be a real timestamp so detection doesn't
+		// misfire on arbitrary `[x] [y] z` lines.
+		tv := timeOrNull(m[1])
+		if tv.IsNull() {
+			return nil, false
+		}
+		return []engine.Value{tv, strOrNull(m[2]), strOrNull(m[3])}, true
+	}
+	return &format{name: "bracketed", schema: engine.Schema{Columns: cols}, parse: parse, rawCol: 2}
+}
+
 // ---- generic leveled / raw --------------------------------------------------
 
 var leadingTSRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+(.*)$`)
@@ -497,6 +529,8 @@ func patternFormat(pat string) (*format, error) {
 
 var timeLayouts = []string{
 	time.RFC3339Nano, time.RFC3339,
+	"2006-01-02T15:04:05-0700",     // pacman/ALPM (numeric zone, no colon)
+	"2006-01-02T15:04:05.999-0700", // ditto, with fractional seconds
 	"2006-01-02T15:04:05",
 	"2006-01-02 15:04:05.999999",
 	"2006-01-02 15:04:05",

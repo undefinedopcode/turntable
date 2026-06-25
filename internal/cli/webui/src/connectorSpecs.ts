@@ -56,7 +56,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
         key: "format",
         label: "Format",
         type: "select",
-        options: ["auto", "json", "logfmt", "clf", "combined", "syslog", "leveled", "raw"],
+        options: ["auto", "json", "logfmt", "clf", "combined", "syslog", "bracketed", "leveled", "raw"],
       },
       { key: "pattern", label: "Custom pattern", placeholder: "regex with (?P<name>…) groups (overrides format)" },
     ],

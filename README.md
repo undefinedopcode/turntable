@@ -332,8 +332,9 @@ turntable> .use orders parquet:./data/orders.parquet
 The `log` connector reads a plain-text log file and **detects the format** by
 sampling the first lines — no schema to declare. Supported: **JSON lines**,
 Apache/nginx **combined** and **common** (CLF) access logs, **syslog**
-(RFC3164), **logfmt** (`k=v`), and a generic **leveled** line (leading timestamp
-+ level + message); anything else falls back to a `raw` view (`line`, plus a
+(RFC3164), **logfmt** (`k=v`), **bracketed** `[time] [component] message`
+(pacman/ALPM and similar), and a generic **leveled** line (leading timestamp +
+level + message); anything else falls back to a `raw` view (`line`, plus a
 best-effort `time`/`level`). Fields are typed — `status`/`bytes`/`pid` are ints,
 `time` is a timestamp, and numeric `logfmt`/JSON values are coerced.
 
@@ -358,8 +359,9 @@ sources:
       pattern: '^\[(?P<time>[^\]]+)\] \[(?P<worker>[^\]]+)\] (?P<message>.*)$'
 ```
 
-`format` (`auto` default, or `json`/`logfmt`/`clf`/`combined`/`syslog`/`leveled`/
-`raw`) forces a parser; `pattern` (a regular expression with `(?P<name>…)` named
+`format` (`auto` default, or `json`/`logfmt`/`clf`/`combined`/`syslog`/
+`bracketed`/`leveled`/`raw`) forces a parser; `pattern` (a regular expression
+with `(?P<name>…)` named
 groups → columns) handles anything bespoke. Parsing is line-oriented — multi-line
 entries (stack traces) are one row per line for now.
 

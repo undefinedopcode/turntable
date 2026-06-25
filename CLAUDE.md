@@ -135,8 +135,9 @@ interfaces:
     local path; infer schema from a sample/footer; push down only columns/limit.
     `logc` is a plain-text log reader that **auto-detects** the format by
     sampling the first ~200 lines and picking the first of json / Apache-combined
-    / common (CLF) / syslog / logfmt / leveled whose parse ratio clears a
-    threshold (else a `raw` line view). Each format yields a typed schema
+    / common (CLF) / syslog / bracketed (`[time] [component] message`, e.g.
+    pacman/ALPM) / logfmt / leveled whose parse ratio clears a threshold (else a
+    `raw` line view). Each format yields a typed schema
     (status/bytes/pid→int, time→time; json/logfmt get a dynamic key-union schema).
     A `format` option forces one; a `pattern` option (a regexp with `(?P<name>…)`
     groups → columns) overrides detection. Line-oriented (no multi-line joining).
