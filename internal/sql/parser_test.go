@@ -228,8 +228,45 @@ func TestParseSubqueryFrom(t *testing.T) {
 	if s.From.Alias != "x" {
 		t.Errorf("alias = %q, want x", s.From.Alias)
 	}
-	if s.From.Subquery.From.Name != "t" {
-		t.Errorf("inner from = %q, want t", s.From.Subquery.From.Name)
+	inner, ok := s.From.Subquery.(*SelectStmt)
+	if !ok {
+		t.Fatalf("subquery is %T, want *SelectStmt", s.From.Subquery)
+	}
+	if inner.From.Name != "t" {
+		t.Errorf("inner from = %q, want t", inner.From.Name)
+	}
+}
+
+func TestParseSubqueryUnionFrom(t *testing.T) {
+	// A derived table may itself be a UNION.
+	stmt, err := Parse("SELECT u.r FROM (SELECT a AS r FROM t UNION ALL SELECT b FROM t) AS u")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	set, ok := s.From.Subquery.(*SetOpStmt)
+	if !ok {
+		t.Fatalf("subquery is %T, want *SetOpStmt", s.From.Subquery)
+	}
+	if len(set.Selects) != 2 || len(set.All) != 1 || !set.All[0] {
+		t.Errorf("union shape = %d selects, All=%v", len(set.Selects), set.All)
+	}
+}
+
+func TestParseCountDistinct(t *testing.T) {
+	stmt, err := Parse("SELECT COUNT(DISTINCT region) FROM t")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	fc, ok := stmt.(*SelectStmt).Items.Items[0].Expr.(*FuncCall)
+	if !ok {
+		t.Fatalf("item is %T, want *FuncCall", stmt.(*SelectStmt).Items.Items[0].Expr)
+	}
+	if !fc.Distinct {
+		t.Error("FuncCall.Distinct = false, want true")
+	}
+	if fc.Name != "COUNT" || len(fc.Args) != 1 {
+		t.Errorf("fc = %q with %d args", fc.Name, len(fc.Args))
 	}
 }
 

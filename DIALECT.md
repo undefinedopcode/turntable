@@ -26,6 +26,9 @@ SELECT [DISTINCT] <select_list>
 - A trailing `;` is accepted. Only one statement per query (except `UNION`).
 - `FROM` is optional: `SELECT 1 + 1` evaluates a single row (handy in the REPL).
 - `SELECT *` and `alias.*` expand all columns (not allowed with aggregation).
+- `GROUP BY` / `ORDER BY` accept **positional references**: a bare integer `N`
+  means the `N`-th select item (`ORDER BY 2 DESC`, `GROUP BY 1`). An
+  out-of-range position is an error.
 
 ### Joins
 
@@ -35,11 +38,14 @@ supported.
 
 ### Subqueries
 
-- **Derived tables** (FROM-clause subqueries) — must be aliased:
+- **Derived tables** (FROM-clause subqueries) — must be aliased, and may
+  themselves be a `UNION`:
   ```sql
   SELECT region, n
   FROM (SELECT region, COUNT(*) AS n FROM sales GROUP BY region) AS g
   WHERE n > 100
+
+  SELECT COUNT(*) FROM (SELECT id FROM a UNION SELECT id FROM b) AS u
   ```
 - **`IN` subqueries** — non-correlated, single column; executed once and folded
   into a value set:
@@ -171,9 +177,10 @@ Run `.functions` in the REPL for the live list.
 
 ### Aggregates
 
-Used with (or without) `GROUP BY`: `COUNT(*)`, `COUNT(expr)`,
-`COUNT(DISTINCT expr)`, `SUM(expr)`, `AVG(expr)`, `MIN(expr)`, `MAX(expr)`.
-Filter groups with `HAVING`.
+Used with (or without) `GROUP BY`: `COUNT(*)`, `COUNT(expr)`, `SUM(expr)`,
+`AVG(expr)`, `MIN(expr)`, `MAX(expr)`. Each accepts a leading `DISTINCT`
+(`COUNT(DISTINCT region)`, `SUM(DISTINCT amount)`), which deduplicates the
+argument values before aggregating. Filter groups with `HAVING`.
 
 ---
 

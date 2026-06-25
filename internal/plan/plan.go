@@ -408,6 +408,13 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		}
 	}
 
+	// Resolve positional ORDER BY / GROUP BY references (e.g. `ORDER BY 2`) to
+	// the matching select item before they reach Sort/Aggregate, so an integer
+	// term sorts/groups by that output column instead of being a silent no-op.
+	if err := resolveOrdinals(stmt, hasAgg); err != nil {
+		return nil, engine.Schema{}, err
+	}
+
 	// 2. Pushdown hints: for a single-table scan (no joins) hand the WHERE
 	//    predicate, and a safe LIMIT, to the connector. This is an optimization
 	//    only — the engine's Filter/Limit below still run, so a connector that
@@ -527,7 +534,19 @@ func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string,
 		if alias == "" {
 			return nil, engine.Schema{}, "", fmt.Errorf("subquery in FROM must have an alias")
 		}
-		child, schema, err := bc.buildSelect(tr.Subquery)
+		var (
+			child  Node
+			schema engine.Schema
+			err    error
+		)
+		switch sub := tr.Subquery.(type) {
+		case *sql.SelectStmt:
+			child, schema, err = bc.buildSelect(sub)
+		case *sql.SetOpStmt:
+			child, schema, err = bc.buildSetOp(sub)
+		default:
+			return nil, engine.Schema{}, "", fmt.Errorf("unsupported subquery %T", sub)
+		}
 		if err != nil {
 			return nil, engine.Schema{}, "", fmt.Errorf("subquery %q: %w", alias, err)
 		}
@@ -633,6 +652,58 @@ func (bc *buildCtx) colSide(expr sql.Expr, leftSchema engine.Schema, leftAliases
 	return -1, ""
 }
 
+// resolveOrdinals rewrites positional references in GROUP BY and ORDER BY (a
+// bare integer literal N, 1-based, refers to the N-th select item) into the
+// underlying item. An out-of-range or `*` position is an error rather than a
+// silent no-op. ORDER BY in an aggregate query references the output column by
+// name (the Sort runs over the aggregate output schema); otherwise — and for
+// GROUP BY — it substitutes the item's expression (resolved over input rows),
+// mirroring how buildProjection treats the two cases.
+func resolveOrdinals(stmt *sql.SelectStmt, hasAgg bool) error {
+	items := stmt.Items.Items
+	itemFor := func(clause string, n int) (sql.SelectItem, error) {
+		if n < 1 || n > len(items) {
+			return sql.SelectItem{}, fmt.Errorf("%s position %d is out of range (1..%d)", clause, n, len(items))
+		}
+		it := items[n-1]
+		if it.Star {
+			return sql.SelectItem{}, fmt.Errorf("%s position %d refers to '*'", clause, n)
+		}
+		return it, nil
+	}
+	for i, e := range stmt.GroupBy {
+		li, ok := e.(*sql.LitInt)
+		if !ok {
+			continue
+		}
+		it, err := itemFor("GROUP BY", int(li.V))
+		if err != nil {
+			return err
+		}
+		stmt.GroupBy[i] = it.Expr
+	}
+	for i := range stmt.OrderBy {
+		li, ok := stmt.OrderBy[i].Expr.(*sql.LitInt)
+		if !ok {
+			continue
+		}
+		it, err := itemFor("ORDER BY", int(li.V))
+		if err != nil {
+			return err
+		}
+		if hasAgg {
+			name := it.As
+			if name == "" {
+				name = inferExprName(it.Expr)
+			}
+			stmt.OrderBy[i].Expr = &sql.ColRef{Name: name}
+		} else {
+			stmt.OrderBy[i].Expr = it.Expr
+		}
+	}
+	return nil
+}
+
 // buildAggregate constructs the Aggregate node and its output schema. In
 // v0.1 the aggregate output schema mirrors the SELECT list: non-aggregate
 // select items become group keys (in select-list order) and aggregate items
@@ -662,7 +733,7 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 			if name == "" {
 				name = inferExprName(it.Expr)
 			}
-			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name})
+			aggs = append(aggs, engine.AggSpec{Func: fc.Name, Arg: arg, Name: name, Distinct: fc.Distinct})
 			aggCols = append(aggCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 			continue
 		}

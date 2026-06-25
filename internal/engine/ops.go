@@ -385,9 +385,10 @@ func (j *HashJoinIter) Close() error {
 // AggSpec describes one aggregate output column: the function name, the
 // argument expression (evaluated against child rows), and the output name.
 type AggSpec struct {
-	Func string // COUNT, SUM, AVG, MIN, MAX
-	Arg  sql.Expr
-	Name string
+	Func     string // COUNT, SUM, AVG, MIN, MAX
+	Arg      sql.Expr
+	Name     string
+	Distinct bool // COUNT(DISTINCT x) etc.: dedupe arg values before aggregating
 }
 
 // AggregateIter groups child rows by the group-key expressions and computes
@@ -514,9 +515,14 @@ func (a *AggregateIter) Close() error {
 func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 	name := strings.ToUpper(spec.Func)
 	if name == "COUNT" {
-		// COUNT(*) counts rows; COUNT(col) counts non-null values.
+		// COUNT(*) counts rows; COUNT(col) counts non-null values;
+		// COUNT(DISTINCT col) counts distinct non-null values.
 		if cr, ok := spec.Arg.(*sql.ColRef); ok && cr.Name == "*" && cr.Qualifier == "" {
 			return IntVal(int64(len(rows))), nil
+		}
+		var seen map[string]bool
+		if spec.Distinct {
+			seen = make(map[string]bool)
 		}
 		var n int64
 		for _, r := range rows {
@@ -524,17 +530,30 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			if !v.IsNull() {
-				n++
+			if v.IsNull() {
+				continue
 			}
+			if seen != nil {
+				k := keyString(v)
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+			}
+			n++
 		}
 		return IntVal(n), nil
 	}
-	// SUM/AVG/MIN/MAX ignore NULLs.
+	// SUM/AVG/MIN/MAX ignore NULLs. With DISTINCT, each distinct value counts
+	// once (matters for SUM/AVG; MIN/MAX are unaffected).
 	var sum float64
 	var count int
 	var minV, maxV Value
 	haveVal := false
+	var seen map[string]bool
+	if spec.Distinct {
+		seen = make(map[string]bool)
+	}
 	for _, r := range rows {
 		v, err := eval.Eval(spec.Arg, r)
 		if err != nil {
@@ -542,6 +561,13 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 		}
 		if v.IsNull() {
 			continue
+		}
+		if seen != nil {
+			k := keyString(v)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
 		}
 		count++
 		switch name {

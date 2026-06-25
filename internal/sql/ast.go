@@ -56,7 +56,7 @@ type TableRef struct {
 	Source string
 	Name   string
 
-	Subquery *SelectStmt // when FROM (SELECT ...) AS alias
+	Subquery Statement // when FROM (SELECT ... [UNION ...]) AS alias; a *SelectStmt or *SetOpStmt
 	Alias    string
 }
 

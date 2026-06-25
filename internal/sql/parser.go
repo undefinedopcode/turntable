@@ -70,11 +70,18 @@ func (p *Parser) errf(format string, args ...any) error {
 		t.Pos, t.Value, fmt.Sprintf(format, args...))
 }
 
-// ParseStatement parses a single (currently SELECT) statement.
+// ParseStatement parses a single (currently SELECT or UNION) statement.
 func (p *Parser) ParseStatement() (Statement, error) {
 	if !p.kw("SELECT") {
 		return nil, p.errf("expected SELECT")
 	}
+	return p.parseSelectOrSetOp()
+}
+
+// parseSelectOrSetOp parses a SELECT and, if one or more UNION branches follow,
+// folds them into a SetOpStmt. It is used both at the top level and for a
+// parenthesized FROM-clause subquery, so a derived table may itself be a UNION.
+func (p *Parser) parseSelectOrSetOp() (Statement, error) {
 	first, err := p.parseSelect()
 	if err != nil {
 		return nil, err
@@ -269,8 +276,8 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 	var tr TableRef
 	t := p.advance()
 	if t.Kind == TKOperator && t.Value == "(" {
-		// subquery
-		sub, err := p.parseSelect()
+		// Derived table: a SELECT or a UNION of SELECTs.
+		sub, err := p.parseSelectOrSetOp()
 		if err != nil {
 			return tr, err
 		}
@@ -620,6 +627,12 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		if p.op("(") {
 			p.advance()
 			fc := &FuncCall{Name: name}
+			// COUNT(DISTINCT x), SUM(DISTINCT x), etc. — the DISTINCT applies to
+			// the argument value set before aggregation.
+			if p.kw("DISTINCT") {
+				fc.Distinct = true
+				p.advance()
+			}
 			if p.op("*") {
 				p.advance()
 				fc.Args = []Expr{&ColRef{Name: "*"}}
