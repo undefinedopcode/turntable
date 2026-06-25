@@ -126,9 +126,17 @@ func (*NoFrom) planNode()    {}
 
 // buildCtx carries planner state down the tree.
 type buildCtx struct {
-	ctx  context.Context
-	reg  *connector.Registry
+	ctx   context.Context
+	reg   *connector.Registry
 	funcs *engine.FuncRegistry
+	ctes  map[string]*cteEntry // WITH clause table expressions, by name
+}
+
+// cteEntry is a registered common table expression. visiting guards against a
+// CTE referencing itself (recursive CTEs are not supported).
+type cteEntry struct {
+	query    sql.Statement
+	visiting bool
 }
 
 // Build resolves and validates a parsed statement (a SELECT or a UNION of
@@ -149,6 +157,8 @@ func Build(ctx context.Context, stmt sql.Statement, reg *connector.Registry, opt
 		root, schema, err = bc.buildSelect(s)
 	case *sql.SetOpStmt:
 		root, schema, err = bc.buildSetOp(s)
+	case *sql.WithStmt:
+		root, schema, err = bc.buildWith(s)
 	default:
 		return nil, fmt.Errorf("unsupported statement %T", stmt)
 	}
@@ -202,6 +212,51 @@ func (bc *buildCtx) buildSetOp(s *sql.SetOpStmt) (Node, engine.Schema, error) {
 		root = &Limit{Child: root, Limit: s.Limit, Offset: s.Offset}
 	}
 	return root, outSchema, nil
+}
+
+// buildWith registers the WITH clause's CTEs (each in scope for the later CTEs
+// and the body) and builds the body. CTEs are expanded where referenced, so a
+// CTE used twice is planned twice — fine for a read-only engine.
+func (bc *buildCtx) buildWith(s *sql.WithStmt) (Node, engine.Schema, error) {
+	if bc.ctes == nil {
+		bc.ctes = map[string]*cteEntry{}
+	}
+	for i := range s.CTEs {
+		c := s.CTEs[i]
+		if _, dup := bc.ctes[c.Name]; dup {
+			return nil, engine.Schema{}, fmt.Errorf("duplicate CTE name %q", c.Name)
+		}
+		bc.ctes[c.Name] = &cteEntry{query: c.Query}
+	}
+	return bc.buildStatement(s.Body)
+}
+
+// buildStatement builds a SELECT or UNION statement node.
+func (bc *buildCtx) buildStatement(stmt sql.Statement) (Node, engine.Schema, error) {
+	switch s := stmt.(type) {
+	case *sql.SelectStmt:
+		return bc.buildSelect(s)
+	case *sql.SetOpStmt:
+		return bc.buildSetOp(s)
+	default:
+		return nil, engine.Schema{}, fmt.Errorf("unsupported statement %T", stmt)
+	}
+}
+
+// buildCTE plans a reference to the named CTE, wrapping it in a Subquery node so
+// its columns qualify under the reference alias. It guards against recursion.
+func (bc *buildCtx) buildCTE(name, alias string) (Node, engine.Schema, error) {
+	e := bc.ctes[name]
+	if e.visiting {
+		return nil, engine.Schema{}, fmt.Errorf("recursive CTE %q is not supported", name)
+	}
+	e.visiting = true
+	defer func() { e.visiting = false }()
+	child, schema, err := bc.buildStatement(e.query)
+	if err != nil {
+		return nil, engine.Schema{}, fmt.Errorf("CTE %q: %w", name, err)
+	}
+	return &Subquery{Child: child, Schema: schema, Alias: alias}, schema, nil
 }
 
 // BuildOption configures a Plan during Build.
@@ -549,6 +604,21 @@ func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string,
 			return nil, engine.Schema{}, "", fmt.Errorf("subquery %q: %w", alias, err)
 		}
 		return &Subquery{Child: child, Schema: schema, Alias: alias}, schema, alias, nil
+	}
+	// A bare name may reference a WITH-clause CTE (which shadows a registered
+	// source of the same name).
+	if tr.Prefix == "" && tr.Name != "" && bc.ctes != nil {
+		if _, ok := bc.ctes[tr.Name]; ok {
+			alias := tr.Alias
+			if alias == "" {
+				alias = tr.Name
+			}
+			node, schema, err := bc.buildCTE(tr.Name, alias)
+			if err != nil {
+				return nil, engine.Schema{}, "", err
+			}
+			return node, schema, alias, nil
+		}
 	}
 	src, err := resolveTableRef(bc.ctx, tr, bc.reg)
 	if err != nil {

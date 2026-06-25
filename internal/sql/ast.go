@@ -36,6 +36,21 @@ type SetOpStmt struct {
 
 func (*SetOpStmt) stmtNode() {}
 
+// CTE is one named common table expression: `name AS ( <query> )`.
+type CTE struct {
+	Name  string
+	Query Statement // *SelectStmt or *SetOpStmt
+}
+
+// WithStmt is a `WITH <cte>, ... <body>` query. Each CTE is in scope for the
+// later CTEs and the body; a FROM reference to a CTE name resolves to its query.
+type WithStmt struct {
+	CTEs []CTE
+	Body Statement // *SelectStmt or *SetOpStmt
+}
+
+func (*WithStmt) stmtNode() {}
+
 // SelectList is the projection list.
 type SelectList struct {
 	Items []SelectItem

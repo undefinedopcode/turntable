@@ -12,6 +12,7 @@ registry, and `.schema <source>` to see a source's columns.
 ## Statement
 
 ```sql
+[ WITH <name> AS ( <select> ), ... ]
 SELECT [DISTINCT] <select_list>
 [ FROM <table_ref> ]
 [ JOIN <table_ref> ON <expr> ]...
@@ -35,6 +36,22 @@ SELECT [DISTINCT] <select_list>
 `INNER JOIN` (default) and `LEFT JOIN`, on an equality condition
 (`a.x = b.y`) — including across connectors. Right/full outer joins are not yet
 supported.
+
+### Common table expressions (`WITH`)
+
+Name one or more queries up front, then reference them by name in `FROM`/`JOIN`
+like any source. Each CTE is in scope for the later CTEs and the body; a CTE
+shadows a registered source of the same name. The body (and a CTE) may be a
+`UNION`.
+
+```sql
+WITH eng AS (SELECT name, salary FROM emp WHERE dept = 'eng'),
+     rich AS (SELECT name FROM eng WHERE salary > 150000)
+SELECT * FROM rich ORDER BY name
+```
+
+A CTE is expanded wherever it is referenced (referencing it twice plans it
+twice). Recursive CTEs (`WITH RECURSIVE`) are not supported.
 
 ### Subqueries
 
@@ -223,6 +240,6 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Window functions, CTEs (`WITH`), `INTERSECT`/`EXCEPT`, right/full outer joins,
-scalar/`EXISTS`/correlated subqueries, and DML/DDL. See `DESIGN.md` §11 for the
-roadmap.
+Window functions, `INTERSECT`/`EXCEPT`, right/full outer joins, recursive CTEs
+(`WITH RECURSIVE`), scalar/`EXISTS`/correlated subqueries, and DML/DDL. See
+`DESIGN.md` §11 for the roadmap.

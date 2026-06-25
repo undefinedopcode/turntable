@@ -70,12 +70,55 @@ func (p *Parser) errf(format string, args ...any) error {
 		t.Pos, t.Value, fmt.Sprintf(format, args...))
 }
 
-// ParseStatement parses a single (currently SELECT or UNION) statement.
+// ParseStatement parses a single statement: a SELECT/UNION, optionally preceded
+// by a WITH clause of common table expressions.
 func (p *Parser) ParseStatement() (Statement, error) {
+	if p.kw("WITH") {
+		return p.parseWith()
+	}
 	if !p.kw("SELECT") {
 		return nil, p.errf("expected SELECT")
 	}
 	return p.parseSelectOrSetOp()
+}
+
+// parseWith parses `WITH name AS ( <query> ) [, ...] <body>`.
+func (p *Parser) parseWith() (Statement, error) {
+	p.advance() // WITH
+	w := &WithStmt{}
+	for {
+		nameTok := p.advance()
+		if nameTok.Kind != TKIdent {
+			return nil, p.errf("expected CTE name after WITH")
+		}
+		if err := p.expectKW("AS"); err != nil {
+			return nil, err
+		}
+		if err := p.expectOp("("); err != nil {
+			return nil, err
+		}
+		query, err := p.parseSelectOrSetOp()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectOp(")"); err != nil {
+			return nil, err
+		}
+		w.CTEs = append(w.CTEs, CTE{Name: nameTok.Value, Query: query})
+		if !p.op(",") {
+			break
+		}
+		p.advance()
+	}
+	if !p.kw("SELECT") {
+		return nil, p.errf("expected SELECT after WITH clause")
+	}
+	body, err := p.parseSelectOrSetOp()
+	if err != nil {
+		return nil, err
+	}
+	w.Body = body
+	return w, nil
 }
 
 // parseSelectOrSetOp parses a SELECT and, if one or more UNION branches follow,

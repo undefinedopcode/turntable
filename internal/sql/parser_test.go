@@ -253,6 +253,39 @@ func TestParseSubqueryUnionFrom(t *testing.T) {
 	}
 }
 
+func TestParseWith(t *testing.T) {
+	stmt, err := Parse("WITH a AS (SELECT x FROM t), b AS (SELECT y FROM u UNION SELECT z FROM v) SELECT * FROM a JOIN b ON a.x = b.y")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	w, ok := stmt.(*WithStmt)
+	if !ok {
+		t.Fatalf("stmt is %T, want *WithStmt", stmt)
+	}
+	if len(w.CTEs) != 2 || w.CTEs[0].Name != "a" || w.CTEs[1].Name != "b" {
+		t.Fatalf("CTEs = %+v, want [a b]", w.CTEs)
+	}
+	if _, ok := w.CTEs[0].Query.(*SelectStmt); !ok {
+		t.Errorf("CTE a query is %T, want *SelectStmt", w.CTEs[0].Query)
+	}
+	if _, ok := w.CTEs[1].Query.(*SetOpStmt); !ok {
+		t.Errorf("CTE b query is %T, want *SetOpStmt (a UNION)", w.CTEs[1].Query)
+	}
+	if _, ok := w.Body.(*SelectStmt); !ok {
+		t.Errorf("body is %T, want *SelectStmt", w.Body)
+	}
+}
+
+func TestParseWithBodyUnion(t *testing.T) {
+	stmt, err := Parse("WITH a AS (SELECT x FROM t) SELECT x FROM a UNION SELECT x FROM a")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if _, ok := stmt.(*WithStmt).Body.(*SetOpStmt); !ok {
+		t.Errorf("body is %T, want *SetOpStmt", stmt.(*WithStmt).Body)
+	}
+}
+
 func TestParseILike(t *testing.T) {
 	for _, c := range []struct {
 		q           string

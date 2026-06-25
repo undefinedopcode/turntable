@@ -67,9 +67,13 @@ A query moves through fixed stages, one package each:
    plus `NoFrom` for `SELECT <expr>` with no FROM, `Subquery` for an aliased
    FROM-clause derived table, and `Union` for `UNION`/`UNION ALL`). `Build`
    takes a `sql.Statement` and dispatches on `*SelectStmt` vs `*SetOpStmt`
-   (UNION); `buildSetOp` lays a `Union` under the union-level Sort/Limit. A
-   `Subquery` passes its child plan's rows through under an alias, so
-   `resolverFor`/`baseRelation` treat it like a Scan for column qualification.
+   (UNION) vs `*WithStmt` (CTEs); `buildSetOp` lays a `Union` under the
+   union-level Sort/Limit. A `Subquery` passes its child plan's rows through
+   under an alias, so `resolverFor`/`baseRelation` treat it like a Scan for
+   column qualification. `buildWith` registers each CTE in `buildCtx.ctes`, then
+   `buildTableRef` resolves a bare name to a CTE (shadowing a registered source)
+   before the registry, expanding it as a `Subquery` per reference (with a
+   `visiting` guard rejecting recursion).
    A `WHERE/HAVING x IN (SELECT ...)` is handled differently: `resolveInSubqueries`
    executes the (non-correlated) subquery at build time and folds its one column
    into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no
