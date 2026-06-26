@@ -99,6 +99,54 @@ func TestHandleSources(t *testing.T) {
 	}
 }
 
+func postLoginfer(t *testing.T, a *App, path string) loginferResponse {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"path": path})
+	req := httptest.NewRequest(http.MethodPost, "/api/loginfer", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	a.handleLoginfer(rec, req)
+	var out loginferResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	return out
+}
+
+func TestHandleLoginferDetected(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "pacman.log")
+	os.WriteFile(p, []byte("[2026-05-25T20:44:11-0700] [ALPM] installed glib2 (2.88.1-1)\n[2026-05-25T20:44:12-0700] [ALPM] installed gnupg (2.4.9-1)\n"), 0o644)
+
+	out := postLoginfer(t, NewApp(), p)
+	if out.Detected == nil {
+		t.Fatalf("expected a detected format, got %+v", out)
+	}
+	if out.Detected.Format != "bracketed" {
+		t.Errorf("format = %q, want bracketed", out.Detected.Format)
+	}
+	if len(out.Detected.Rows) == 0 {
+		t.Error("expected preview rows")
+	}
+}
+
+func TestHandleLoginferInferred(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "app.log")
+	os.WriteFile(p, []byte("svc started in 12ms ok=true\nsvc started in 7ms ok=true\nsvc started in 40ms ok=false\n"), 0o644)
+
+	out := postLoginfer(t, NewApp(), p)
+	if out.Detected != nil {
+		t.Fatalf("expected inference (no known format), got detected %q", out.Detected.Format)
+	}
+	if len(out.Templates) == 0 {
+		t.Fatalf("expected inferred templates, got %+v", out)
+	}
+	// Every emitted pattern must be usable (it parsed its own sample at emit time).
+	if out.Templates[0].Pattern == "" || len(out.Templates[0].Columns) == 0 {
+		t.Errorf("template missing pattern/columns: %+v", out.Templates[0])
+	}
+}
+
 func TestHandleFunctions(t *testing.T) {
 	a := NewApp()
 	req := httptest.NewRequest(http.MethodGet, "/api/functions", nil)

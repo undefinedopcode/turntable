@@ -203,7 +203,12 @@ Endpoints: `GET/POST /api/query`, `GET /api/sources` (list) / `POST /api/sources
 (register at runtime, the web `.use` — goes through `registerSourceExpand`, so
 wildcards and validation match), `GET /api/schema`, `GET /api/functions` (the
 dialect's scalar/aggregate/keyword lists — same data as REPL `.functions` —
-feeding editor autocomplete), and `POST /api/upload`
+feeding editor autocomplete), `POST /api/loginfer` (analyze a log file path:
+returns the recognized `logc` format + a parsed preview, or — for an
+unrecognized file — inferred templates from `internal/loginfer`, a Drain-style
+miner, each carrying a ready-to-use `pattern` regex; the add-source modal
+auto-runs this when a log file is chosen and lets the user pick a template and
+rename its columns, which rewrites the pattern), and `POST /api/upload`
 (multipart file → streamed to a per-session temp dir `App.uploadDir`, created in
 `serve()` and `RemoveAll`'d on shutdown; the client then registers a file source
 at the returned path). The web add-source UI is a modal whose form adapts per

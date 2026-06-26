@@ -39,6 +39,22 @@ func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sche
 	return f.schema, nil
 }
 
+// Detect reports the chosen format name and schema for a log file, using the
+// same auto-detection (and `format`/`pattern` options) as Resolve. A name of
+// "raw" means no structured format matched — a cue to fall back to inference.
+func Detect(path string, opts map[string]any) (name string, schema engine.Schema, err error) {
+	f, err := detect(path, opts)
+	if err != nil {
+		return "", engine.Schema{}, err
+	}
+	return f.name, f.schema, nil
+}
+
+// Sample reads up to n non-empty lines from a log file (for inference).
+func Sample(path string, n int) ([]string, error) {
+	return readSample(path, n)
+}
+
 func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.RowIterator, error) {
 	f, err := detect(req.Dataset.Source, req.Dataset.Options)
 	if err != nil {

@@ -29,6 +29,11 @@ webui/
 - **Editor** — CodeMirror with SQL highlighting and autocomplete over the live
   sources, their columns, and the dialect functions (`GET /api/functions`).
   Ctrl/⌘+Enter runs.
+- **Add source → Log file** — picking a log file auto-analyzes it
+  (`POST /api/loginfer`): a recognized format shows a parsed preview, while an
+  unrecognized one shows **inferred templates** (from `internal/loginfer`) as
+  pickable patterns whose columns you can rename inline (rewriting the `pattern`)
+  before registering.
 - **Sidebar** — source search, per-source schema, one-click **preview**
   (`SELECT * … LIMIT 100`), plus **history** (click to reload) and **saved**
   queries (localStorage). The editor content is restored on reload.

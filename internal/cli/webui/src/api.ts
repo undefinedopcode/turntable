@@ -83,6 +83,32 @@ export interface UploadResult {
   error?: string;
 }
 
+export interface InferColumn {
+  name: string;
+  type: string;
+}
+
+export interface InferTemplate {
+  label: string;
+  count: number;
+  pattern: string;
+  columns: InferColumn[];
+  sample: string[];
+  sample_line: string;
+}
+
+export interface LoginferResult {
+  detected?: { format: string; columns: Column[]; rows: Cell[][] };
+  templates?: InferTemplate[];
+  error?: string;
+}
+
+// loginfer analyzes a log file path: either the recognized format with a parsed
+// preview, or inferred templates each carrying a ready-to-use `pattern`.
+export function loginfer(path: string): Promise<LoginferResult> {
+  return postJSON<LoginferResult>("/api/loginfer", { path });
+}
+
 // uploadFile streams a file to the server's per-session scratch directory and
 // returns its stored path, for use as a file connector's `path` field.
 export async function uploadFile(file: File): Promise<UploadResult> {

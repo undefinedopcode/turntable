@@ -16,7 +16,10 @@ import (
 	"time"
 
 	"github.com/april/turntable/internal/config"
+	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/loginfer"
 	"github.com/april/turntable/internal/plan"
 	"github.com/april/turntable/internal/sql"
 )
@@ -68,6 +71,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/schema", a.handleSchema)
 	mux.HandleFunc("/api/upload", a.handleUpload)
 	mux.HandleFunc("/api/functions", a.handleFunctions)
+	mux.HandleFunc("/api/loginfer", a.handleLoginfer)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -338,6 +342,89 @@ var sqlKeywords = []string{
 	"BETWEEN", "LIKE", "ILIKE", "IS NULL", "IS NOT NULL", "AS", "CASE", "WHEN",
 	"THEN", "ELSE", "END", "CAST", "UNION", "UNION ALL", "INTERSECT", "EXCEPT",
 	"WITH", "OVER", "PARTITION BY",
+}
+
+// loginferResponse is the result of analyzing a log file for the add-source UI:
+// either a recognized format (with a column/row preview) or, for an unrecognized
+// file, a set of inferred templates with ready-to-use patterns.
+type loginferResponse struct {
+	Detected  *detectedFormat     `json:"detected,omitempty"`
+	Templates []loginfer.Template `json:"templates,omitempty"`
+	Error     string              `json:"error,omitempty"`
+}
+
+type detectedFormat struct {
+	Format  string      `json:"format"`
+	Columns []apiColumn `json:"columns"`
+	Rows    [][]any     `json:"rows"`
+}
+
+// handleLoginfer analyzes a log file path: if the connector recognizes the
+// format it returns that plus a small parsed preview; otherwise it mines the
+// sampled lines into templates, each carrying a `pattern` regex the client can
+// use directly. POST { "path": "..." }.
+func (a *App) handleLoginfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeJSON(w, loginferResponse{Error: "path required"})
+		return
+	}
+
+	name, schema, err := logc.Detect(req.Path, nil)
+	if err != nil {
+		writeJSON(w, loginferResponse{Error: err.Error()})
+		return
+	}
+	if name != "raw" {
+		cols := make([]apiColumn, len(schema.Columns))
+		for i, c := range schema.Columns {
+			cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
+		}
+		rows, _ := a.logPreviewRows(r.Context(), req.Path, nil, 5)
+		writeJSON(w, loginferResponse{Detected: &detectedFormat{Format: name, Columns: cols, Rows: rows}})
+		return
+	}
+
+	sample, err := logc.Sample(req.Path, 500)
+	if err != nil {
+		writeJSON(w, loginferResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, loginferResponse{Templates: loginfer.Infer(sample)})
+}
+
+// logPreviewRows scans a few rows from a log file through the log connector for
+// the detected-format preview.
+func (a *App) logPreviewRows(ctx context.Context, path string, opts map[string]any, n int) ([][]any, error) {
+	ds := connector.Dataset{Source: path, Options: opts}
+	it, err := logc.New().Scan(ctx, connector.ScanRequest{Dataset: ds})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	var out [][]any
+	for len(out) < n {
+		row, ok, err := it.Next()
+		if err != nil || !ok {
+			break
+		}
+		cells := make([]any, len(row.Values))
+		for j, v := range row.Values {
+			cells[j] = jsonValue(v)
+		}
+		out = append(out, cells)
+	}
+	return out, nil
 }
 
 // maxUploadBytes bounds a single uploaded file (a guard, not a hard product

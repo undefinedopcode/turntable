@@ -359,6 +359,10 @@ sources:
       pattern: '^\[(?P<time>[^\]]+)\] \[(?P<worker>[^\]]+)\] (?P<message>.*)$'
 ```
 
+In the **web UI**, picking a log file under *Add source* auto-analyzes it: a
+recognized format previews its parsed columns, and an unrecognized one is mined
+into candidate patterns you can pick and rename — no regex by hand.
+
 `format` (`auto` default, or `json`/`logfmt`/`clf`/`combined`/`syslog`/
 `bracketed`/`leveled`/`raw`) forces a parser; `pattern` (a regular expression
 with `(?P<name>…)` named
