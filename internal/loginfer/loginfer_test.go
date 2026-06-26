@@ -97,6 +97,45 @@ config /etc/db.conf reloaded`, "\n")
 	}
 }
 
+func TestInferNumericFirstTokenClusters(t *testing.T) {
+	// worker-N (varying N) as the first token must cluster into one template,
+	// with the worker id captured as a field.
+	lines := strings.Split(`worker-3 processed 42 items
+worker-1 processed 7 items
+worker-9 processed 128 items
+worker-42 processed 5 items`, "\n")
+	tpls := Infer(lines)
+	if len(tpls) != 1 {
+		t.Fatalf("templates = %d, want 1 (worker-N should cluster): %+v", len(tpls), tpls)
+	}
+	tpl := tpls[0]
+	if tpl.Count != 4 {
+		t.Errorf("count = %d, want 4", tpl.Count)
+	}
+	assertPatternValid(t, tpl)
+	// First column captures the (variable) worker token; there's also the <NUM>.
+	if len(tpl.Columns) < 2 {
+		t.Fatalf("columns = %v, want the worker + the count", tpl.Columns)
+	}
+	if tpl.Sample[0] != "worker-3" {
+		t.Errorf("first sample = %q, want worker-3", tpl.Sample[0])
+	}
+}
+
+func TestBucketStem(t *testing.T) {
+	for in, want := range map[string]string{
+		"worker-3": "worker-#",
+		"host42":   "host#",
+		"<TS>":     "<TS>",
+		"config":   "config",
+		"v2.88.1":  "v#.#.#",
+	} {
+		if got := bucketStem(in); got != want {
+			t.Errorf("bucketStem(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRenameColumn(t *testing.T) {
 	pat := `^(?P<time>\S+) (?P<pkg>\S+)$`
 	got := RenameColumn(pat, "pkg", "package")

@@ -239,10 +239,22 @@ func newMiner(st float64) *miner {
 	return &miner{buckets: map[string][]*cluster{}, byID: map[int]*cluster{}, redirect: map[int]int{}, st: st}
 }
 
+// reDigitRun collapses digit sequences so numeric-variant tokens share a key.
+var reDigitRun = regexp.MustCompile(`\d+`)
+
+// bucketStem normalizes a token for the bucket key: digit runs become '#', so
+// worker-3 / worker-1 / worker-42 land in the same bucket and can cluster (the
+// similarity threshold still gates the actual merge, so this only widens what is
+// compared). Masked placeholders (<TS>, key=<NUM>) carry no bare digits and pass
+// through unchanged.
+func bucketStem(tok string) string {
+	return reDigitRun.ReplaceAllString(tok, "#")
+}
+
 func (m *miner) key(masked []string) string {
 	first := ""
 	if len(masked) > 0 {
-		first = masked[0]
+		first = bucketStem(masked[0])
 	}
 	return fmt.Sprintf("%d\x00%s", len(masked), first)
 }
