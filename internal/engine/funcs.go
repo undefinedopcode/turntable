@@ -7,6 +7,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// Embed the IANA time-zone database so CONVERT_TZ/FROM_TZ resolve named
+	// zones (e.g. "America/Los_Angeles") without relying on system zoneinfo,
+	// which may be absent (minimal containers, Windows). Pure Go, no CGO.
+	_ "time/tzdata"
 )
 
 // ScalarFunc is a scalar SQL function implementation. It receives the
@@ -101,6 +105,8 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("DATE", funcDate)
 	r.Register("STRFTIME", funcStrftime)
 	r.Register("CURRENT_DATE", funcCurrentDate)
+	r.Register("CONVERT_TZ", funcConvertTZ)
+	r.Register("FROM_TZ", funcFromTZ)
 }
 
 func funcCoalesce(args []Value) (Value, error) {
@@ -669,6 +675,73 @@ func funcDateAdd(args []Value) (Value, error) {
 		return Value{}, fmt.Errorf("DATE_ADD: %v", err)
 	}
 	return TimeVal(t.Add(d)), nil
+}
+
+var tzOffsetRe = regexp.MustCompile(`^([+-])(\d{2}):?(\d{2})?$`)
+
+// loadZone resolves a zone name to a *time.Location: an IANA name
+// ("America/Los_Angeles", "UTC", "Local"), or a fixed numeric offset
+// ("-07:00", "-0700", "+05:30", "Z").
+func loadZone(name string) (*time.Location, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "Z") {
+		return time.UTC, nil
+	}
+	if m := tzOffsetRe.FindStringSubmatch(name); m != nil {
+		h, _ := strconv.Atoi(m[2])
+		min := 0
+		if m[3] != "" {
+			min, _ = strconv.Atoi(m[3])
+		}
+		secs := (h*60 + min) * 60
+		if m[1] == "-" {
+			secs = -secs
+		}
+		return time.FixedZone(name, secs), nil
+	}
+	return time.LoadLocation(name)
+}
+
+// funcConvertTZ renders an instant in a target zone: same instant, the displayed
+// offset (and EXTRACT/DATE_TRUNC of it) becomes zone-local. CONVERT_TZ(ts, zone).
+func funcConvertTZ(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("CONVERT_TZ expects 2 args (timestamp, zone)")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	t, ok := asTimeVal(args[0])
+	if !ok {
+		return Value{}, fmt.Errorf("CONVERT_TZ: first arg must be a timestamp")
+	}
+	loc, err := loadZone(args[1].AsString())
+	if err != nil {
+		return Value{}, fmt.Errorf("CONVERT_TZ: %v", err)
+	}
+	return TimeVal(t.In(loc)), nil
+}
+
+// funcFromTZ reinterprets the wall-clock fields of ts as local time in `zone`,
+// yielding the correct instant — use to fix a zone-less timestamp the parser
+// assumed UTC. FROM_TZ(ts, zone).
+func funcFromTZ(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("FROM_TZ expects 2 args (timestamp, zone)")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	t, ok := asTimeVal(args[0])
+	if !ok {
+		return Value{}, fmt.Errorf("FROM_TZ: first arg must be a timestamp")
+	}
+	loc, err := loadZone(args[1].AsString())
+	if err != nil {
+		return Value{}, fmt.Errorf("FROM_TZ: %v", err)
+	}
+	r := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), loc)
+	return TimeVal(r), nil
 }
 
 func funcAge(args []Value) (Value, error) {

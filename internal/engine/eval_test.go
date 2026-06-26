@@ -328,3 +328,66 @@ func TestNewTimeFunctions(t *testing.T) {
 		t.Errorf("STRFTIME = %q, want 2024", sf.AsString())
 	}
 }
+
+func TestParseTimeNumericOffset(t *testing.T) {
+	// Offset without a colon (-0700) and space-separated offset must parse and
+	// resolve to the right instant (RFC3339 alone rejects these).
+	want, _ := parseTime("2024-03-01T17:15:00Z")
+	for _, s := range []string{
+		"2024-03-01T10:15:00-0700",
+		"2024-03-01 10:15:00-07:00",
+		"2024-03-01 10:15:00 -0700",
+	} {
+		got, err := parseTime(s)
+		if err != nil {
+			t.Errorf("parseTime(%q) error: %v", s, err)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("parseTime(%q) = %v, want instant %v", s, got, want)
+		}
+	}
+}
+
+func TestTimezoneFunctions(t *testing.T) {
+	fr := NewFuncRegistry()
+	utc, _ := parseTime("2024-03-01T17:15:00Z")
+
+	// CONVERT_TZ keeps the instant, changes the displayed zone.
+	for _, c := range []struct {
+		zone     string
+		wantHour int // hour in the target zone
+	}{
+		{"America/Los_Angeles", 9}, // PST (-08:00) on this date
+		{"+05:30", 22},
+		{"UTC", 17},
+	} {
+		got, err := fr.Lookup("CONVERT_TZ")([]Value{TimeVal(utc), StringVal(c.zone)})
+		if err != nil {
+			t.Fatalf("CONVERT_TZ %s: %v", c.zone, err)
+		}
+		tv := got.V.(time.Time)
+		if !tv.Equal(utc) {
+			t.Errorf("CONVERT_TZ %s shifted the instant: %v != %v", c.zone, tv, utc)
+		}
+		if tv.Hour() != c.wantHour {
+			t.Errorf("CONVERT_TZ %s hour = %d, want %d", c.zone, tv.Hour(), c.wantHour)
+		}
+	}
+
+	// FROM_TZ reinterprets a zone-less (UTC-assumed) wall time as local, shifting
+	// the instant. 10:15 as -07:00 is 17:15Z.
+	naive, _ := parseTime("2024-03-01 10:15:00")
+	got, err := fr.Lookup("FROM_TZ")([]Value{TimeVal(naive), StringVal("-07:00")})
+	if err != nil {
+		t.Fatalf("FROM_TZ: %v", err)
+	}
+	if !got.V.(time.Time).Equal(utc) {
+		t.Errorf("FROM_TZ(10:15, -07:00) = %v, want instant %v", got, utc)
+	}
+
+	// Unknown zone is an error.
+	if _, err := fr.Lookup("CONVERT_TZ")([]Value{TimeVal(utc), StringVal("Mars/Olympus")}); err == nil {
+		t.Error("CONVERT_TZ with bogus zone: expected error")
+	}
+}

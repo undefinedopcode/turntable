@@ -221,6 +221,15 @@ Run `.functions` in the REPL for the live list.
 | `AGE(ts1, ts2)` | duration `ts1 - ts2` (one-arg form returns `ts1`) |
 | `TO_TIMESTAMP(epoch)` | time from unix epoch seconds |
 | `STRFTIME(format, ts)` | format a timestamp — **format is the first arg**; accepts strftime `%Y/%m/%d…` specifiers or a Go layout |
+| `CONVERT_TZ(ts, zone)` | render an instant in `zone` (same instant, display/`EXTRACT` become zone-local) |
+| `FROM_TZ(ts, zone)` | treat a timestamp's wall-clock as local time in `zone`, yielding the correct instant — use to fix a zone-less timestamp the parser read as UTC |
+
+`zone` is an IANA name (`'America/Los_Angeles'`, DST-aware via embedded tzdata)
+or a fixed offset (`'-07:00'`, `'-0700'`, `'+05:30'`, `'Z'`). Timestamps are
+compared by **instant**, so values that carry an offset (including non-colon
+`-0700` and space-separated forms) sort/compare correctly across zones with no
+conversion; a zone-less literal is assumed UTC (apply `FROM_TZ` if it is really
+local).
 
 ### Conditional / null
 

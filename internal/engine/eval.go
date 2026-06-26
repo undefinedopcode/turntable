@@ -459,6 +459,14 @@ func castWithMode(v Value, typ string, strict bool) (Value, error) {
 func parseTime(s string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano, time.RFC3339,
+		// Numeric offsets without a colon (-0700) and space-separated offsets,
+		// which RFC3339 does not accept but appear in CLF/syslog-style data.
+		"2006-01-02T15:04:05.999999999Z0700",
+		"2006-01-02T15:04:05Z0700",
+		"2006-01-02 15:04:05.999999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05Z0700",
+		"2006-01-02 15:04:05 -0700",
 		"2006-01-02 15:04:05",
 		"2006-01-02 15:04:05.999999",
 		"2006-01-02T15:04:05",
