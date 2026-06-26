@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/april/turntable/internal/sql"
 )
 
 // ---------- token model ----------
@@ -450,6 +452,16 @@ func sanitize(s string) string {
 	return s
 }
 
+// safeIdent keeps a generated column name out of the SQL dialect's reserved
+// words, so it can be referenced bare in a query (e.g. a field named after the
+// literal "in" or "count" becomes "in_"/"count_"). The user can still rename it.
+func safeIdent(name string) string {
+	for sql.IsKeyword(name) {
+		name += "_"
+	}
+	return name
+}
+
 func nameFor(tmpl []string, tk Token, idx int) string {
 	if tk.Name != "" {
 		return sanitize(tk.Name)
@@ -633,7 +645,7 @@ func emit(tmpl []string, toks []Token) (string, []Column, []string) {
 			continue
 		}
 		tk := sl.toks[0]
-		name := uniq(sanitize(nameFor(tmpl, tk, sl.tIdx)))
+		name := uniq(safeIdent(sanitize(nameFor(tmpl, tk, sl.tIdx))))
 		frag, typ := groupRegex(tk, name)
 		frags = append(frags, frag)
 		cols = append(cols, Column{name, typ})

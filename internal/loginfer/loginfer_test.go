@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/april/turntable/internal/sql"
 )
 
 // Every emitted pattern must parse its own sample line and yield groups matching
@@ -132,6 +134,49 @@ func TestBucketStem(t *testing.T) {
 	} {
 		if got := bucketStem(in); got != want {
 			t.Errorf("bucketStem(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInferAvoidsReservedNames(t *testing.T) {
+	// The token after the literal "in" would be named "in" — a SQL keyword. The
+	// name pass must steer it clear so it can be queried bare.
+	lines := strings.Split(`task done in 5s
+task done in 9s
+task done in 2s`, "\n")
+	tpls := Infer(lines)
+	if len(tpls) != 1 {
+		t.Fatalf("templates = %d, want 1: %+v", len(tpls), tpls)
+	}
+	for _, tpl := range tpls {
+		for _, c := range tpl.Columns {
+			if sql.IsKeyword(c.Name) {
+				t.Errorf("column %q is a reserved word", c.Name)
+			}
+		}
+	}
+	// The collision specifically becomes "in_".
+	found := false
+	for _, c := range tpls[0].Columns {
+		if c.Name == "in_" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an 'in_' column, got %+v", tpls[0].Columns)
+	}
+}
+
+func TestSafeIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		"in":     "in_",
+		"count":  "count_",
+		"order":  "order_",
+		"worker": "worker", // not reserved
+		"msg":    "msg",
+	} {
+		if got := safeIdent(in); got != want {
+			t.Errorf("safeIdent(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

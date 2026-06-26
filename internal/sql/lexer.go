@@ -46,6 +46,13 @@ var keywords = map[string]bool{
 	"EXISTS": true,
 }
 
+// IsKeyword reports whether s (case-insensitively) is a reserved dialect word —
+// i.e. a bare column named s would lex as a keyword, not an identifier. Used to
+// steer generated column names away from collisions.
+func IsKeyword(s string) bool {
+	return keywords[strings.ToUpper(s)]
+}
+
 // Lex tokenizes src into a slice of Tokens, including a trailing TKEOF.
 // This is a stub suitable for the skeleton; the full scanner is implemented
 // in the v0.1 milestone.
