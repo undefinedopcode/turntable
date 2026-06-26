@@ -85,7 +85,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       <div className="editor">
         <CodeMirror
           value={value}
-          height="120px"
+          height="100%"
           theme="dark"
           placeholder="SELECT * FROM … LIMIT 10"
           basicSetup={{

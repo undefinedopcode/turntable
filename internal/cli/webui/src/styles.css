@@ -48,7 +48,7 @@ header .tag {
 }
 main {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 240px 6px 1fr;
   min-height: 0;
 }
 aside {
@@ -105,11 +105,55 @@ aside h2 {
 }
 .work {
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: 160px 6px 1fr;
   min-height: 0;
+  min-width: 0;
+}
+.query-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .editor {
+  flex: 1;
+  min-height: 0;
   padding: 12px 16px 0;
+}
+
+/* ---- resizable splitters ---- */
+.gutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--border);
+  transition: background 0.12s;
+}
+.gutter:hover,
+.gutter:active {
+  background: var(--accent2);
+}
+.gutter-col {
+  cursor: col-resize;
+}
+.gutter-row {
+  cursor: row-resize;
+}
+.gutter-grip {
+  background: var(--muted);
+  border-radius: 2px;
+  opacity: 0.5;
+}
+.gutter-col .gutter-grip {
+  width: 2px;
+  height: 26px;
+}
+.gutter-row .gutter-grip {
+  width: 26px;
+  height: 2px;
+}
+.gutter:hover .gutter-grip {
+  opacity: 0.9;
 }
 textarea {
   width: 100%;
@@ -370,6 +414,7 @@ details.add[open] > summary {
 
 /* ---- CodeMirror editor ---- */
 .editor .cm-editor {
+  height: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;

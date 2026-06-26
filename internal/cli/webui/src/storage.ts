@@ -81,6 +81,17 @@ export function saveLastQuery(q: string): void {
   write(LAST_KEY, q);
 }
 
+// loadPaneSize / savePaneSize persist a resizable pane's pixel size (sidebar
+// width, query-pane height) so the layout survives a reload.
+export function loadPaneSize(key: string, fallback: number): number {
+  const n = read<number>("tt.pane." + key, fallback);
+  return typeof n === "number" && isFinite(n) ? n : fallback;
+}
+
+export function savePaneSize(key: string, px: number): void {
+  write("tt.pane." + key, px);
+}
+
 // relTime renders a short "2m ago" style label for a timestamp.
 export function relTime(ts: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
