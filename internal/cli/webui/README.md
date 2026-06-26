@@ -39,7 +39,8 @@ webui/
   queries (localStorage). The editor content is restored on reload.
 - **Results** — click-to-sort columns, a row filter, click a cell to copy (or
   expand a JSON cell), export to CSV/JSON/NDJSON or copy as TSV, and a **Chart**
-  view (category + numeric column → bars).
+  view — Chart.js (bar / line / area / scatter / pie) with an X-axis column and
+  multiple toggleable numeric Y series, themed to the dark UI.
 
 ## Develop
 

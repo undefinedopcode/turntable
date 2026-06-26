@@ -251,9 +251,18 @@ kbd {
   font-size: 11px;
 }
 .results {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 0 16px 16px;
   min-height: 0;
+}
+/* The table scrolls inside its own wrapper so the result-bar stays put and the
+   chart view can flex to fill the remaining height. */
+.table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 .banner {
   margin: 4px 0 12px;
@@ -467,10 +476,8 @@ details.add[open] > summary {
   align-items: center;
   gap: 10px;
   padding: 8px 0 10px;
-  position: sticky;
-  top: 0;
   background: var(--bg);
-  z-index: 2;
+  flex-shrink: 0;
 }
 .filter {
   background: var(--panel2);
@@ -536,21 +543,27 @@ td.json {
 
 /* ---- Chart ---- */
 .chart {
-  padding: 4px 0 12px;
-}
-.chart-axes {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-.chart-axes label {
-  font-size: 11px;
-  color: var(--muted);
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 10px;
+  padding: 4px 0 4px;
 }
-.chart-axes select {
+.chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+}
+.chart-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.chart-field select {
   background: var(--panel2);
   color: var(--fg);
   border: 1px solid var(--border);
@@ -558,40 +571,41 @@ td.json {
   padding: 4px 8px;
   font-size: 12px;
 }
-.bars {
-  display: grid;
-  gap: 4px;
+.seg button {
+  text-transform: capitalize;
 }
-.bar-row {
-  display: grid;
-  grid-template-columns: 140px 1fr 70px;
-  align-items: center;
-  gap: 8px;
+.y-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  background: var(--panel2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
   font-size: 12px;
-}
-.bar-label {
   font-family: ui-monospace, Menlo, monospace;
+  cursor: pointer;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
 }
-.bar-track {
-  background: var(--panel2);
-  border-radius: 4px;
-  height: 16px;
-  overflow: hidden;
-}
-.bar-fill {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent2), var(--accent));
-  border-radius: 4px;
-}
-.bar-value {
-  text-align: right;
-  font-family: ui-monospace, Menlo, monospace;
+.chip:hover {
+  border-color: var(--accent2);
   color: var(--fg);
+}
+.chip.on {
+  background: var(--accent2);
+  border-color: var(--accent2);
+  color: #fff;
+}
+.chart-canvas {
+  flex: 1;
+  min-height: 240px;
+  position: relative;
 }
 
 /* ---- Sidebar: search, preview, history, saved ---- */

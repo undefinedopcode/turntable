@@ -166,30 +166,32 @@ export function Results({ result }: { result: QueryResult | null }) {
       {view === "chart" ? (
         <Chart columns={cols} rows={rows} />
       ) : (
-        <table>
-          <thead>
-            <tr>
-              {cols.map((c, i) => (
-                <th key={c.name} onClick={() => onSort(i)} title="click to sort">
-                  {c.name}
-                  <span className="ty">{c.type}</span>
-                  {sortCol === i && (
-                    <span className="arrow">{sortDir === "asc" ? " ▲" : " ▼"}</span>
-                  )}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i}>
-                {row.map((cell, j) => (
-                  <Td key={j} cell={cell} onClick={() => onCell(cell)} />
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                {cols.map((c, i) => (
+                  <th key={c.name} onClick={() => onSort(i)} title="click to sort">
+                    {c.name}
+                    <span className="ty">{c.type}</span>
+                    {sortCol === i && (
+                      <span className="arrow">{sortDir === "asc" ? " ▲" : " ▼"}</span>
+                    )}
+                  </th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  {row.map((cell, j) => (
+                    <Td key={j} cell={cell} onClick={() => onCell(cell)} />
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <Modal open={expand !== null} title="cell" onClose={() => setExpand(null)}>
