@@ -43,14 +43,69 @@ const PALETTE = [
   "#9aa7ff",
 ];
 const GRID = "rgba(138,147,167,0.12)";
-const MAX_POINTS = 500;
+const RAW_CAP = 500; // points plotted when not aggregating
+const GROUP_CAP = 100; // groups (bars/slices) kept when aggregating
 
 type ChartType = "bar" | "line" | "area" | "scatter" | "pie";
 const TYPES: ChartType[] = ["bar", "line", "area", "scatter", "pie"];
 
-const toNum = (v: Cell) => (typeof v === "number" ? v : Number(v));
+type Agg = "none" | "count" | "sum" | "avg" | "min" | "max";
+const AGGS: Agg[] = ["none", "count", "sum", "avg", "min", "max"];
+
 const labelOf = (v: Cell) => (v === null || v === undefined ? "NULL" : String(v));
 const alpha = (hex: string, a: string) => hex + a;
+
+// numOrNull extracts a finite number, or null for null/blank/non-numeric cells
+// (NB: Number(null) is 0, so a naive cast would wrongly count/sum nulls).
+function numOrNull(v: Cell): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyAgg(nums: number[], fn: Agg): number | null {
+  if (fn === "count") return nums.length;
+  if (nums.length === 0) return null; // empty group → gap (SQL-like NULL)
+  switch (fn) {
+    case "sum":
+      return nums.reduce((a, b) => a + b, 0);
+    case "avg":
+      return nums.reduce((a, b) => a + b, 0) / nums.length;
+    case "min":
+      return Math.min(...nums);
+    case "max":
+      return Math.max(...nums);
+    default:
+      return null;
+  }
+}
+
+// aggregate groups rows by the X column (first-seen order) and reduces each Y
+// series within a group. Counts non-null numeric values; sum/avg/min/max ignore
+// non-numeric cells. Reports the total group count so the UI can flag capping.
+function aggregate(rows: Cell[][], xIdx: number, series: number[], fn: Agg) {
+  const order: string[] = [];
+  const index = new Map<string, number>();
+  const acc: number[][][] = []; // acc[group][seriesPos] = numbers
+  for (const r of rows) {
+    const key = labelOf(r[xIdx]);
+    let gi = index.get(key);
+    if (gi === undefined) {
+      gi = order.length;
+      index.set(key, gi);
+      order.push(key);
+      acc.push(series.map(() => []));
+    }
+    series.forEach((si, k) => {
+      const v = numOrNull(r[si]);
+      if (v !== null) acc[gi][k].push(v);
+    });
+  }
+  const labels = order.slice(0, GROUP_CAP);
+  const values = series.map((_, k) => labels.map((_, gi) => applyAgg(acc[gi][k], fn)));
+  return { labels, values, total: order.length };
+}
 
 export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) {
   const numeric = useMemo(
@@ -62,6 +117,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   );
 
   const [type, setType] = useState<ChartType>("bar");
+  const [agg, setAgg] = useState<Agg>("none");
   const [xIdx, setXIdx] = useState(0);
   const [ySel, setYSel] = useState<number[]>([]);
 
@@ -75,9 +131,15 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   if (ys.length === 0) ys = numericIdx.filter((i) => i !== x).slice(0, 1);
   // Pie shows a single series.
   const series = type === "pie" ? ys.slice(0, 1) : ys;
+  // Aggregation doesn't apply to a scatter (point) plot.
+  const grouping = agg !== "none" && !isScatter;
 
-  const data = useMemo(() => rows.slice(0, MAX_POINTS), [rows]);
-  const labels = useMemo(() => data.map((r) => labelOf(r[x])), [data, x]);
+  const rawRows = useMemo(() => rows.slice(0, RAW_CAP), [rows]);
+  const grouped = useMemo(
+    () => (grouping ? aggregate(rows, x, series, agg) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, x, agg, grouping, series.join(",")],
+  );
 
   if (numeric.length === 0) {
     return (
@@ -90,6 +152,12 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
 
   const toggleY = (i: number) =>
     setYSel((s) => (s.includes(i) ? s.filter((v) => v !== i) : [...s, i]));
+
+  const chartLabels = grouped ? grouped.labels : rawRows.map((r) => labelOf(r[x]));
+  const valuesOf = (k: number): (number | null)[] =>
+    grouped ? grouped.values[k] : rawRows.map((r) => numOrNull(r[series[k]]));
+  const seriesName = (idx: number) =>
+    grouping ? `${agg}(${columns[idx]?.name})` : (columns[idx]?.name ?? "");
 
   const baseOptions: ChartOptions<"bar"> = {
     responsive: true,
@@ -111,13 +179,13 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
 
   let chart;
   if (type === "pie") {
-    const idx = series[0];
     const pieData = {
-      labels,
+      labels: chartLabels,
       datasets: [
         {
-          data: data.map((r) => toNum(r[idx])),
-          backgroundColor: labels.map((_, i) => PALETTE[i % PALETTE.length]),
+          label: seriesName(series[0]),
+          data: valuesOf(0),
+          backgroundColor: chartLabels.map((_, i) => PALETTE[i % PALETTE.length]),
           borderColor: "#171a21",
           borderWidth: 1,
         },
@@ -133,7 +201,9 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     const scatterData = {
       datasets: series.map((idx, k) => ({
         label: `${columns[idx]?.name} × ${columns[x]?.name}`,
-        data: data.map((r) => ({ x: toNum(r[x]), y: toNum(r[idx]) })),
+        data: rawRows
+          .map((r) => ({ x: numOrNull(r[x]), y: numOrNull(r[idx]) }))
+          .filter((p): p is { x: number; y: number } => p.x !== null && p.y !== null),
         backgroundColor: PALETTE[k % PALETTE.length],
       })),
     };
@@ -153,12 +223,12 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     const filled = type === "area";
     const isLine = type === "line" || filled;
     const chartData = {
-      labels,
+      labels: chartLabels,
       datasets: series.map((idx, k) => {
         const color = PALETTE[k % PALETTE.length];
         return {
-          label: columns[idx]?.name ?? "",
-          data: data.map((r) => toNum(r[idx])),
+          label: seriesName(idx),
+          data: valuesOf(k),
           borderColor: color,
           backgroundColor: isLine ? (filled ? alpha(color, "33") : color) : alpha(color, "cc"),
           borderWidth: 2,
@@ -196,6 +266,18 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
             ))}
           </select>
         </label>
+        {!isScatter && (
+          <label className="chart-field">
+            aggregate
+            <select value={agg} onChange={(e) => setAgg(e.target.value as Agg)}>
+              {AGGS.map((a) => (
+                <option key={a} value={a}>
+                  {a === "none" ? "none (raw rows)" : a}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="chart-field">
           {type === "pie" ? "value" : "y series"}
           <div className="y-chips">
@@ -217,10 +299,14 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
 
       <div className="chart-canvas">{chart}</div>
 
-      {(rows.length > MAX_POINTS || (type === "pie" && ys.length > 1)) && (
+      {((grouped && grouped.total > GROUP_CAP) ||
+        (!grouping && rows.length > RAW_CAP) ||
+        (type === "pie" && ys.length > 1)) && (
         <div className="hint" style={{ padding: "4px 2px" }}>
-          {rows.length > MAX_POINTS &&
-            `showing first ${MAX_POINTS} of ${rows.length} rows — add a tighter LIMIT or aggregate. `}
+          {grouped && grouped.total > GROUP_CAP &&
+            `showing first ${GROUP_CAP} of ${grouped.total} groups. `}
+          {!grouping && rows.length > RAW_CAP &&
+            `showing first ${RAW_CAP} of ${rows.length} rows — aggregate or add a tighter LIMIT. `}
           {type === "pie" && ys.length > 1 && "pie shows a single series."}
         </div>
       )}

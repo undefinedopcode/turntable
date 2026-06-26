@@ -219,7 +219,8 @@ default. The UI has a CodeMirror editor (SQL highlighting + source/column/
 function autocomplete), query history + saved queries + last-query restore
 (localStorage, `storage.ts`), and a results pane with client-side sort/filter,
 cell copy/JSON-expand, CSV/JSON/NDJSON export (`export.ts`), and a Chart.js chart
-view (`Chart.tsx`: bar/line/area/scatter/pie, X column + multi-series Y toggles).
+view (`Chart.tsx`: bar/line/area/scatter/pie, X column + multi-series Y toggles +
+client-side group-by-X aggregation count/sum/avg/min/max).
 The frontend is a **React + Vite + TypeScript** app under
 `internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via
 `//go:embed all:webui/dist` and served with `http.FileServerFS`. `go build`
