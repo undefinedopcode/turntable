@@ -40,7 +40,9 @@ webui/
 - **Results** — click-to-sort columns, a row filter, click a cell to copy (or
   expand a JSON cell), export to CSV/JSON/NDJSON or copy as TSV, and a **Chart**
   view — Chart.js (bar / line / area / scatter / pie) with an X-axis column,
-  multiple toggleable numeric Y series, and an optional group-by-X aggregation
+  multiple toggleable numeric Y series, an optional **series-by** breakdown
+  (one series per distinct value of a category column — e.g. amount over time
+  split by customer), and an optional group-by-X aggregation
   (count / sum / avg / min / max), themed to the dark UI.
 
 ## Develop
