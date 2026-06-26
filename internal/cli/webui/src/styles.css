@@ -14,6 +14,29 @@
 * {
   box-sizing: border-box;
 }
+/* Dark-theme scrollbars (Firefox/standard + WebKit). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 7px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4150;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 html,
 body,
 #root {
@@ -119,6 +142,16 @@ aside h2 {
   flex: 1;
   min-height: 0;
   padding: 12px 16px 0;
+  display: flex;
+  flex-direction: column;
+}
+/* The @uiw/react-codemirror wrapper div — stretch it (and the editor inside)
+   to fill the available height so a short query still uses the whole pane. */
+.editor > * {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---- resizable splitters ---- */
@@ -414,7 +447,8 @@ details.add[open] > summary {
 
 /* ---- CodeMirror editor ---- */
 .editor .cm-editor {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
