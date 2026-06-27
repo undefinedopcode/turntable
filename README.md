@@ -2,7 +2,8 @@
 
 Query heterogeneous data sources — JSON, CSV, YAML, Excel, Parquet, SQL
 databases, HTTP/REST APIs, Linear, Trello, Azure DevOps Boards, AWS CloudWatch,
-DynamoDB, and Azure Table Storage — using a single SQL-style query language.
+DynamoDB, Azure Table Storage, and AWS Athena — using a single SQL-style query
+language.
 
 > **Status:** v0.4. File connectors (JSON, CSV, YAML, Excel, Parquet), SQL
 > databases (with predicate/limit/order pushdown via `database/sql`), and
@@ -528,6 +529,39 @@ Scans are read-only and paginated with bounded memory. Filtering and ordering
 run in the engine (no predicate pushdown into DynamoDB yet), so a `LIMIT`
 without a `WHERE` is fetched lazily, but a `WHERE` reads the table to filter in
 memory — scope queries accordingly on large tables.
+
+### AWS Athena
+
+The `athena` connector queries Athena tables (Presto/Trino over S3, catalogued
+in Glue). Athena is itself a SQL engine, so turntable pushes the projection,
+`WHERE`, `ORDER BY`, and `LIMIT` down as SQL — important because Athena bills by
+data scanned. Schema discovery is free (it reads the Glue catalog); only a
+`SELECT` runs a billed query.
+
+```yaml
+sources:
+  hits:
+    connector: athena
+    table: page_hits          # or "db.table"; "*" registers every table in the database
+    options:
+      database: web_analytics
+      output_location: s3://my-athena-results/staging/   # required unless the workgroup sets one
+      region: us-east-1
+      # catalog: AwsDataCatalog
+      # workgroup: primary
+```
+
+```bash
+turntable -c turntable.yaml 'SELECT path, COUNT(*) c FROM hits WHERE day = '"'"'2026-06-01'"'"' GROUP BY path ORDER BY c DESC LIMIT 10'
+
+# in the REPL — one table, or every table in the database
+turntable> .use hits athena table=page_hits database=web_analytics output_location=s3://my-athena-results/staging/ region=us-east-1
+turntable> .use db athena table=* database=web_analytics output_location=s3://my-athena-results/staging/ region=us-east-1
+```
+
+Credentials come from the standard AWS chain (env, shared config, `profile`,
+instance role). Push down a partition predicate (e.g. on `day`) to keep scans —
+and cost — small.
 
 ### Azure Table Storage
 

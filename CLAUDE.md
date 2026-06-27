@@ -188,6 +188,18 @@ interfaces:
     (Azure Table Storage) supports two auth paths — `connection_string`, or
     `account`/`endpoint` for Azure AD via `DefaultAzureCredential` — and
     translates predicates to an OData `$filter` (`translateOData`).
+    `athenac` is the odd one in this family: Athena *is* a SQL engine
+    (Presto/Trino over S3, Glue catalog), so it pushes projection/predicate
+    (`translateExpr`, Presto-flavored — double-quote idents, no ILIKE)/ORDER BY/
+    LIMIT down as SQL (`buildQuery`) rather than filtering in memory. Schema is
+    free via the Glue catalog (`GetTableMetadata`/`ListTableMetadata`, no query);
+    only `Scan` runs a billed query — async: `StartQueryExecution` → poll
+    `GetQueryExecution` → page `GetQueryResults` (whose first page carries a
+    header row the iterator skips; cells are strings typed by the schema). Uses
+    aws-sdk-go-**v2** like the other AWS connectors (not a `database/sql` driver,
+    deliberately — that avoids dragging in aws-sdk-go v1). `table="*"` expands
+    every table in the Athena `database` via `expandAthenaTables`. Needs an
+    `output_location` (S3) unless the `workgroup` sets one.
     **Predicate/Limit/OrderBy pushdown:** wired in the planner. For a
     single-table scan (no joins), `buildSelect` sets `Scan.Predicate` (the
     WHERE); `Scan.Limit` when safe (no ORDER BY / aggregate / OFFSET); and

@@ -12,6 +12,7 @@ import (
 
 	"github.com/april/turntable/internal/config"
 	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/connector/connectors/athenac"
 	"github.com/april/turntable/internal/connector/connectors/azdevopsc"
 	"github.com/april/turntable/internal/connector/connectors/aztablesc"
 	"github.com/april/turntable/internal/connector/connectors/claudelogsc"
@@ -75,6 +76,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(cwmetricsc.New())
 	_ = reg.RegisterConnector(dynamodbc.New())
 	_ = reg.RegisterConnector(aztablesc.New())
+	_ = reg.RegisterConnector(athenac.New())
 	_ = reg.RegisterConnector(trelloc.New())
 	_ = reg.RegisterConnector(azdevopsc.New())
 	_ = reg.RegisterConnector(claudelogsc.New())
@@ -208,14 +210,19 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 	if src.Connector == "excel" && src.Sheet == "*" {
 		return a.expandExcelSheets(ctx, name, src.Path, opts)
 	}
-	// DynamoDB / Azure Tables: table names a table; table="*" expands to every
-	// table in the account, each registered under its own name.
-	if src.Connector == "dynamodb" || src.Connector == "azuretables" {
+	// DynamoDB / Azure Tables / Athena: table names a table; table="*" expands to
+	// every table (in the account, or the Athena database), each registered under
+	// its own name.
+	if src.Connector == "dynamodb" || src.Connector == "azuretables" || src.Connector == "athena" {
 		if src.Table == "*" {
-			if src.Connector == "dynamodb" {
+			switch src.Connector {
+			case "dynamodb":
 				return a.expandDynamoTables(ctx, name, opts)
+			case "azuretables":
+				return a.expandAzureTables(ctx, name, opts)
+			default:
+				return a.expandAthenaTables(ctx, name, opts)
 			}
-			return a.expandAzureTables(ctx, name, opts)
 		}
 		table := src.Table
 		if table == "" {
@@ -319,6 +326,30 @@ func (a *App) expandAzureTables(ctx context.Context, name string, opts map[strin
 	}
 	if len(registered) == 0 {
 		return nil, fmt.Errorf("source %q: account has no tables", name)
+	}
+	return registered, nil
+}
+
+// expandAthenaTables enumerates the tables in an Athena database (Glue catalog)
+// and registers each one under its own name, mirroring expandDynamoTables.
+func (a *App) expandAthenaTables(ctx context.Context, name string, opts map[string]any) ([]string, error) {
+	datasets, err := athenac.New().DatasetsFor(ctx, connector.Dataset{Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, athenac.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: database has no Athena tables", name)
 	}
 	return registered, nil
 }

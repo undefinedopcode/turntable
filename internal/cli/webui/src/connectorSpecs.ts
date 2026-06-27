@@ -120,6 +120,18 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     ],
   },
   {
+    name: "athena",
+    label: "AWS Athena",
+    fields: [
+      { key: "table", label: "Table", required: true, placeholder: "table (or db.table, or * for every table)" },
+      { key: "database", label: "Database", placeholder: "Glue database (default: default)" },
+      { key: "output_location", label: "Output location", placeholder: "s3://bucket/prefix/ (required unless workgroup sets one)" },
+      { key: "region", label: "Region", placeholder: "us-east-1" },
+      { key: "workgroup", label: "Workgroup", placeholder: "primary" },
+      { key: "catalog", label: "Catalog", placeholder: "AwsDataCatalog" },
+    ],
+  },
+  {
     name: "azuretables",
     label: "Azure Table Storage",
     fields: [
