@@ -410,7 +410,7 @@ details.add[open] > summary {
   z-index: 100;
 }
 .modal {
-  width: 440px;
+  width: min(640px, 94vw);
   max-width: 100%;
   max-height: 84vh;
   overflow: auto;
@@ -702,6 +702,8 @@ td.json {
   background: var(--panel2);
   display: grid;
   gap: 8px;
+  max-height: 48vh;
+  overflow-y: auto;
 }
 .infer-banner {
   font-size: 12px;
@@ -738,13 +740,30 @@ td.json {
 .tpl.sel {
   border-color: var(--accent);
 }
+.tpl.common {
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
 .tpl-head {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+.tpl-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bg);
+  background: var(--ok);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 .tpl-label {
   flex: 1;
+  min-width: 0;
   font-size: 11.5px;
   color: var(--fg);
   overflow: hidden;

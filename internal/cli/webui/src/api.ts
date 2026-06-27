@@ -95,6 +95,7 @@ export interface InferTemplate {
   columns: InferColumn[];
   sample: string[];
   sample_line: string;
+  common?: boolean; // the synthesized "matches all rows" catch-all
 }
 
 export interface LoginferResult {

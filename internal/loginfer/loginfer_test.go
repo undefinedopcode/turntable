@@ -181,6 +181,56 @@ func TestSafeIdent(t *testing.T) {
 	}
 }
 
+func TestCommonTemplateCatchAll(t *testing.T) {
+	// A regular log whose first token (file) and message vary, so the miner
+	// over-splits — but all lines share <word> <TS> <NUM> <LEVEL> <word> <MSG>.
+	// A single "common" catch-all should be synthesized and offered first.
+	lines := strings.Split(`api.log 2017-05-16 00:00:00.008 25746 INFO nova.api started serving on 0.0.0.0
+compute.log 2017-05-16 00:01:02.100 25800 WARNING nova.compute claiming resources for instance abc
+scheduler.log 2017-05-16 00:02:03.200 25900 INFO nova.scheduler selected host n3 for build request
+api.log 2017-05-16 00:03:04.300 25746 INFO nova.api returning 200 for GET /servers in 0.12s
+compute.log 2017-05-16 00:04:05.400 25800 INFO nova.compute spawned instance def on hypervisor`, "\n")
+	tpls := Infer(lines)
+	if len(tpls) == 0 {
+		t.Fatal("no templates")
+	}
+	if !tpls[0].Common {
+		t.Fatalf("first template should be the common catch-all, got %+v", tpls[0])
+	}
+	if tpls[0].Count != 5 {
+		t.Errorf("common count = %d, want 5 (all rows)", tpls[0].Count)
+	}
+	assertPatternValid(t, tpls[0])
+	// It must capture the shared header (time, level) plus a message, and the
+	// pattern must match every line.
+	re := regexp.MustCompile(tpls[0].Pattern)
+	for _, ln := range lines {
+		if re.FindStringSubmatch(ln) == nil {
+			t.Errorf("common pattern did not match: %q", ln)
+		}
+	}
+	names := make([]string, len(tpls[0].Columns))
+	for i, c := range tpls[0].Columns {
+		names[i] = c.Name
+	}
+	joined := strings.Join(names, ",")
+	if !strings.Contains(joined, "time") || !strings.Contains(joined, "level") || !strings.Contains(joined, "message") {
+		t.Errorf("common columns = %v, want time/level/message", names)
+	}
+}
+
+func TestCommonTemplateSkippedWhenMinerCovers(t *testing.T) {
+	// When one mined template already covers everything, no redundant catch-all.
+	lines := strings.Split(`svc done in 12ms ok=true
+svc done in 7ms ok=true
+svc done in 40ms ok=false`, "\n")
+	for _, tpl := range Infer(lines) {
+		if tpl.Common {
+			t.Errorf("did not expect a common catch-all here: %+v", tpl)
+		}
+	}
+}
+
 func TestRenameColumn(t *testing.T) {
 	pat := `^(?P<time>\S+) (?P<pkg>\S+)$`
 	got := RenameColumn(pat, "pkg", "package")

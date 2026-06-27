@@ -546,6 +546,9 @@ type Template struct {
 	Columns    []Column `json:"columns"`
 	Sample     []string `json:"sample"`
 	SampleLine string   `json:"sample_line"`
+	// Common marks the synthesized "matches (almost) all rows" template — the
+	// shared leading structure with the variable tail as one message field.
+	Common bool `json:"common"`
 }
 
 // Infer mines the lines into templates and emits a regex + columns for each,
@@ -602,8 +605,131 @@ func Infer(lines []string) []Template {
 			SampleLine: repLine[c.id],
 		})
 	}
+	// Synthesize a single "matches (almost) all rows" template from the structure
+	// the lines share — the common case for regular logs (a fixed header + a
+	// free-form message tail) that the per-bucket miner over-splits. Offer it
+	// (first, since it covers the most) only when it covers a majority AND beats
+	// every mined template on coverage — i.e. when the miner over-split. If a
+	// single mined template already covers everything, the catch-all adds nothing.
+	bestMined := 0
+	for _, t := range out {
+		if t.Count > bestMined {
+			bestMined = t.Count
+		}
+	}
+	if tmpl, repToks, repLn, cov, ok := commonTemplate(lines); ok && cov > bestMined && cov*2 >= len(recs) {
+		if pat, cols, sample := emit(tmpl, repToks); pat != "" {
+			if re, err := regexp.Compile(pat); err == nil && re.FindStringSubmatch(repLn) != nil {
+				common := Template{
+					Label: strings.Join(tmpl, " "), Count: cov, Pattern: pat,
+					Columns: cols, Sample: sample, SampleLine: repLn, Common: true,
+				}
+				// Drop any mined template whose pattern the common one duplicates.
+				deduped := out[:0]
+				for _, t := range out {
+					if t.Pattern != pat {
+						deduped = append(deduped, t)
+					}
+				}
+				out = append([]Template{common}, deduped...)
+			}
+		}
+	}
+
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
 	return out
+}
+
+// commonTemplate finds the leading structure shared by (almost) all lines: the
+// longest run of positions where they agree on a token class — a fixed type
+// (<TS>/<NUM>/…), a constant literal, or "some single word" (a varying field) —
+// with everything after collapsed into <MSG>. This is the "all rows" pattern for
+// regular logs. It tolerates a minority of outliers (stack traces etc.); ok is
+// false when no broad common prefix exists. Returns the template, a
+// representative line's tokens + text, and how many lines it covers.
+func commonTemplate(lines []string) ([]string, []Token, string, int, bool) {
+	type rec struct {
+		raw  string
+		toks []Token
+	}
+	var recs []rec
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		recs = append(recs, rec{ln, tokenize(ln)})
+	}
+	total := len(recs)
+	if total == 0 {
+		return nil, nil, "", 0, false
+	}
+	classOf := func(t Token) string {
+		switch {
+		case t.Type != VNone:
+			return "t:" + string(t.Type)
+		case t.Name != "":
+			return "k:" + t.Name
+		default:
+			return "w" // a plain word (constant or varying)
+		}
+	}
+
+	active := make([]int, total)
+	for i := range active {
+		active[i] = i
+	}
+	var tmpl []string
+	for pos := 0; ; pos++ {
+		counts := map[string]int{}
+		for _, li := range active {
+			if pos < len(recs[li].toks) {
+				counts[classOf(recs[li].toks[pos])]++
+			}
+		}
+		dom, domN := "", 0
+		for c, n := range counts {
+			if n > domN {
+				dom, domN = c, n
+			}
+		}
+		// Stop once the shared structure no longer covers most lines.
+		if domN*100 < total*85 {
+			break
+		}
+		var next []int
+		sameVal, first, firstVal := true, true, ""
+		for _, li := range active {
+			if pos < len(recs[li].toks) && classOf(recs[li].toks[pos]) == dom {
+				next = append(next, li)
+				v := recs[li].toks[pos].Value
+				if first {
+					firstVal, first = v, false
+				} else if v != firstVal {
+					sameVal = false
+				}
+			}
+		}
+		active = next
+		rep := recs[active[0]].toks[pos]
+		switch {
+		case dom == "w" && sameVal:
+			tmpl = append(tmpl, rep.Raw) // constant word → literal anchor
+		case dom == "w":
+			tmpl = append(tmpl, "<*>") // varying word → field
+		default:
+			tmpl = append(tmpl, rep.Masked) // typed / key=value
+		}
+	}
+	if len(tmpl) == 0 {
+		return nil, nil, "", 0, false
+	}
+	for _, li := range active {
+		if len(recs[li].toks) > len(tmpl) {
+			tmpl = append(tmpl, "<MSG>")
+			break
+		}
+	}
+	return tmpl, recs[active[0]].toks, recs[active[0]].raw, len(active), true
 }
 
 // emit turns a template (aligned to a representative line's tokens) into a regex

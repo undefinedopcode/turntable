@@ -309,11 +309,12 @@ function InferPanel({
         {analysis.templates.map((t, i) => (
           <div
             key={i}
-            className={`tpl ${selected === i ? "sel" : ""}`}
+            className={`tpl ${selected === i ? "sel" : ""} ${t.common ? "common" : ""}`}
             onClick={() => onSelect(i)}
           >
             <div className="tpl-head">
               <input type="radio" checked={selected === i} readOnly />
+              {t.common && <span className="tpl-badge">all rows</span>}
               <code className="tpl-label">{t.label}</code>
               <span className="tpl-count">×{t.count}</span>
             </div>
