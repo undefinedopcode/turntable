@@ -214,8 +214,12 @@ environment variables (`${VAR}`, `${VAR:-default}`):
 sources:
   warehouse:
     connector: sql
-    driver: postgres          # or sqlite, mysql
+    driver: postgres          # or sqlite, mysql, sqlserver
     dsn: "postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:5432/analytics"
+  reporting:
+    connector: sql
+    driver: sqlserver
+    dsn: "sqlserver://${MSSQLUSER}:${MSSQLPASSWORD}@${MSSQLHOST}:1433?database=reporting"
   inventory:
     connector: sql
     driver: sqlite

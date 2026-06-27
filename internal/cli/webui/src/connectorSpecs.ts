@@ -65,8 +65,8 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     name: "sql",
     label: "SQL database",
     fields: [
-      { key: "driver", label: "Driver", type: "select", options: ["sqlite", "postgres", "mysql"], required: true },
-      { key: "dsn", label: "DSN", required: true, placeholder: "./data.db  |  postgres://user:pass@host/db" },
+      { key: "driver", label: "Driver", type: "select", options: ["sqlite", "postgres", "mysql", "sqlserver"], required: true },
+      { key: "dsn", label: "DSN", required: true, placeholder: "./data.db  |  postgres://user:pass@host/db  |  sqlserver://user:pass@host?database=db" },
       { key: "table", label: "Table", placeholder: "table name (or * for every table)" },
     ],
   },

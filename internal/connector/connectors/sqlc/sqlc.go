@@ -13,9 +13,10 @@ import (
 	"github.com/april/turntable/internal/engine"
 	oparseSQL "github.com/april/turntable/internal/sql"
 
-	_ "github.com/go-sql-driver/mysql" // registers the "mysql" driver
-	_ "github.com/lib/pq"              // registers the "postgres" driver
-	_ "modernc.org/sqlite"             // pure-Go SQLite driver; v0.2 default
+	_ "github.com/go-sql-driver/mysql"  // registers the "mysql" driver
+	_ "github.com/lib/pq"               // registers the "postgres" driver
+	_ "github.com/microsoft/go-mssqldb" // registers the "sqlserver" driver
+	_ "modernc.org/sqlite"              // pure-Go SQLite driver; v0.2 default
 )
 
 // Connector implements a database/sql connector.
@@ -180,9 +181,54 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 		return nil, err
 	}
 
-	// Build the query.
+	query := buildScanQuery(req, table, dial)
+
+	schema, err := discoverSchema(ctx, db, table, dial)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("query: %w", err)
+	}
+
+	cols := req.Columns
+	if len(cols) == 0 {
+		cols = schemaColumnNames(schema)
+	}
+	return &rowIter{db: db, rows: rows, schema: schema, columns: cols}, nil
+}
+
+// buildScanQuery renders the SELECT for a scan, applying whatever pushdown is
+// safe. It is pure (no DB), so the SQL shape — per-dialect quoting and the
+// LIMIT-vs-TOP rendering — is unit-testable.
+//
+// Predicate pushdown is resolved up front: translation may fail (an unsupported
+// expression → the WHERE is omitted and the engine filters in memory), and only
+// a predicate applied in-DB *exactly* (predicateExact) lets the row limit be
+// pushed — an inexact LIKE still filters as a superset the engine refines, but
+// must not gate the limit, or the DB could drop matching rows the engine has not
+// seen. This is decided before building the SELECT because SQL Server expresses
+// the limit as a leading TOP (n), ahead of the column list.
+func buildScanQuery(req connector.ScanRequest, table tableRef, dial dialect) string {
+	whereClause, wherePushed := "", false
+	predicateHandled := req.Predicate == nil
+	if req.Predicate != nil {
+		if where, ok := translateExpr(req.Predicate, dial); ok {
+			whereClause, wherePushed = where, true
+			predicateHandled = predicateExact(req.Predicate, dial)
+		}
+	}
+	pushLimit := req.Limit != nil && predicateHandled
+
 	var b strings.Builder
 	b.WriteString("SELECT ")
+	if pushLimit && dial.usesTop() {
+		fmt.Fprintf(&b, "TOP (%d) ", *req.Limit)
+	}
 	if len(req.Columns) == 0 {
 		b.WriteString("*")
 	} else {
@@ -195,21 +241,8 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 	}
 	fmt.Fprintf(&b, " FROM %s", table.quoted(dial))
 
-	// Try to push down the predicate. If translation fails (e.g. contains an
-	// unsupported function or expression), we omit the WHERE clause and let the
-	// engine filter in memory. predicateHandled tracks whether the full
-	// predicate made it into the query — only then is it safe to push LIMIT.
-	// predicateHandled means the WHERE was applied in-DB *exactly* — only then is
-	// LIMIT safe to push. A predicate may translate yet be inexact (a LIKE whose
-	// case-sensitivity the dialect can't reproduce): it still filters as a
-	// superset (the engine refines it), but pushing LIMIT could drop rows the
-	// engine hasn't seen, so it is withheld in that case.
-	predicateHandled := req.Predicate == nil
-	if req.Predicate != nil {
-		if where, ok := translateExpr(req.Predicate, dial); ok {
-			fmt.Fprintf(&b, " WHERE %s", where)
-			predicateHandled = predicateExact(req.Predicate, dial)
-		}
+	if wherePushed {
+		fmt.Fprintf(&b, " WHERE %s", whereClause)
 	}
 
 	if len(req.OrderBy) > 0 {
@@ -225,29 +258,11 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 		}
 	}
 
-	// Push LIMIT only when the predicate was fully applied in-DB; otherwise the
-	// engine must see every matching row before limiting.
-	if req.Limit != nil && predicateHandled {
+	// A trailing LIMIT for engines that use it (SQL Server used TOP above).
+	if pushLimit && !dial.usesTop() {
 		fmt.Fprintf(&b, " LIMIT %d", *req.Limit)
 	}
-
-	schema, err := discoverSchema(ctx, db, table, dial)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	rows, err := db.QueryContext(ctx, b.String())
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("query: %w", err)
-	}
-
-	cols := req.Columns
-	if len(cols) == 0 {
-		cols = schemaColumnNames(schema)
-	}
-	return &rowIter{db: db, rows: rows, schema: schema, columns: cols}, nil
+	return b.String()
 }
 
 func schemaColumnNames(schema engine.Schema) []string {
@@ -641,6 +656,9 @@ func translateExpr(e oparseSQL.Expr, d dialect) (string, bool) {
 		return fmt.Sprintf("%s IS NULL", v), true
 
 	case *oparseSQL.LikeExpr:
+		if !d.pushesLike() {
+			return "", false
+		}
 		v, ok := translateExpr(ex.Expr, d)
 		if !ok {
 			return "", false
@@ -719,21 +737,43 @@ func dialectFor(driver string) dialect {
 // token as a string literal unless ANSI_QUOTES is set, so double-quoting a
 // column there would select a constant string, not the column.)
 func (d dialect) quoteIdent(s string) string {
-	if d.driver == "mysql" {
+	switch d.driver {
+	case "mysql":
 		return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+	case "sqlserver", "mssql":
+		// SQL Server uses [bracket] quoting; a literal ] is doubled.
+		return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
+	default:
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 	}
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // placeholder returns the bind placeholder for the n-th parameter (1-based).
-// Postgres (lib/pq, pgx) uses $1, $2, ...; sqlite and mysql use ?.
+// Postgres (lib/pq, pgx) uses $1, $2, ...; SQL Server uses @p1, @p2, ...; sqlite
+// and mysql use ?.
 func (d dialect) placeholder(n int) string {
 	switch d.driver {
 	case "postgres", "pgx":
 		return fmt.Sprintf("$%d", n)
+	case "sqlserver", "mssql":
+		return fmt.Sprintf("@p%d", n)
 	default:
 		return "?"
 	}
+}
+
+// usesTop reports whether a row limit is expressed as a leading SELECT TOP (n)
+// (SQL Server) rather than a trailing LIMIT n.
+func (d dialect) usesTop() bool {
+	return d.driver == "sqlserver" || d.driver == "mssql"
+}
+
+// pushesLike reports whether LIKE/ILIKE predicates may be pushed to the server.
+// SQL Server's LIKE case-sensitivity is collation-dependent and not knowable
+// here, so pushing it could drop rows the engine must see (the pushdown must be
+// a superset). We therefore keep LIKE in the engine for SQL Server.
+func (d dialect) pushesLike() bool {
+	return !(d.driver == "sqlserver" || d.driver == "mssql")
 }
 
 // likeOp returns the SQL operator for an engine LIKE/ILIKE. The engine's LIKE is

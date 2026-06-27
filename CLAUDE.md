@@ -153,13 +153,18 @@ interfaces:
     `isFileConnector`.
   - **SQL** (`sqlc`): pushes `WHERE`/`ORDER BY`/`LIMIT` into the DB via
     `database/sql`; discovers schema via `PRAGMA`/`information_schema`/`DESCRIBE`.
-    Three drivers are compiled in (blank imports in `sqlc.go`): `sqlite`
+    Four drivers are compiled in (blank imports in `sqlc.go`): `sqlite`
     (`modernc.org/sqlite`, pure Go), `postgres` (`lib/pq`), `mysql`
-    (`go-sql-driver/mysql`). A `dialect` (in `sqlc.go`, keyed by driver name)
-    abstracts the two things that actually differ per engine: identifier
-    quoting (`quoteIdent` — backticks for MySQL, double quotes otherwise) and
-    bind placeholders (`placeholder` — `$N` for Postgres, `?` otherwise). Thread
-    the dialect through any new query-building code; do **not** hardcode quoting.
+    (`go-sql-driver/mysql`), `sqlserver` (`microsoft/go-mssqldb`). A `dialect`
+    (in `sqlc.go`, keyed by driver name) abstracts the per-engine differences:
+    identifier quoting (`quoteIdent` — backticks MySQL, `[brackets]` SQL Server,
+    double quotes otherwise), bind placeholders (`placeholder` — `$N` Postgres,
+    `@pN` SQL Server, `?` otherwise), and row-limit syntax (`usesTop` — SQL
+    Server prepends `SELECT TOP (n)`, others append `LIMIT n`). `pushesLike`
+    withholds LIKE/ILIKE pushdown for SQL Server (collation-dependent
+    case-sensitivity could drop rows the engine must see). `buildScanQuery` is
+    the pure (DB-free, unit-tested) query renderer. Thread the dialect through
+    any new query-building code; do **not** hardcode quoting/placeholders/limits.
   - **URL/API** (`httpc`, `linearc`, `trelloc`, `cwlogsc`, `cwmetricsc`,
     `dynamodbc`, `aztablesc`): locate data by a URL and/or option keys (no local
     path). All reach the network through a small injected client interface so
