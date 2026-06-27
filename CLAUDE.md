@@ -32,8 +32,12 @@ go test -run TestParseSelect ./internal/sql   # run a single test by name
 go vet ./...                      # vet
 
 # SQL connector integration tests against real servers (embedded Postgres +
-# in-process go-mysql-server). Gated behind a build tag so the default suite
-# stays pure-Go; the Postgres case downloads a server binary on first run.
+# in-process go-mysql-server + a SQL Server Docker container). Gated behind a
+# build tag so the default suite stays pure-Go; the Postgres case downloads a
+# server binary on first run. The SQL Server case needs Docker (no embeddable
+# pure-Go server) and skips when the daemon is absent — set TURNTABLE_MSSQL_DSN
+# to target an existing server instead, or TURNTABLE_MSSQL_IMAGE to pick the
+# image. First run pulls a ~1.5 GB image, so use a generous -timeout.
 go test -tags integration ./internal/connector/connectors/sqlc/
 # IMPORTANT: those deps are only referenced from integration-tagged files, so a
 # plain `go mod tidy` PRUNES them. Always tidy with the tag:
