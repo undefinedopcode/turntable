@@ -272,6 +272,14 @@ func TestNewStringFunctions(t *testing.T) {
 		{"RPAD", []Value{StringVal("5"), IntVal(3), StringVal("-")}, StringVal("5--")},
 		{"REGEXP_REPLACE", []Value{StringVal("phone: 555"), StringVal("[0-9]+"), StringVal("X")}, StringVal("phone: X")},
 		{"LEFT", []Value{Null(), IntVal(3)}, Null()},
+		// REGEXP_EXTRACT: default first group, explicit group, whole match, misses.
+		{"REGEXP_EXTRACT", []Value{StringVal("status: 200 len: 5"), StringVal(`status: (\d+)`)}, StringVal("200")},
+		{"REGEXP_EXTRACT", []Value{StringVal("status: 200"), StringVal(`status: (\d+)`), IntVal(1)}, StringVal("200")},
+		{"REGEXP_EXTRACT", []Value{StringVal("status: 200"), StringVal(`status: (\d+)`), IntVal(0)}, StringVal("status: 200")},
+		{"REGEXP_EXTRACT", []Value{StringVal("no match here"), StringVal(`x(\d+)`)}, Null()},
+		{"REGEXP_EXTRACT", []Value{StringVal("abc 42"), StringVal(`(\d+)`), IntVal(5)}, Null()}, // group out of range
+		{"REGEXP_EXTRACT", []Value{Null(), StringVal(`(\d+)`)}, Null()},
+		{"REGEXP_MATCHES", []Value{StringVal("a1b2"), StringVal(`(\d)`)}, StringVal("1")}, // alias still works
 	}
 	for _, c := range cases {
 		fn := fr.Lookup(c.name)

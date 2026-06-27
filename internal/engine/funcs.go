@@ -6,12 +6,29 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	// Embed the IANA time-zone database so CONVERT_TZ/FROM_TZ resolve named
 	// zones (e.g. "America/Los_Angeles") without relying on system zoneinfo,
 	// which may be absent (minimal containers, Windows). Pure Go, no CGO.
 	_ "time/tzdata"
 )
+
+// reCache memoizes compiled patterns so the REGEXP_* functions (called once per
+// row, usually with a constant literal pattern) don't recompile every call.
+var reCache sync.Map // pattern string -> *regexp.Regexp
+
+func compileRe(pattern string) (*regexp.Regexp, error) {
+	if v, ok := reCache.Load(pattern); ok {
+		return v.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	reCache.Store(pattern, re)
+	return re, nil
+}
 
 // ScalarFunc is a scalar SQL function implementation. It receives the
 // already-evaluated argument values and returns a result. Returning an error
@@ -91,6 +108,7 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("SPLIT_PART", funcSplitPart)
 	r.Register("REGEXP_REPLACE", funcRegexpReplace)
 	r.Register("REGEXP_MATCHES", funcRegexpMatches)
+	r.Register("REGEXP_EXTRACT", funcRegexpExtract)
 	r.Register("REPEAT", funcRepeat)
 	r.Register("REVERSE", funcReverse)
 	r.Register("INITCAP", funcInitcap)
@@ -420,7 +438,7 @@ func funcRegexpReplace(args []Value) (Value, error) {
 	if args[0].IsNull() {
 		return Null(), nil
 	}
-	re, err := regexp.Compile(args[1].AsString())
+	re, err := compileRe(args[1].AsString())
 	if err != nil {
 		return Value{}, fmt.Errorf("REGEXP_REPLACE: %v", err)
 	}
@@ -442,18 +460,46 @@ func funcRegexpMatches(args []Value) (Value, error) {
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("REGEXP_MATCHES expects 2 args")
 	}
-	if args[0].IsNull() {
+	return funcRegexpExtract(args)
+}
+
+// funcRegexpExtract pulls a substring out of a string by regular expression.
+// REGEXP_EXTRACT(s, pattern)        -> the first capturing group, or the whole
+//
+//	match if the pattern has no group (NULL if no match)
+//
+// REGEXP_EXTRACT(s, pattern, group) -> the n-th group (0 = whole match);
+//
+//	NULL if no match or the group is out of range / didn't participate.
+func funcRegexpExtract(args []Value) (Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("REGEXP_EXTRACT expects 2 or 3 args (string, pattern[, group])")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
 		return Null(), nil
 	}
-	re, err := regexp.Compile(args[1].AsString())
+	re, err := compileRe(args[1].AsString())
 	if err != nil {
-		return Value{}, fmt.Errorf("REGEXP_MATCHES: %v", err)
+		return Value{}, fmt.Errorf("REGEXP_EXTRACT: %v", err)
 	}
 	m := re.FindStringSubmatch(args[0].AsString())
 	if m == nil {
 		return Null(), nil
 	}
-	// Return the first capture group, or the whole match if none.
+	if len(args) == 3 {
+		if args[2].IsNull() {
+			return Null(), nil
+		}
+		g, ok := args[2].AsInt()
+		if !ok || g < 0 {
+			return Value{}, fmt.Errorf("REGEXP_EXTRACT: group must be a non-negative integer")
+		}
+		if int(g) >= len(m) {
+			return Null(), nil
+		}
+		return StringVal(m[g]), nil
+	}
+	// Default: the first capturing group, or the whole match if none.
 	if len(m) > 1 {
 		return StringVal(m[1]), nil
 	}

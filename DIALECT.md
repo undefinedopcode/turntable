@@ -200,8 +200,9 @@ Run `.functions` in the REPL for the live list.
 | `REVERSE(s)` | reverse |
 | `STRPOS(s, sub)` / `INSTR(s, sub)` | 1-based index of `sub`, 0 if absent |
 | `SPLIT_PART(s, delim, n)` | the `n`-th field (1-based) |
-| `REGEXP_REPLACE(s, pattern, repl[, flags])` | regex replace |
-| `REGEXP_MATCHES(s, pattern)` | true if `s` matches the regex |
+| `REGEXP_REPLACE(s, pattern, repl[, flags])` | regex replace (`repl` uses `$1`/`${name}` group refs; `flags` `'g'` = all) |
+| `REGEXP_EXTRACT(s, pattern[, group])` | pull a substring out by regex: with `group` the n-th capture (0 = whole match), else the first capturing group (or the whole match if the pattern has none); NULL on no match. Returns a string — wrap in `CAST(… AS int/float)` to compute on it |
+| `REGEXP_MATCHES(s, pattern)` | alias of the 2-arg `REGEXP_EXTRACT` |
 
 ### Numeric
 
