@@ -327,6 +327,11 @@ func (p *Parser) parseSelectList() ([]SelectItem, error) {
 					return nil, p.errf("expected alias after AS")
 				}
 				item.As = t.Value
+			} else if p.cur().Kind == TKIdent {
+				// Implicit alias: `<expr> alias` (no AS). A bare identifier here
+				// can only be an alias — keywords (FROM/WHERE/…) and `,` end the
+				// item, so they are not consumed.
+				item.As = p.advance().Value
 			}
 			items = append(items, item)
 		}

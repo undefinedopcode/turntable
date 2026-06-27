@@ -28,6 +28,41 @@ func TestParseSelectBasic(t *testing.T) {
 	}
 }
 
+func TestParseImplicitAlias(t *testing.T) {
+	// `<expr> alias` without AS, including on an aggregate before FROM.
+	stmt, err := Parse("SELECT lvl x, COUNT(*) c FROM t GROUP BY lvl ORDER BY c DESC")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	s := stmt.(*SelectStmt)
+	if len(s.Items.Items) != 2 {
+		t.Fatalf("select list len = %d, want 2", len(s.Items.Items))
+	}
+	if s.Items.Items[0].As != "x" {
+		t.Errorf("item0 alias = %q, want x", s.Items.Items[0].As)
+	}
+	if s.Items.Items[1].As != "c" {
+		t.Errorf("item1 alias = %q, want c", s.Items.Items[1].As)
+	}
+	if s.From.Name != "t" {
+		t.Errorf("from = %q, want t (FROM must not be grabbed as an alias)", s.From.Name)
+	}
+	// A bare column with no alias must not swallow the following keyword.
+	s2 := mustParseSelect(t, "SELECT a FROM t")
+	if s2.Items.Items[0].As != "" || s2.From.Name != "t" {
+		t.Errorf("bare column: alias=%q from=%q", s2.Items.Items[0].As, s2.From.Name)
+	}
+}
+
+func mustParseSelect(t *testing.T, q string) *SelectStmt {
+	t.Helper()
+	stmt, err := Parse(q)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", q, err)
+	}
+	return stmt.(*SelectStmt)
+}
+
 func TestParseQualifiedRef(t *testing.T) {
 	stmt, err := Parse("SELECT * FROM csv:./data/sales.csv")
 	if err != nil {
