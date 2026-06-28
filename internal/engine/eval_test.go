@@ -254,6 +254,33 @@ func TestEvalExtract(t *testing.T) {
 	}
 }
 
+func TestNullif(t *testing.T) {
+	fr := NewFuncRegistry()
+	cases := []struct {
+		a, b Value
+		want Value
+	}{
+		{IntVal(5), IntVal(5), Null()},    // equal -> NULL
+		{IntVal(5), IntVal(3), IntVal(5)}, // unequal -> a
+		{StringVal("x"), StringVal("x"), Null()},
+		{IntVal(5), FloatVal(5), Null()}, // cross-type numeric equality
+		{Null(), IntVal(1), Null()},      // a NULL -> a (NULL)
+		{IntVal(1), Null(), IntVal(1)},   // b NULL -> a
+	}
+	for _, c := range cases {
+		got, err := fr.Lookup("NULLIF")([]Value{c.a, c.b})
+		if err != nil {
+			t.Fatalf("NULLIF(%v,%v): %v", c.a, c.b, err)
+		}
+		if got != c.want {
+			t.Errorf("NULLIF(%v,%v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+	if _, err := fr.Lookup("NULLIF")([]Value{IntVal(1)}); err == nil {
+		t.Error("NULLIF with 1 arg: expected an error")
+	}
+}
+
 func TestNewStringFunctions(t *testing.T) {
 	fr := NewFuncRegistry()
 	cases := []struct {
@@ -284,8 +311,8 @@ func TestNewStringFunctions(t *testing.T) {
 		{"EXTRACT_VALUE", []Value{StringVal("GET /x status: 200 len: 5"), StringVal("status")}, StringVal("200")},
 		{"EXTRACT_VALUE", []Value{StringVal("level=info user=alice"), StringVal("level")}, StringVal("info")},
 		{"EXTRACT_VALUE", []Value{StringVal(`level=info note="hello world" n=1`), StringVal("note")}, StringVal("hello world")},
-		{"EXTRACT_VALUE", []Value{StringVal("a: 1 b: 2"), StringVal("zzz")}, Null()},        // missing key
-		{"EXTRACT_VALUE", []Value{StringVal("xlen: 5"), StringVal("len")}, Null()},          // key only as a substring
+		{"EXTRACT_VALUE", []Value{StringVal("a: 1 b: 2"), StringVal("zzz")}, Null()},               // missing key
+		{"EXTRACT_VALUE", []Value{StringVal("xlen: 5"), StringVal("len")}, Null()},                 // key only as a substring
 		{"EXTRACT_VALUE", []Value{StringVal("k=1,j=2,status: 9"), StringVal("j")}, StringVal("2")}, // comma-separated
 		{"EXTRACT_VALUE", []Value{Null(), StringVal("k")}, Null()},
 	}

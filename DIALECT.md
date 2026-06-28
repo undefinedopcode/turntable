@@ -239,7 +239,8 @@ local).
 
 | Function | Result |
 |----------|--------|
-| `COALESCE(a, b, …)` | first non-NULL argument |
+| `COALESCE(a, b, …)` | first non-NULL argument (the NVL / IFNULL equivalent) |
+| `NULLIF(a, b)` | NULL when `a = b`, else `a` (e.g. `COALESCE(NULLIF(qty, 0), 1)` to treat 0 as absent) |
 
 ### Aggregates
 

@@ -81,6 +81,7 @@ func Aggregates() []string {
 
 func (r *FuncRegistry) registerDefaults() {
 	r.Register("COALESCE", funcCoalesce)
+	r.Register("NULLIF", funcNullif)
 	r.Register("LOWER", funcLower)
 	r.Register("UPPER", funcUpper)
 	r.Register("LENGTH", funcLength)
@@ -135,6 +136,20 @@ func funcCoalesce(args []Value) (Value, error) {
 		}
 	}
 	return Null(), nil
+}
+
+// funcNullif implements NULLIF(a, b) = CASE WHEN a = b THEN NULL ELSE a END:
+// NULL when both are non-NULL and compare equal, otherwise a (so a NULL `a`, or a
+// NULL `b` with non-NULL `a`, both yield a — matching SQL's `a = b` being unknown
+// in those cases).
+func funcNullif(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("NULLIF expects 2 args (value, value)")
+	}
+	if !args[0].IsNull() && !args[1].IsNull() && Compare(args[0], args[1]) == 0 {
+		return Null(), nil
+	}
+	return args[0], nil
 }
 
 func funcLower(args []Value) (Value, error) {
