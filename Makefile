@@ -8,6 +8,14 @@ BINARY := turntable
 WEBUI  := internal/cli/webui
 GO     := go
 NPM    := npm
+PANDOC := pandoc
+
+# Documentation rendering (DIALECT.md -> HTML/PDF via pandoc).
+DOCS_DIR := docs
+DOCS_CSS := $(DOCS_DIR)/style.css
+# First available pandoc PDF engine, in preference order (typst/weasyprint are
+# the lightest to install on Arch); empty when none is present.
+PDF_ENGINE := $(firstword $(foreach e,typst weasyprint wkhtmltopdf tectonic xelatex lualatex pdflatex prince,$(if $(shell command -v $(e) 2>/dev/null),$(e))))
 
 .DEFAULT_GOAL := help
 
@@ -60,6 +68,46 @@ tidy:
 .PHONY: examples
 examples:
 	./examples/run.sh
+
+# ---- documentation -----------------------------------------------------------
+
+## docs: render DIALECT.md to HTML (and PDF if a pandoc PDF engine is installed)
+.PHONY: docs
+docs: docs-html
+	@if [ -n "$(PDF_ENGINE)" ]; then $(MAKE) docs-pdf; else \
+	  echo "docs: skipping PDF — no pandoc PDF engine found."; \
+	  echo "      install one to enable it, e.g.: pacman -S typst   (lightest)"; fi
+
+## docs-html: render DIALECT.md to a standalone, styled docs/DIALECT.html
+.PHONY: docs-html
+docs-html: $(DOCS_DIR)/DIALECT.html
+
+$(DOCS_DIR)/DIALECT.html: DIALECT.md $(DOCS_CSS)
+	$(PANDOC) DIALECT.md \
+	  --standalone --embed-resources --toc --toc-depth=3 \
+	  --metadata title="Turntable SQL Dialect Reference" \
+	  --highlight-style=tango --css $(DOCS_CSS) -o $@
+	@echo "wrote $@"
+
+## docs-pdf: render DIALECT.md to docs/DIALECT.pdf (needs a pandoc PDF engine)
+.PHONY: docs-pdf
+docs-pdf: DIALECT.md
+	@if [ -z "$(PDF_ENGINE)" ]; then \
+	  echo "docs-pdf: no pandoc PDF engine found. Install one, e.g.:"; \
+	  echo "  pacman -S typst              # lightest, recommended"; \
+	  echo "  pacman -S python-weasyprint  # CSS-based, honors docs/style.css"; \
+	  exit 1; fi
+	$(PANDOC) DIALECT.md \
+	  --toc --toc-depth=3 \
+	  --metadata title="Turntable SQL Dialect Reference" \
+	  --highlight-style=tango --pdf-engine=$(PDF_ENGINE) \
+	  -o $(DOCS_DIR)/DIALECT.pdf
+	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE))"
+
+## clean-docs: remove generated docs (keeps docs/style.css)
+.PHONY: clean-docs
+clean-docs:
+	rm -f $(DOCS_DIR)/DIALECT.html $(DOCS_DIR)/DIALECT.pdf
 
 # ---- web UI ------------------------------------------------------------------
 

@@ -18,3 +18,7 @@ coverage.txt
 # web UI build tooling (the built dist/ IS committed so `go build` needs no Node)
 internal/cli/webui/node_modules/
 internal/cli/webui/*.tsbuildinfo
+
+# generated docs (run `make docs`; docs/style.css is the only committed file)
+docs/DIALECT.html
+docs/DIALECT.pdf
