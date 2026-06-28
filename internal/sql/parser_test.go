@@ -739,3 +739,18 @@ func TestParseTableFunc(t *testing.T) {
 		t.Errorf("alias = %q, want g", s.From.Alias)
 	}
 }
+
+func TestParseColumnAliases(t *testing.T) {
+	s := mustParseSelect(t, "SELECT k, v FROM (SELECT a, b FROM t) AS s(k, v)")
+	if got := s.From.ColAliases; len(got) != 2 || got[0] != "k" || got[1] != "v" {
+		t.Fatalf("ColAliases = %v, want [k v]", got)
+	}
+	if s.From.Alias != "s" {
+		t.Errorf("alias = %q, want s", s.From.Alias)
+	}
+	// The list also attaches to a table function alias.
+	s = mustParseSelect(t, "SELECT n FROM generate_series(1, 3) AS g(n)")
+	if got := s.From.ColAliases; len(got) != 1 || got[0] != "n" {
+		t.Errorf("table-func ColAliases = %v, want [n]", got)
+	}
+}

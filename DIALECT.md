@@ -44,10 +44,11 @@ or non-equality join conditions are not yet supported (put extra predicates in
 ### Table functions (`generate_series`)
 
 `FROM generate_series(start, stop[, step])` produces a one-column relation
-(column `value`) — an **integer** series, or a **timestamp** series when
-`start`/`stop` are timestamps and `step` is an `INTERVAL`. `stop` is inclusive;
-`step` may be negative. The main use is **gap-filling** a time series — LEFT JOIN
-the dense series against your data so missing periods still produce a row:
+(column `value`, renameable with a column-alias list — see below) — an
+**integer** series, or a **timestamp** series when `start`/`stop` are timestamps
+and `step` is an `INTERVAL`. `stop` is inclusive; `step` may be negative. The main
+use is **gap-filling** a time series — LEFT JOIN the dense series against your
+data so missing periods still produce a row:
 
 ```sql
 SELECT d.value AS day, COALESCE(SUM(m.v), 0) AS total
@@ -57,6 +58,18 @@ LEFT JOIN (SELECT DATE_TRUNC('day', ts) AS day, v FROM metrics) AS m
        ON m.day = d.value
 GROUP BY d.value
 ORDER BY day
+```
+
+### Column aliases
+
+Any source — base table, derived table, or table function — may rename its
+columns with a parenthesized list after the table alias: `AS alias(c1, c2, …)`.
+The names are assigned left to right and may be fewer than the source's columns
+(trailing columns keep their names); supplying more is an error. Handy for
+renaming `generate_series`'s `value`:
+
+```sql
+SELECT day FROM generate_series(1, 7) AS g(day)
 ```
 
 ### Common table expressions (`WITH`)
@@ -393,7 +406,6 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 Subqueries together with `GROUP BY` / aggregates / window functions in one query
 (a decorrelated `EXISTS` is the exception — it composes with `GROUP BY`),
-recursive CTEs (`WITH RECURSIVE`), parenthesized set-op grouping, column-list
-aliases (`t(a, b)` — alias the table, then reference its existing column names),
-the `GROUPS` window-frame unit (`ROWS`/`RANGE` are supported), non-equality /
-compound join conditions, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
+recursive CTEs (`WITH RECURSIVE`), parenthesized set-op grouping, the `GROUPS`
+window-frame unit (`ROWS`/`RANGE` are supported), non-equality / compound join
+conditions, and DML/DDL. See `DESIGN.md` §11 for the roadmap.

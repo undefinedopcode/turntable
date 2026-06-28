@@ -88,9 +88,10 @@ type TableRef struct {
 	Source string
 	Name   string
 
-	Subquery Statement // when FROM (SELECT ... [UNION ...]) AS alias; a *SelectStmt or *SetOpStmt
-	Func     *FuncCall // when FROM f(args) — a table (set-returning) function, e.g. generate_series
-	Alias    string
+	Subquery   Statement // when FROM (SELECT ... [UNION ...]) AS alias; a *SelectStmt or *SetOpStmt
+	Func       *FuncCall // when FROM f(args) — a table (set-returning) function, e.g. generate_series
+	Alias      string
+	ColAliases []string // optional column-rename list: AS alias(c1, c2, …)
 }
 
 // Join is a join clause.

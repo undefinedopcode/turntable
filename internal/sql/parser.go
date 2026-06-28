@@ -404,7 +404,40 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 		// implicit alias
 		tr.Alias = p.advance().Value
 	}
+	// Optional column-rename list: alias(c1, c2, …). Requires a table alias.
+	if p.op("(") {
+		if tr.Alias == "" {
+			return tr, p.errf("column alias list requires a table alias")
+		}
+		cols, err := p.parseColAliasList()
+		if err != nil {
+			return tr, err
+		}
+		tr.ColAliases = cols
+	}
 	return tr, nil
+}
+
+// parseColAliasList parses `(c1, c2, …)` of a column-rename list; the opening
+// paren is at the cursor.
+func (p *Parser) parseColAliasList() ([]string, error) {
+	p.advance() // (
+	var cols []string
+	for {
+		t := p.advance()
+		if t.Kind != TKIdent {
+			return nil, p.errf("expected column alias name")
+		}
+		cols = append(cols, t.Value)
+		if !p.op(",") {
+			break
+		}
+		p.advance()
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return cols, nil
 }
 
 // parseTableFunc parses the `(arg, …)` of a FROM-clause table function; the

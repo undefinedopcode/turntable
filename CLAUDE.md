@@ -80,7 +80,11 @@ A query moves through fixed stages, one package each:
    `INTERSECT`→`IntersectIter`, `EXCEPT`→`ExceptIter` (`*All` keep multiset
    multiplicity). A `Subquery` passes its child plan's rows through
    under an alias, so `resolverFor`/`baseRelation` treat it like a Scan for
-   column qualification. `buildWith` registers each CTE in `buildCtx.ctes`, then
+   column qualification. A column-alias list (`AS a(c1, c2, …)`,
+   `TableRef.ColAliases`) reuses this: `buildTableRef` wraps the built source
+   (via `buildTableRefRaw`) in a `Subquery` presenting the `renameColumns`'d
+   schema — positional, so it works for base tables (which lose pushdown when
+   renamed), derived tables, and table functions alike. `buildWith` registers each CTE in `buildCtx.ctes`, then
    `buildTableRef` resolves a bare name to a CTE (shadowing a registered source)
    before the registry, expanding it as a `Subquery` per reference (with a
    `visiting` guard rejecting recursion). Window functions (`f(...) OVER (...)`,

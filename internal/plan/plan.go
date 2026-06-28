@@ -714,8 +714,42 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 	return leftNode, schema, nil
 }
 
-// buildTableRef resolves a single FROM/JOIN table reference into a Scan node.
+// buildTableRef resolves a single FROM/JOIN table reference into a plan node,
+// applying an optional column-rename list (AS alias(c1, c2, …)) by presenting
+// the source's rows through a Subquery under the renamed schema. The rename is
+// positional, so it works uniformly for base tables, derived tables, and table
+// functions (a base table loses predicate pushdown when renamed, which is fine —
+// the engine re-applies the filter).
 func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string, error) {
+	node, schema, alias, err := bc.buildTableRefRaw(tr)
+	if err != nil || len(tr.ColAliases) == 0 {
+		return node, schema, alias, err
+	}
+	renamed, err := renameColumns(schema, tr.ColAliases)
+	if err != nil {
+		return nil, engine.Schema{}, "", fmt.Errorf("column aliases for %q: %w", alias, err)
+	}
+	return &Subquery{Child: node, Schema: renamed, Alias: alias}, renamed, alias, nil
+}
+
+// renameColumns returns a copy of schema with its leading columns renamed to
+// names (which must not outnumber the columns); trailing columns keep their
+// original names.
+func renameColumns(schema engine.Schema, names []string) (engine.Schema, error) {
+	if len(names) > len(schema.Columns) {
+		return engine.Schema{}, fmt.Errorf("%d column alias(es) but the source has %d column(s)", len(names), len(schema.Columns))
+	}
+	cols := make([]engine.Column, len(schema.Columns))
+	copy(cols, schema.Columns)
+	for i, n := range names {
+		cols[i].Name = n
+	}
+	return engine.Schema{Columns: cols}, nil
+}
+
+// buildTableRefRaw resolves a FROM/JOIN reference into a Scan/Subquery/TableFunc
+// node, before any column-rename list is applied.
+func (bc *buildCtx) buildTableRefRaw(tr sql.TableRef) (Node, engine.Schema, string, error) {
 	if tr.Func != nil {
 		return bc.buildTableFunc(tr)
 	}
