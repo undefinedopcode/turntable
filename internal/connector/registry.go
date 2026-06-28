@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/april/turntable/internal/sql"
 )
 
 // Registry maps logical table names to Connector + Dataset pairs, and to
@@ -16,6 +18,10 @@ type Registry struct {
 
 	// connectors maps short prefix (e.g. "csv") to a Connector instance.
 	connectors map[string]Connector
+
+	// views maps a view name to its defining query (CREATE VIEW). Views share the
+	// source namespace; the planner expands a referenced view inline.
+	views map[string]sql.Statement
 }
 
 // Source is a registry entry tying a logical name to a connector + dataset.
@@ -30,6 +36,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		sources:    make(map[string]Source),
 		connectors: make(map[string]Connector),
+		views:      make(map[string]sql.Statement),
 	}
 }
 
@@ -84,8 +91,64 @@ func (r *Registry) RegisterSource(name string, conn Connector, ds Dataset) error
 	if _, ok := r.sources[name]; ok {
 		return fmt.Errorf("source %q already registered", name)
 	}
+	if _, ok := r.views[name]; ok {
+		return fmt.Errorf("a view named %q already exists", name)
+	}
 	r.sources[name] = Source{Name: name, Conn: conn, Dataset: ds}
 	return nil
+}
+
+// RegisterView stores a view's defining query under name. It fails if a source
+// already uses the name, or if the view exists and replace is false.
+func (r *Registry) RegisterView(name string, query sql.Statement, replace bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.sources[name]; ok {
+		return fmt.Errorf("a source named %q already exists", name)
+	}
+	if _, ok := r.views[name]; ok && !replace {
+		return fmt.Errorf("view %q already exists (use CREATE OR REPLACE VIEW)", name)
+	}
+	r.views[name] = query
+	return nil
+}
+
+// View returns the defining query for a view name, or ok=false.
+func (r *Registry) View(name string) (sql.Statement, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	q, ok := r.views[name]
+	return q, ok
+}
+
+// HasView reports whether a view is registered under name.
+func (r *Registry) HasView(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.views[name]
+	return ok
+}
+
+// RemoveView unregisters a view, reporting whether it existed.
+func (r *Registry) RemoveView(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.views[name]; !ok {
+		return false
+	}
+	delete(r.views, name)
+	return true
+}
+
+// ViewNames returns the registered view names (unordered).
+func (r *Registry) ViewNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.views))
+	for name := range r.views {
+		out = append(out, name)
+	}
+	return out
 }
 
 // RemoveSource unregisters a logical name, reporting whether it existed. Used

@@ -169,9 +169,10 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Materialized-view statements are session commands, not row queries: handle
-	// them here (the plan/exec path does not support them) and return a notice.
-	if resp, ok := a.matViewResponse(r.Context(), stmt, req.Explain); ok {
+	// View statements (CREATE/REFRESH/DROP [MATERIALIZED] VIEW) are session
+	// commands, not row queries: handle them here (the plan/exec path does not
+	// support them) and return a notice.
+	if resp, ok := a.sessionStmtResponse(r.Context(), stmt, req.Explain); ok {
 		resp.ElapsedMs = time.Since(start).Milliseconds()
 		writeJSON(w, resp)
 		return
@@ -213,11 +214,12 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// matViewResponse handles a materialized-view session statement for the web API,
-// returning a filled queryResponse and true. For any other statement it returns
-// (zero, false) so the caller proceeds with the normal plan/exec path. Under
-// explain it returns the inner/stored query's plan instead of running anything.
-func (a *App) matViewResponse(ctx context.Context, stmt sql.Statement, explain bool) (queryResponse, bool) {
+// sessionStmtResponse handles a view session statement (regular or materialized)
+// for the web API, returning a filled queryResponse and true. For any other
+// statement it returns (zero, false) so the caller proceeds with the normal
+// plan/exec path. Under explain it returns the inner/stored query's plan instead
+// of running anything.
+func (a *App) sessionStmtResponse(ctx context.Context, stmt sql.Statement, explain bool) (queryResponse, bool) {
 	var notice string
 	var err error
 	switch s := stmt.(type) {
@@ -240,6 +242,16 @@ func (a *App) matViewResponse(ctx context.Context, stmt sql.Statement, explain b
 			return queryResponse{Notice: fmt.Sprintf("DROP MATERIALIZED VIEW %s (no plan)", s.Name)}, true
 		}
 		notice, err = a.dropMatViewCore(s)
+	case *sql.CreateViewStmt:
+		if explain {
+			return a.explainResponse(ctx, s.Query), true
+		}
+		notice, err = a.createViewCore(ctx, s)
+	case *sql.DropViewStmt:
+		if explain {
+			return queryResponse{Notice: fmt.Sprintf("DROP VIEW %s (no plan)", s.Name)}, true
+		}
+		notice, err = a.dropViewCore(s)
 	default:
 		return queryResponse{}, false
 	}
@@ -336,6 +348,9 @@ func (a *App) listSources(w http.ResponseWriter, r *http.Request) {
 	for _, s := range sources {
 		out = append(out, srcInfo{Name: s.Name, Connector: connectorName(s)})
 	}
+	for _, v := range a.Reg.ViewNames() {
+		out = append(out, srcInfo{Name: v, Connector: "view"})
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, out)
 }
@@ -379,6 +394,15 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("source")
 	s, ok := a.Reg.Resolve(name)
 	if !ok {
+		// A view has no connector; resolve its schema by planning the query.
+		if schema, isView, verr := a.viewSchemaFor(r.Context(), name); isView {
+			if verr != nil {
+				writeJSON(w, map[string]any{"error": verr.Error()})
+				return
+			}
+			a.writeSchemaJSON(w, name, schema)
+			return
+		}
 		http.Error(w, "unknown source", http.StatusNotFound)
 		return
 	}
@@ -387,6 +411,11 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
+	a.writeSchemaJSON(w, name, schema)
+}
+
+// writeSchemaJSON writes a source/view schema as the columns response.
+func (a *App) writeSchemaJSON(w http.ResponseWriter, name string, schema engine.Schema) {
 	cols := make([]apiColumn, len(schema.Columns))
 	for i, c := range schema.Columns {
 		cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}

@@ -72,16 +72,18 @@ type Subquery struct {
 	Alias  string
 }
 
-// CTERef references a materialized common table expression. Every reference to
-// the same CTE shares one *cteMaterialization, so the CTE's plan runs at most
-// once per query (the first reference pulled triggers it) and its rows are
-// replayed from an in-memory buffer for subsequent references — improving
-// performance when a CTE is used multiple times, and giving a consistent
-// snapshot across all references within the query. A CTERef is always wrapped in
-// a Subquery for per-reference column qualification.
+// CTERef references a materialized common table expression — or, when IsView is
+// set, a CREATE VIEW expanded the same way. Every reference to the same CTE/view
+// shares one *cteMaterialization, so its plan runs at most once per query (the
+// first reference pulled triggers it) and its rows are replayed from an in-memory
+// buffer for subsequent references — improving performance when used multiple
+// times, and giving a consistent snapshot across all references within the
+// query. A CTERef is always wrapped in a Subquery for per-reference column
+// qualification.
 type CTERef struct {
-	Name string
-	Mat  *cteMaterialization
+	Name   string
+	Mat    *cteMaterialization
+	IsView bool // a CREATE VIEW expansion rather than a WITH-clause CTE
 }
 
 // cteMaterialization is the shared, build-time plan plus exec-time row cache for
@@ -236,6 +238,9 @@ type buildCtx struct {
 	reg   *connector.Registry
 	funcs *engine.FuncRegistry
 	ctes  map[string]*cteEntry // WITH clause table expressions, by name
+	// viewMat caches each referenced view's materialization for this one build, so
+	// a view used several times in a query is planned/run once (see buildView).
+	viewMat map[string]*cteEntry
 }
 
 // cteEntry is a registered common table expression. visiting guards against a
@@ -385,6 +390,44 @@ func (bc *buildCtx) buildCTE(name, alias string) (Node, engine.Schema, error) {
 	}
 	return &Subquery{
 		Child:  &CTERef{Name: name, Mat: e.mat},
+		Schema: e.mat.Schema,
+		Alias:  alias,
+	}, e.mat.Schema, nil
+}
+
+// buildView expands a referenced view (CREATE VIEW) inline, mirroring buildCTE:
+// the view's query is planned once per build (cached in bc.viewMat) and every
+// reference shares the materialization, so a view used several times runs once
+// and presents a consistent snapshot — an externally-visible CTE. The view binds
+// in the global scope (sources + other views), not the referencing query's CTEs,
+// so the outer WITH clause is hidden while planning the view body. A self- or
+// cyclic reference is rejected via the visiting guard.
+func (bc *buildCtx) buildView(name string, query sql.Statement, alias string) (Node, engine.Schema, error) {
+	if bc.viewMat == nil {
+		bc.viewMat = map[string]*cteEntry{}
+	}
+	e := bc.viewMat[name]
+	if e == nil {
+		e = &cteEntry{query: query}
+		bc.viewMat[name] = e
+	}
+	if e.mat == nil {
+		if e.visiting {
+			return nil, engine.Schema{}, fmt.Errorf("view %q references itself (recursive views are not supported)", name)
+		}
+		e.visiting = true
+		savedCtes := bc.ctes // a view does not see the referencing query's CTEs
+		bc.ctes = nil
+		child, schema, err := bc.buildStatement(e.query)
+		bc.ctes = savedCtes
+		e.visiting = false
+		if err != nil {
+			return nil, engine.Schema{}, fmt.Errorf("view %q: %w", name, err)
+		}
+		e.mat = &cteMaterialization{Plan: child, Schema: schema}
+	}
+	return &Subquery{
+		Child:  &CTERef{Name: name, Mat: e.mat, IsView: true},
 		Schema: e.mat.Schema,
 		Alias:  alias,
 	}, e.mat.Schema, nil
@@ -839,7 +882,7 @@ func (bc *buildCtx) buildTableRefRaw(tr sql.TableRef) (Node, engine.Schema, stri
 		return &Subquery{Child: child, Schema: schema, Alias: alias}, schema, alias, nil
 	}
 	// A bare name may reference a WITH-clause CTE (which shadows a registered
-	// source of the same name).
+	// source or view of the same name).
 	if tr.Prefix == "" && tr.Name != "" && bc.ctes != nil {
 		if _, ok := bc.ctes[tr.Name]; ok {
 			alias := tr.Alias
@@ -847,6 +890,20 @@ func (bc *buildCtx) buildTableRefRaw(tr sql.TableRef) (Node, engine.Schema, stri
 				alias = tr.Name
 			}
 			node, schema, err := bc.buildCTE(tr.Name, alias)
+			if err != nil {
+				return nil, engine.Schema{}, "", err
+			}
+			return node, schema, alias, nil
+		}
+	}
+	// A bare name may reference a registered view, expanded inline like a CTE.
+	if tr.Prefix == "" && tr.Name != "" {
+		if q, ok := bc.reg.View(tr.Name); ok {
+			alias := tr.Alias
+			if alias == "" {
+				alias = tr.Name
+			}
+			node, schema, err := bc.buildView(tr.Name, q, alias)
 			if err != nil {
 				return nil, engine.Schema{}, "", err
 			}

@@ -495,6 +495,10 @@ func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet boo
 		return a.refreshMatView(ctx, s, explain, out, errw)
 	case *sql.DropMatViewStmt:
 		return a.dropMatView(s, explain, errw)
+	case *sql.CreateViewStmt:
+		return a.createView(ctx, s, explain, out, errw)
+	case *sql.DropViewStmt:
+		return a.dropView(s, explain, errw)
 	}
 
 	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
@@ -603,9 +607,13 @@ func formatPlan(n plan.Node, depth int) string {
 		return indent + "Subquery " + node.Alias + "\n" + formatPlan(node.Child, depth+1)
 	case *plan.CTERef:
 		// Every reference shares one materialization (run once, replayed); the
-		// [materialized] tag marks that, and the CTE's plan is shown under each
+		// [materialized] tag marks that, and the CTE/view plan is shown under each
 		// reference for readability.
-		line := indent + "CTE " + node.Name + " [materialized]"
+		kind := "CTE"
+		if node.IsView {
+			kind = "View"
+		}
+		line := indent + kind + " " + node.Name + " [materialized]"
 		if node.Mat != nil && node.Mat.Plan != nil {
 			return line + "\n" + formatPlan(node.Mat.Plan, depth+1)
 		}

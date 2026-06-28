@@ -89,17 +89,18 @@ func (p *Parser) errf(format string, args ...any) error {
 }
 
 // ParseStatement parses a single statement: a query (SELECT/UNION, optionally
-// preceded by a WITH clause) or a materialized-view command (CREATE/REFRESH/DROP
-// MATERIALIZED VIEW). The matview keywords are matched as bare words (not
-// reserved) so column names like "view" or "data" keep working.
+// preceded by a WITH clause) or a view command (CREATE [OR REPLACE] [MATERIALIZED]
+// VIEW, REFRESH MATERIALIZED VIEW, DROP [MATERIALIZED] VIEW). The view keywords
+// are matched as bare words (not reserved) so column names like "view" or "data"
+// keep working.
 func (p *Parser) ParseStatement() (Statement, error) {
 	switch {
 	case p.word("CREATE"):
-		return p.parseCreateMatView()
+		return p.parseCreate()
 	case p.word("REFRESH"):
 		return p.parseRefreshMatView()
 	case p.word("DROP"):
-		return p.parseDropMatView()
+		return p.parseDrop()
 	}
 	return p.parseQuery()
 }
@@ -116,13 +117,51 @@ func (p *Parser) parseQuery() (Statement, error) {
 	return p.parseSelectOrSetOp()
 }
 
-// parseCreateMatView parses
-// `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]`.
-func (p *Parser) parseCreateMatView() (Statement, error) {
+// parseCreate parses CREATE [OR REPLACE] [MATERIALIZED] VIEW …, dispatching to a
+// regular or materialized view. OR REPLACE applies only to regular views.
+func (p *Parser) parseCreate() (Statement, error) {
 	p.advance() // CREATE
-	if err := p.expectWord("MATERIALIZED"); err != nil {
+	orReplace := false
+	if p.word("OR") {
+		p.advance()
+		if err := p.expectWord("REPLACE"); err != nil {
+			return nil, err
+		}
+		orReplace = true
+	}
+	if p.word("MATERIALIZED") {
+		if orReplace {
+			return nil, p.errf("OR REPLACE is not supported for materialized views")
+		}
+		p.advance() // MATERIALIZED
+		return p.parseCreateMatViewTail()
+	}
+	return p.parseCreateViewTail(orReplace)
+}
+
+// parseCreateViewTail parses the tail after `CREATE [OR REPLACE]`:
+// `VIEW name AS <query>`.
+func (p *Parser) parseCreateViewTail(orReplace bool) (Statement, error) {
+	if err := p.expectWord("VIEW"); err != nil {
 		return nil, err
 	}
+	name, err := p.parseViewName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("AS"); err != nil {
+		return nil, err
+	}
+	q, err := p.parseQuery()
+	if err != nil {
+		return nil, err
+	}
+	return &CreateViewStmt{Name: name, Query: q, OrReplace: orReplace}, nil
+}
+
+// parseCreateMatViewTail parses the tail after `CREATE MATERIALIZED`:
+// `VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]`.
+func (p *Parser) parseCreateMatViewTail() (Statement, error) {
 	if err := p.expectWord("VIEW"); err != nil {
 		return nil, err
 	}
@@ -178,36 +217,40 @@ func (p *Parser) parseRefreshMatView() (Statement, error) {
 	return &RefreshMatViewStmt{Name: name, WithNoData: nd}, nil
 }
 
-// parseDropMatView parses `DROP MATERIALIZED VIEW [IF EXISTS] name`.
-func (p *Parser) parseDropMatView() (Statement, error) {
+// parseDrop parses `DROP [MATERIALIZED] VIEW [IF EXISTS] name`.
+func (p *Parser) parseDrop() (Statement, error) {
 	p.advance() // DROP
-	if err := p.expectWord("MATERIALIZED"); err != nil {
-		return nil, err
+	materialized := false
+	if p.word("MATERIALIZED") {
+		p.advance()
+		materialized = true
 	}
 	if err := p.expectWord("VIEW"); err != nil {
 		return nil, err
 	}
-	s := &DropMatViewStmt{}
+	ifExists := false
 	if p.word("IF") {
 		p.advance()
 		if err := p.expectWord("EXISTS"); err != nil {
 			return nil, err
 		}
-		s.IfExists = true
+		ifExists = true
 	}
 	name, err := p.parseViewName()
 	if err != nil {
 		return nil, err
 	}
-	s.Name = name
-	return s, nil
+	if materialized {
+		return &DropMatViewStmt{Name: name, IfExists: ifExists}, nil
+	}
+	return &DropViewStmt{Name: name, IfExists: ifExists}, nil
 }
 
-// parseViewName reads a materialized-view name (a bare identifier).
+// parseViewName reads a view name (a bare identifier).
 func (p *Parser) parseViewName() (string, error) {
 	t := p.cur()
 	if t.Kind != TKIdent {
-		return "", p.errf("expected materialized view name")
+		return "", p.errf("expected view name")
 	}
 	p.advance()
 	return t.Value, nil

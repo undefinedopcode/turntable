@@ -836,3 +836,61 @@ func TestMatViewWordsNotReserved(t *testing.T) {
 		t.Fatalf("got %d select items, want 2", len(s.Items.Items))
 	}
 }
+
+func TestParseCreateView(t *testing.T) {
+	stmt, err := Parse("CREATE VIEW v AS SELECT a FROM t WHERE a > 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stmt.(*CreateViewStmt)
+	if !ok {
+		t.Fatalf("got %T, want *CreateViewStmt", stmt)
+	}
+	if s.Name != "v" || s.OrReplace {
+		t.Errorf("name=%q orReplace=%v, want v/false", s.Name, s.OrReplace)
+	}
+	if _, ok := s.Query.(*SelectStmt); !ok {
+		t.Errorf("query = %T, want *SelectStmt", s.Query)
+	}
+}
+
+func TestParseCreateOrReplaceView(t *testing.T) {
+	stmt, err := Parse("CREATE OR REPLACE VIEW v AS SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := stmt.(*CreateViewStmt)
+	if !s.OrReplace {
+		t.Error("OrReplace = false, want true")
+	}
+}
+
+func TestParseCreateOrReplaceMatViewRejected(t *testing.T) {
+	if _, err := Parse("CREATE OR REPLACE MATERIALIZED VIEW v AS SELECT 1"); err == nil {
+		t.Error("expected error: OR REPLACE not supported for materialized views")
+	}
+}
+
+func TestParseDropView(t *testing.T) {
+	stmt, err := Parse("DROP VIEW IF EXISTS v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stmt.(*DropViewStmt)
+	if !ok {
+		t.Fatalf("got %T, want *DropViewStmt", stmt)
+	}
+	if s.Name != "v" || !s.IfExists {
+		t.Errorf("name=%q ifExists=%v, want v/true", s.Name, s.IfExists)
+	}
+}
+
+func TestParseDropMaterializedStillMatView(t *testing.T) {
+	stmt, err := Parse("DROP MATERIALIZED VIEW v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stmt.(*DropMatViewStmt); !ok {
+		t.Fatalf("got %T, want *DropMatViewStmt", stmt)
+	}
+}

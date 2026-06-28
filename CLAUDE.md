@@ -94,7 +94,15 @@ A query moves through fixed stages, one package each:
    (`cteMaterialization.ensure`); every reference replays the buffer via its own
    `cteReplayIter` cursor — so a multiply-referenced CTE executes (and hits its
    sources) once, and all references see a consistent snapshot. `--explain` tags
-   the node `CTE <name> [materialized]`. Window functions (`f(...) OVER (...)`,
+   the node `CTE <name> [materialized]`. **Regular views** (`CREATE VIEW`) reuse
+   this exact machinery: their defining query is stored in the registry
+   (`Registry.RegisterView`/`View`), and `buildTableRef` resolves a bare name to a
+   view (after CTEs, before sources) via `buildView`, which expands it like a CTE
+   — planned once per query (cached in `buildCtx.viewMat`), wrapped in
+   `Subquery`+`CTERef{IsView:true}`. So a view re-runs on every query (always
+   current) but materializes once *within* a query (an externally-visible CTE).
+   A view body binds in the global scope, so `buildView` hides the referencing
+   query's CTEs (`bc.ctes`) while planning it; recursion is rejected. Window functions (`f(...) OVER (...)`,
    `FuncCall.Over` set) get a `Window` node between the post-WHERE rows and the
    projection: `buildWindow` lifts each window call into an appended `$winN`
    column (mirroring the aggregate `$aggN` extraction via the shared
@@ -254,20 +262,29 @@ interfaces:
 
 **`internal/cli`** wires it together. `cli.go` `NewApp()` registers all built-in
 connectors and owns flag/config handling; `repl.go` is the interactive loop
-(readline history, tab completion, dot-commands). **Materialized views**
-(`matview.go`): `CREATE/REFRESH/DROP MATERIALIZED VIEW` (parsed in
-`internal/sql` to `*CreateMatViewStmt`/`*RefreshMatViewStmt`/`*DropMatViewStmt`,
-with the matview keywords matched as non-reserved words so columns named `view`/
-`data` still parse) are session statements dispatched in `runQueryInto` *before*
-`plan.Build`, not row-producing queries. `createMatView` plans (and, unless
-`WITH NO DATA`, executes) the defining query and buffers the rows in the `memc`
-connector (`App.mem`, an in-memory `Schema`+`[]Row` store registered under the
-`mem` prefix), registers the view as a source, and records the defining query in
-`App.matViews` so `REFRESH` can re-run it. The stored schema is normalized to
-unqualified column names (`viewSchema`/`unqualifyName`; a genuine duplicate is
-rejected, like PostgreSQL). Views are session-scoped (in-memory, not persisted);
-the web `/api/query` path does **not** route these statements yet (they reach
-`plan.Build` and get an "unsupported statement" error). `serve.go` (`--serve`) is the
+(readline history, tab completion, dot-commands). **Views** are session
+statements parsed in `internal/sql` (view keywords matched as non-reserved words
+so columns named `view`/`data` still parse) and dispatched in `runQueryInto` /
+the web `handleQuery` *before* `plan.Build` — not row-producing queries; they
+return a `notice`. Two flavors:
+ - **Materialized views** (`matview.go`): `CREATE/REFRESH/DROP MATERIALIZED VIEW`
+   (`*CreateMatViewStmt`/`*RefreshMatViewStmt`/`*DropMatViewStmt`). `createMatView`
+   plans (and, unless `WITH NO DATA`, executes) the query and buffers the rows in
+   the `memc` connector (`App.mem`, an in-memory `Schema`+`[]Row` store under the
+   `mem` prefix), registers the view as a source, and records the query in
+   `App.matViews` so `REFRESH` can re-run it. The stored schema is normalized to
+   unqualified column names (`viewSchema`/`unqualifyName`; duplicates rejected,
+   like PostgreSQL).
+ - **Regular views** (`view.go`): `CREATE [OR REPLACE] VIEW` / `DROP VIEW`
+   (`*CreateViewStmt`/`*DropViewStmt`). `createViewCore` validates by planning,
+   then stores the query in the registry (`RegisterView`); the planner expands
+   references inline (see `buildView`) so the view re-runs per query but
+   materializes once within one. `.tables` / `/api/sources` list both kinds (a
+   regular view tagged `view`); `.schema` / `/api/schema` resolve a view's columns
+   via `viewSchemaFor` (planning the query, since a view has no connector).
+The web path shares the `*Core` methods via `sessionStmtResponse` in `serve.go`
+(returns a `queryResponse.Notice`; the frontend shows a banner and refreshes the
+source list). `serve.go` (`--serve`) is the
 web UI — an HTTP server exposing the same parse/plan/exec path as a JSON API.
 Endpoints: `GET/POST /api/query`, `GET /api/sources` (list) / `POST /api/sources`
 (register at runtime, the web `.use` — goes through `registerSourceExpand`, so

@@ -24,9 +24,10 @@ SELECT [DISTINCT] <select_list>
 ```
 
 - **Read-only** with respect to data sources: no `INSERT`/`UPDATE`/`DELETE`, and
-  no DDL that writes to a connector. The one stateful construct is the in-memory
-  [materialized view](#materialized-views) (`CREATE/REFRESH/DROP MATERIALIZED
-  VIEW`), which only buffers query results in the session — it never modifies a
+  no DDL that writes to a connector. The only stateful constructs are
+  session-scoped [views](#views) (`CREATE/DROP VIEW`) and in-memory
+  [materialized views](#materialized-views) (`CREATE/REFRESH/DROP MATERIALIZED
+  VIEW`) — they register named queries/results in the session but never modify a
   source.
 - A trailing `;` is accepted. Only one statement per query (except `UNION`).
 - `FROM` is optional: `SELECT 1 + 1` evaluates a single row (handy in the REPL).
@@ -170,6 +171,49 @@ each has an `ALL` form:
 `ORDER BY`/`LIMIT` applies to the whole result. `NULL`s are treated as equal for
 duplicate elimination. (Parenthesized set-op grouping to override precedence is
 not yet supported — use a CTE or derived table.)
+
+---
+
+## Views
+
+A **view** is a named query, registered for the rest of the session and usable
+anywhere a table is:
+
+```sql
+CREATE [OR REPLACE] VIEW name AS <query>
+DROP VIEW [IF EXISTS] name
+```
+
+A view stores only its definition — no rows. Each query that references it
+re-runs the definition against **current** source data, so a view always
+reflects the latest data (unlike a materialized view, which is a snapshot until
+refreshed). Within a single query, however, a view referenced several times — or
+self-joined — is materialized **once** and replayed, like an externally-visible
+CTE, so it stays cheap and presents a consistent snapshot for that query.
+
+```sql
+CREATE VIEW active_orders AS
+  SELECT o.id, o.amount, c.region
+  FROM orders o JOIN customers c ON c.id = o.customer_id
+  WHERE o.status = 'open';
+
+SELECT region, SUM(amount) AS open_value FROM active_orders GROUP BY region;
+```
+
+- `<query>` is any `SELECT` / set-operation / `WITH` query, across any
+  connectors. It is bound (planned) at `CREATE` time so errors surface early.
+- A view shares the source namespace: its name can't collide with a source or a
+  materialized view. `CREATE OR REPLACE VIEW` redefines an existing view.
+- A view may reference other views; a self- or cyclic reference is rejected. A
+  view binds in the global scope (sources + views), not the CTEs of the query
+  that references it.
+- Views are **session-scoped** (definitions held for the life of the REPL or
+  process), not persisted. They appear in `.tables` and the web sidebar tagged
+  `(view)`, and `--explain` shows each reference as `View <name> [materialized]`.
+
+Use a **view** when you want a reusable, always-current query; use a
+[materialized view](#materialized-views) when you want to pay the cost once and
+query a fixed snapshot repeatedly.
 
 ---
 

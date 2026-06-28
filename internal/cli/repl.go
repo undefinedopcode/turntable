@@ -283,15 +283,20 @@ func printWrapped(out io.Writer, names []string) {
 
 func (a *App) cmdTables(out io.Writer) {
 	srcs := a.Reg.Sources()
-	if len(srcs) == 0 {
+	views := a.Reg.ViewNames()
+	if len(srcs) == 0 && len(views) == 0 {
 		fmt.Fprintln(out, "(no sources registered; use -c <config>)")
 		return
 	}
-	names := make([]string, 0, len(srcs))
-	byName := map[string]connector.Source{}
+	tag := make(map[string]string, len(srcs)+len(views))
+	names := make([]string, 0, len(srcs)+len(views))
 	for _, s := range srcs {
 		names = append(names, s.Name)
-		byName[s.Name] = s
+		tag[s.Name] = connectorName(s)
+	}
+	for _, v := range views {
+		names = append(names, v)
+		tag[v] = "view"
 	}
 	sort.Strings(names)
 	w := 0
@@ -301,8 +306,7 @@ func (a *App) cmdTables(out io.Writer) {
 		}
 	}
 	for _, n := range names {
-		s := byName[n]
-		fmt.Fprintf(out, "%-*s  (%s)\n", w, n, connectorName(s))
+		fmt.Fprintf(out, "%-*s  (%s)\n", w, n, tag[n])
 	}
 }
 
@@ -313,6 +317,11 @@ func (a *App) cmdSchema(ctx context.Context, name string, out io.Writer) {
 	if name != "" {
 		s, ok := a.Reg.Resolve(name)
 		if !ok {
+			// A view has no connector; resolve its schema by planning the query.
+			if schema, isView, err := a.viewSchemaFor(ctx, name); isView {
+				a.printSchema(out, name, schema, err)
+				return
+			}
 			fmt.Fprintf(out, "no source named %q\n", name)
 			return
 		}
@@ -320,22 +329,27 @@ func (a *App) cmdSchema(ctx context.Context, name string, out io.Writer) {
 	}
 	for _, s := range srcs {
 		schema, err := s.Conn.Resolve(ctx, s.Dataset)
-		if err != nil {
-			fmt.Fprintf(out, "%s: <error: %v>\n", s.Name, err)
-			continue
+		a.printSchema(out, s.Name, schema, err)
+	}
+}
+
+// printSchema writes one source/view's columns (or an error line).
+func (a *App) printSchema(out io.Writer, name string, schema engine.Schema, err error) {
+	if err != nil {
+		fmt.Fprintf(out, "%s: <error: %v>\n", name, err)
+		return
+	}
+	fmt.Fprintf(out, "%s:\n", name)
+	if len(schema.Columns) == 0 {
+		fmt.Fprintln(out, "  (no columns)")
+		return
+	}
+	for _, c := range schema.Columns {
+		nullable := ""
+		if c.Nullable {
+			nullable = "?"
 		}
-		fmt.Fprintf(out, "%s:\n", s.Name)
-		if len(schema.Columns) == 0 {
-			fmt.Fprintln(out, "  (no columns)")
-			continue
-		}
-		for _, c := range schema.Columns {
-			nullable := ""
-			if c.Nullable {
-				nullable = "?"
-			}
-			fmt.Fprintf(out, "  %-20s %s%s\n", c.Name, c.Type, nullable)
-		}
+		fmt.Fprintf(out, "  %-20s %s%s\n", c.Name, c.Type, nullable)
 	}
 }
 

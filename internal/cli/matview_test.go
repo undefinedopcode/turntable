@@ -137,3 +137,58 @@ func TestMatViewDropIfExists(t *testing.T) {
 		t.Error("expected error dropping a missing view")
 	}
 }
+
+func TestViewLifecycle(t *testing.T) {
+	emp, seq := matViewApp(t)
+
+	// CREATE VIEW stores the query (no row count — nothing is materialized).
+	if _, e, code := seq("CREATE VIEW eng AS SELECT name FROM " + emp + " WHERE dept = 'eng'"); code != 0 || !strings.Contains(e, `view "eng" created`) {
+		t.Fatalf("create: code=%d notice=%q", code, e)
+	}
+
+	// Queryable by name, columns unqualified.
+	o, _, code := seq("SELECT name FROM eng ORDER BY name")
+	if code != 0 || !strings.Contains(o, "Ann") || strings.Contains(o, "Di") {
+		t.Fatalf("select: code=%d out=%s", code, o)
+	}
+
+	// CREATE without OR REPLACE on an existing name errors; OR REPLACE succeeds.
+	if _, _, code := seq("CREATE VIEW eng AS SELECT name FROM " + emp); code == 0 {
+		t.Error("expected error recreating an existing view")
+	}
+	if _, e, code := seq("CREATE OR REPLACE VIEW eng AS SELECT name FROM " + emp); code != 0 || !strings.Contains(e, "replaced") {
+		t.Errorf("or-replace: code=%d notice=%q", code, e)
+	}
+	if o, _, _ := seq("SELECT COUNT(*) AS n FROM eng"); !strings.Contains(o, "4") {
+		t.Errorf("after replace want count 4: %s", o)
+	}
+
+	// DROP removes it.
+	if _, e, code := seq("DROP VIEW eng"); code != 0 || !strings.Contains(e, "dropped") {
+		t.Fatalf("drop: code=%d notice=%q", code, e)
+	}
+	if _, _, code := seq("SELECT * FROM eng"); code == 0 {
+		t.Error("expected error querying a dropped view")
+	}
+}
+
+func TestViewNameCollidesWithSource(t *testing.T) {
+	emp, seq := matViewApp(t)
+	// A materialized view registers a source; a regular view can't reuse the name.
+	if _, _, code := seq("CREATE MATERIALIZED VIEW m AS SELECT name FROM " + emp); code != 0 {
+		t.Fatal("matview create failed")
+	}
+	if _, e, code := seq("CREATE VIEW m AS SELECT name FROM " + emp); code == 0 || !strings.Contains(e, "already exists") {
+		t.Errorf("expected collision error, code=%d err=%q", code, e)
+	}
+}
+
+func TestViewDropIfExists(t *testing.T) {
+	_, seq := matViewApp(t)
+	if _, e, code := seq("DROP VIEW IF EXISTS ghost"); code != 0 || !strings.Contains(e, "skipping") {
+		t.Errorf("drop-if-exists: code=%d err=%q", code, e)
+	}
+	if _, _, code := seq("DROP VIEW ghost"); code == 0 {
+		t.Error("expected error dropping a missing view")
+	}
+}

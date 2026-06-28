@@ -101,6 +101,27 @@ type DropMatViewStmt struct {
 
 func (*DropMatViewStmt) stmtNode() {}
 
+// CreateViewStmt is `CREATE [OR REPLACE] VIEW name AS <query>`. Unlike a
+// materialized view it stores only the query (no rows): each query that
+// references the view re-runs the definition against current data, but within a
+// single query execution the view is materialized once (an externally-visible
+// CTE). OrReplace allows redefining an existing view.
+type CreateViewStmt struct {
+	Name      string
+	Query     Statement // *SelectStmt, *SetOpStmt, or *WithStmt
+	OrReplace bool
+}
+
+func (*CreateViewStmt) stmtNode() {}
+
+// DropViewStmt is `DROP VIEW [IF EXISTS] name`. It unregisters the view.
+type DropViewStmt struct {
+	Name     string
+	IfExists bool
+}
+
+func (*DropViewStmt) stmtNode() {}
+
 // SelectList is the projection list.
 type SelectList struct {
 	Items []SelectItem
