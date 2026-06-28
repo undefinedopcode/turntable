@@ -1351,10 +1351,77 @@ func computeWindowPartition(spec WindowSpec, idxs []int, rows []Row, eval Evalua
 		return nil
 	case "LAG", "LEAD":
 		return computeWindowOffset(spec, idxs, rows, eval, result, strings.EqualFold(spec.Func, "LEAD"))
+	case "NTILE":
+		return computeNtile(spec, idxs, rows, eval, result)
+	case "PERCENT_RANK", "CUME_DIST":
+		return computeDistRank(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
 	case "SUM", "AVG", "COUNT", "MIN", "MAX":
 		return computeWindowAgg(spec, idxs, rows, eval, result)
 	}
 	return fmt.Errorf("unknown window function %s", spec.Func)
+}
+
+// computeNtile assigns each partition row to one of n buckets (1..n) as evenly as
+// possible: the first (rowcount mod n) buckets take one extra row.
+func computeNtile(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value) error {
+	if len(spec.Args) == 0 {
+		return fmt.Errorf("NTILE requires a bucket count, e.g. NTILE(4)")
+	}
+	nv, err := eval.Eval(spec.Args[0], rows[idxs[0]])
+	if err != nil {
+		return err
+	}
+	bk, ok := nv.AsInt()
+	if !ok || bk < 1 {
+		return fmt.Errorf("NTILE bucket count must be a positive integer")
+	}
+	total, n := len(idxs), int(bk)
+	base, extra := total/n, total%n
+	pos := 0
+	for b := 1; b <= n && pos < total; b++ {
+		size := base
+		if b <= extra {
+			size++
+		}
+		for k := 0; k < size; k++ {
+			result[idxs[pos]] = IntVal(int64(b))
+			pos++
+		}
+	}
+	return nil
+}
+
+// computeDistRank implements PERCENT_RANK = (rank-1)/(rows-1) and
+// CUME_DIST = (rows through the current peer group)/rows, both peer-aware.
+func computeDistRank(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, name string) error {
+	total := len(idxs)
+	for i := 0; i < total; {
+		j := i + 1
+		for j < total {
+			eq, err := windowPeers(spec.OrderBy, rows[idxs[j-1]], rows[idxs[j]], eval)
+			if err != nil {
+				return err
+			}
+			if !eq {
+				break
+			}
+			j++
+		}
+		var pr float64
+		if total > 1 {
+			pr = float64(i) / float64(total-1) // rank-1 == i (0-based start of group)
+		}
+		cd := float64(j) / float64(total)
+		for k := i; k < j; k++ {
+			if name == "PERCENT_RANK" {
+				result[idxs[k]] = FloatVal(pr)
+			} else {
+				result[idxs[k]] = FloatVal(cd)
+			}
+		}
+		i = j
+	}
+	return nil
 }
 
 // computeWindowOffset implements LAG/LEAD: the argument value of the row `offset`

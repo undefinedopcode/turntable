@@ -311,6 +311,9 @@ Supported functions:
 | `ROW_NUMBER()` | 1-based position within the partition |
 | `RANK()` / `DENSE_RANK()` | rank by the `ORDER BY` (with / without gaps for ties) |
 | `LAG(expr[, n[, default]])` / `LEAD(...)` | value `n` rows back / forward (default `1`; `default` or `NULL` past the edge) |
+| `NTILE(n)` | bucket the partition into `n` ~equal groups (`1..n`) |
+| `PERCENT_RANK()` | `(rank - 1) / (rows - 1)` |
+| `CUME_DIST()` | fraction of rows at or before the current peer group |
 | `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` `(expr)` | aggregate over the window |
 
 **Frames** narrow which rows an aggregate covers, by physical row offset:

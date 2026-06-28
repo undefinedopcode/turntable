@@ -377,3 +377,39 @@ func TestComputeRegr(t *testing.T) {
 		t.Errorf("COVAR_SAMP of one pair = %v, want NULL", got)
 	}
 }
+
+func TestWindowDistribution(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	rows := make([]Row, 8)
+	for i := range rows {
+		rows[i] = Row{Values: []Value{IntVal(int64((i + 1) * 10))}}
+	}
+	order := []sql.OrderTerm{{Expr: &sql.ColRef{Name: "v"}}}
+
+	// NTILE(3) over 8 rows -> bucket sizes 3,3,2.
+	nt, err := computeWindow(WindowSpec{Func: "NTILE", Args: []sql.Expr{&sql.LitInt{V: 3}}, OrderBy: order}, rows, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNt := []int64{1, 1, 1, 2, 2, 2, 3, 3}
+	for i, w := range wantNt {
+		if n, _ := nt[i].AsInt(); n != w {
+			t.Errorf("NTILE row %d = %v, want %d", i, nt[i], w)
+		}
+	}
+	// CUME_DIST = (i+1)/8.
+	cd, _ := computeWindow(WindowSpec{Func: "CUME_DIST", OrderBy: order}, rows, eval)
+	for i := range rows {
+		if f, _ := cd[i].AsFloat(); f != float64(i+1)/8 {
+			t.Errorf("CUME_DIST row %d = %v, want %v", i, cd[i], float64(i+1)/8)
+		}
+	}
+	// PERCENT_RANK = i/7.
+	pr, _ := computeWindow(WindowSpec{Func: "PERCENT_RANK", OrderBy: order}, rows, eval)
+	for i := range rows {
+		if f, _ := pr[i].AsFloat(); f != float64(i)/7 {
+			t.Errorf("PERCENT_RANK row %d = %v, want %v", i, pr[i], float64(i)/7)
+		}
+	}
+}
