@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -74,8 +75,9 @@ func (r *FuncRegistry) Names() []string {
 // the Aggregate operator, not the scalar registry; listed here for discovery.
 func Aggregates() []string {
 	return []string{
-		"AVG", "COUNT", "MAX", "MEDIAN", "MIN", "STDDEV", "STDDEV_POP",
-		"STDDEV_SAMP", "STRING_AGG", "SUM", "VARIANCE", "VAR_POP", "VAR_SAMP",
+		"AVG", "COUNT", "MAX", "MEDIAN", "MIN", "PERCENTILE_CONT",
+		"PERCENTILE_DISC", "QUANTILE", "STDDEV", "STDDEV_POP", "STDDEV_SAMP",
+		"STRING_AGG", "SUM", "VARIANCE", "VAR_POP", "VAR_SAMP",
 	}
 }
 
@@ -97,6 +99,20 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("FLOOR", funcFloor)
 	r.Register("CEIL", funcCeil)
 	r.Register("CEILING", funcCeil)
+	// Math pack.
+	r.Register("SQRT", mathUnaryFn("SQRT", math.Sqrt))
+	r.Register("EXP", mathUnaryFn("EXP", math.Exp))
+	r.Register("LN", mathUnaryFn("LN", math.Log))
+	r.Register("LOG10", mathUnaryFn("LOG10", math.Log10))
+	r.Register("LOG", funcLog)
+	r.Register("POWER", funcPower)
+	r.Register("POW", funcPower)
+	r.Register("MOD", funcMod)
+	r.Register("SIGN", funcSign)
+	r.Register("TRUNC", funcTrunc)
+	r.Register("GREATEST", funcGreatest)
+	r.Register("LEAST", funcLeast)
+	r.Register("WIDTH_BUCKET", funcWidthBucket)
 	r.Register("REPLACE", funcReplace)
 	r.Register("NOW", funcNow)
 	r.Register("CURRENT_TIMESTAMP", funcNow)
@@ -150,6 +166,209 @@ func funcNullif(args []Value) (Value, error) {
 		return Null(), nil
 	}
 	return args[0], nil
+}
+
+// ---- math pack ---------------------------------------------------------------
+
+// floatResult wraps a float result, mapping NaN/±Inf (e.g. SQRT(-1), LN(0)) to
+// NULL so they don't poison downstream arithmetic.
+func floatResult(f float64) Value {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return Null()
+	}
+	return FloatVal(f)
+}
+
+// mathUnaryFn builds a 1-arg numeric scalar from a math function.
+func mathUnaryFn(name string, fn func(float64) float64) ScalarFunc {
+	return func(args []Value) (Value, error) {
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%s expects 1 arg", name)
+		}
+		if args[0].IsNull() {
+			return Null(), nil
+		}
+		f, ok := args[0].AsFloat()
+		if !ok {
+			return Value{}, fmt.Errorf("%s requires a numeric arg", name)
+		}
+		return floatResult(fn(f)), nil
+	}
+}
+
+// funcLog is LOG(x) = base-10 log (Postgres semantics), or LOG(b, x) = log base b.
+func funcLog(args []Value) (Value, error) {
+	switch len(args) {
+	case 1:
+		return mathUnaryFn("LOG", math.Log10)(args)
+	case 2:
+		if args[0].IsNull() || args[1].IsNull() {
+			return Null(), nil
+		}
+		b, ok1 := args[0].AsFloat()
+		x, ok2 := args[1].AsFloat()
+		if !ok1 || !ok2 {
+			return Value{}, fmt.Errorf("LOG requires numeric args")
+		}
+		return floatResult(math.Log(x) / math.Log(b)), nil
+	default:
+		return Value{}, fmt.Errorf("LOG expects 1 or 2 args")
+	}
+}
+
+func funcPower(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("POWER expects 2 args (base, exponent)")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	x, ok1 := args[0].AsFloat()
+	y, ok2 := args[1].AsFloat()
+	if !ok1 || !ok2 {
+		return Value{}, fmt.Errorf("POWER requires numeric args")
+	}
+	return floatResult(math.Pow(x, y)), nil
+}
+
+// funcMod is a % b, preserving integer type when both args are integers.
+func funcMod(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("MOD expects 2 args")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	if args[0].Type == TypeInt && args[1].Type == TypeInt {
+		a, _ := args[0].AsInt()
+		b, _ := args[1].AsInt()
+		if b == 0 {
+			return Null(), nil // mod by zero -> NULL
+		}
+		return IntVal(a % b), nil
+	}
+	a, ok1 := args[0].AsFloat()
+	b, ok2 := args[1].AsFloat()
+	if !ok1 || !ok2 {
+		return Value{}, fmt.Errorf("MOD requires numeric args")
+	}
+	if b == 0 {
+		return Null(), nil
+	}
+	return floatResult(math.Mod(a, b)), nil
+}
+
+func funcSign(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("SIGN expects 1 arg")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	f, ok := args[0].AsFloat()
+	if !ok {
+		return Value{}, fmt.Errorf("SIGN requires a numeric arg")
+	}
+	switch {
+	case f < 0:
+		return IntVal(-1), nil
+	case f > 0:
+		return IntVal(1), nil
+	default:
+		return IntVal(0), nil
+	}
+}
+
+// funcTrunc truncates toward zero, optionally to `places` decimal places.
+func funcTrunc(args []Value) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("TRUNC expects 1 or 2 args")
+	}
+	if args[0].IsNull() {
+		return Null(), nil
+	}
+	f, ok := args[0].AsFloat()
+	if !ok {
+		return Value{}, fmt.Errorf("TRUNC requires a numeric arg")
+	}
+	places := 0
+	if len(args) == 2 {
+		if args[1].IsNull() {
+			return Null(), nil
+		}
+		p, ok := args[1].AsInt()
+		if !ok {
+			return Value{}, fmt.Errorf("TRUNC places must be an integer")
+		}
+		places = int(p)
+	}
+	mult := math.Pow(10, float64(places))
+	return floatResult(math.Trunc(f*mult) / mult), nil
+}
+
+// funcGreatest / funcLeast return the max / min argument, ignoring NULLs (NULL
+// only if every argument is NULL). Uses the engine's ordering, so mixed types
+// compare the same as elsewhere.
+func funcGreatest(args []Value) (Value, error) { return greatestLeast("GREATEST", args, 1) }
+func funcLeast(args []Value) (Value, error)    { return greatestLeast("LEAST", args, -1) }
+
+func greatestLeast(name string, args []Value, dir int) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%s expects at least 1 arg", name)
+	}
+	best := Null()
+	found := false
+	for _, a := range args {
+		if a.IsNull() {
+			continue
+		}
+		if !found {
+			best, found = a, true
+			continue
+		}
+		if c := Compare(a, best); (dir > 0 && c > 0) || (dir < 0 && c < 0) {
+			best = a
+		}
+	}
+	return best, nil
+}
+
+// funcWidthBucket(val, min, max, count) returns the histogram bucket (1..count)
+// for an equal-width partition of [min, max): 0 below the range, count+1 at/above
+// max (Postgres semantics).
+func funcWidthBucket(args []Value) (Value, error) {
+	if len(args) != 4 {
+		return Value{}, fmt.Errorf("WIDTH_BUCKET expects 4 args (value, min, max, count)")
+	}
+	for _, a := range args {
+		if a.IsNull() {
+			return Null(), nil
+		}
+	}
+	val, ok1 := args[0].AsFloat()
+	lo, ok2 := args[1].AsFloat()
+	hi, ok3 := args[2].AsFloat()
+	cnt, ok4 := args[3].AsInt()
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return Value{}, fmt.Errorf("WIDTH_BUCKET requires numeric args")
+	}
+	if cnt < 1 {
+		return Value{}, fmt.Errorf("WIDTH_BUCKET count must be >= 1")
+	}
+	if lo == hi {
+		return Value{}, fmt.Errorf("WIDTH_BUCKET min and max must differ")
+	}
+	if lo > hi {
+		lo, hi, val = hi, lo, lo+hi-val // mirror so a reversed range still works
+	}
+	switch {
+	case val < lo:
+		return IntVal(0), nil
+	case val >= hi:
+		return IntVal(cnt + 1), nil
+	default:
+		return IntVal(int64(math.Floor((val-lo)/(hi-lo)*float64(cnt))) + 1), nil
+	}
 }
 
 func funcLower(args []Value) (Value, error) {
@@ -947,7 +1166,8 @@ func IsAggregate(name string) bool {
 	switch strings.ToUpper(name) {
 	case "COUNT", "SUM", "AVG", "MIN", "MAX",
 		"MEDIAN", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
-		"VARIANCE", "VAR_SAMP", "VAR_POP", "STRING_AGG":
+		"VARIANCE", "VAR_SAMP", "VAR_POP", "STRING_AGG",
+		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE":
 		return true
 	}
 	return false

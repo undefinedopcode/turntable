@@ -212,6 +212,15 @@ Run `.functions` in the REPL for the live list.
 | `ABS(n)` | absolute value |
 | `ROUND(n[, digits])` | round (to `digits` decimals) |
 | `FLOOR(n)` / `CEIL(n)` / `CEILING(n)` | round down / up |
+| `TRUNC(n[, places])` | truncate toward zero |
+| `SQRT(n)` / `EXP(n)` / `POWER(b, e)` (`POW`) | √ / eˣ / bᵉ |
+| `LN(n)` / `LOG10(n)` / `LOG(n)` / `LOG(b, n)` | natural log / base-10 / base-10 / base-`b` |
+| `MOD(a, b)` | remainder (integer when both are ints; `NULL` if `b = 0`) |
+| `SIGN(n)` | -1 / 0 / 1 |
+| `GREATEST(a, b, …)` / `LEAST(a, b, …)` | largest / smallest argument (NULLs ignored) |
+| `WIDTH_BUCKET(v, min, max, count)` | histogram bucket `1..count` for an equal-width split of `[min, max)` (`0` below, `count+1` at/above) |
+
+Domain errors (`SQRT(-1)`, `LN(0)`, …) return `NULL` rather than NaN/∞.
 
 ### Date & time
 
@@ -251,6 +260,8 @@ Used with (or without) `GROUP BY`:
 | `COUNT(*)` / `COUNT(expr)` | row count / non-null count |
 | `SUM` / `AVG` / `MIN` / `MAX` | the usual |
 | `MEDIAN(expr)` | middle value (mean of the two middle for an even count) |
+| `PERCENTILE_CONT(expr, p)` / `QUANTILE(expr, p)` | the `p`-th percentile (`p` in `[0,1]`), linearly interpolated — e.g. `PERCENTILE_CONT(latency, 0.95)` |
+| `PERCENTILE_DISC(expr, p)` | the `p`-th percentile as an actual data value (no interpolation) |
 | `STDDEV` / `STDDEV_SAMP` / `STDDEV_POP` | standard deviation (`STDDEV` = sample) |
 | `VARIANCE` / `VAR_SAMP` / `VAR_POP` | variance (`VARIANCE` = sample) |
 | `STRING_AGG(expr, sep)` | concatenate values, separated by `sep` (input order) |

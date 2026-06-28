@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -250,6 +251,45 @@ func TestEvalExtract(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("extractField(%s) = %v, want %v", c.field, got, c.want)
+		}
+	}
+}
+
+func TestMathPack(t *testing.T) {
+	fr := NewFuncRegistry()
+	cases := []struct {
+		name string
+		args []Value
+		want Value
+	}{
+		{"SQRT", []Value{IntVal(16)}, FloatVal(4)},
+		{"POWER", []Value{IntVal(2), IntVal(10)}, FloatVal(1024)},
+		{"EXP", []Value{IntVal(0)}, FloatVal(1)},
+		{"LN", []Value{FloatVal(math.E)}, FloatVal(1)},
+		{"LOG10", []Value{IntVal(1000)}, FloatVal(3)},
+		{"LOG", []Value{IntVal(1000)}, FloatVal(3)},         // 1-arg = log10
+		{"LOG", []Value{IntVal(2), IntVal(8)}, FloatVal(3)}, // base 2
+		{"MOD", []Value{IntVal(17), IntVal(5)}, IntVal(2)},  // int stays int
+		{"MOD", []Value{IntVal(5), IntVal(0)}, Null()},      // mod by zero
+		{"SIGN", []Value{IntVal(-3)}, IntVal(-1)},
+		{"SIGN", []Value{IntVal(0)}, IntVal(0)},
+		{"TRUNC", []Value{FloatVal(3.789), IntVal(1)}, FloatVal(3.7)},
+		{"GREATEST", []Value{IntVal(3), IntVal(9), IntVal(2)}, IntVal(9)},
+		{"LEAST", []Value{IntVal(3), Null(), IntVal(2)}, IntVal(2)}, // NULLs ignored
+		{"WIDTH_BUCKET", []Value{FloatVal(0.27), IntVal(0), IntVal(1), IntVal(4)}, IntVal(2)},
+		{"WIDTH_BUCKET", []Value{FloatVal(-1), IntVal(0), IntVal(1), IntVal(4)}, IntVal(0)}, // below
+		{"WIDTH_BUCKET", []Value{FloatVal(5), IntVal(0), IntVal(1), IntVal(4)}, IntVal(5)},  // at/above -> count+1
+		{"SQRT", []Value{IntVal(-1)}, Null()},                                               // NaN -> NULL
+		{"SQRT", []Value{Null()}, Null()},
+	}
+	for _, c := range cases {
+		got, err := fr.Lookup(c.name)(c.args)
+		if err != nil {
+			t.Errorf("%s(%v): %v", c.name, c.args, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s(%v) = %v, want %v", c.name, c.args, got, c.want)
 		}
 	}
 }

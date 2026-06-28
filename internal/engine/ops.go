@@ -700,8 +700,62 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 			return FloatVal(math.Sqrt(v)), nil
 		}
 		return FloatVal(v), nil
+	case "PERCENTILE_CONT", "QUANTILE", "PERCENTILE_DISC":
+		if len(nums) == 0 {
+			return Null(), nil
+		}
+		p, err := aggPercentile(spec, rows, eval)
+		if err != nil {
+			return Value{}, err
+		}
+		s := append([]float64(nil), nums...)
+		sort.Float64s(s)
+		n := len(s)
+		if name == "PERCENTILE_DISC" {
+			// Smallest value whose cumulative distribution >= p.
+			idx := int(math.Ceil(p*float64(n))) - 1
+			if idx < 0 {
+				idx = 0
+			}
+			return FloatVal(s[idx]), nil
+		}
+		// PERCENTILE_CONT / QUANTILE: linear interpolation between neighbours.
+		rank := p * float64(n-1)
+		lo := int(math.Floor(rank))
+		hi := int(math.Ceil(rank))
+		if lo == hi {
+			return FloatVal(s[lo]), nil
+		}
+		return FloatVal(s[lo] + (s[hi]-s[lo])*(rank-float64(lo))), nil
 	}
 	return Value{}, fmt.Errorf("unknown aggregate %s", name)
+}
+
+// aggPercentile evaluates the percentile fraction (second argument) of a
+// PERCENTILE_*/QUANTILE aggregate, clamped to [0,1]. It is normally a constant.
+func aggPercentile(spec AggSpec, rows []Row, eval Evaluator) (float64, error) {
+	if spec.Arg2 == nil {
+		return 0, fmt.Errorf("%s requires a percentile in [0,1], e.g. %s(x, 0.95)", spec.Func, spec.Func)
+	}
+	probe := Row{}
+	if len(rows) > 0 {
+		probe = rows[0]
+	}
+	pv, err := eval.Eval(spec.Arg2, probe)
+	if err != nil {
+		return 0, err
+	}
+	p, ok := pv.AsFloat()
+	if !ok {
+		return 0, fmt.Errorf("%s percentile must be numeric", spec.Func)
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > 1 {
+		p = 1
+	}
+	return p, nil
 }
 
 // aggSeparator evaluates a STRING_AGG delimiter (its second argument), which is

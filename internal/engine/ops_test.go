@@ -243,6 +243,13 @@ func TestComputeAggExtras(t *testing.T) {
 		{AggSpec{Func: "MEDIAN", Arg: vcol, Distinct: true}, FloatVal(4)}, // {2,4,6} -> 4
 		{AggSpec{Func: "STRING_AGG", Arg: scol, Arg2: &sql.LitString{V: ","}}, StringVal("a,b,b,c")},
 		{AggSpec{Func: "STRING_AGG", Arg: scol, Arg2: &sql.LitString{V: "-"}, Distinct: true}, StringVal("a-b-c")},
+		// Percentiles over sorted 2,4,4,6 (n=4). CONT rank = p*(n-1).
+		{AggSpec{Func: "PERCENTILE_CONT", Arg: vcol, Arg2: &sql.LitFloat{V: 0.5}}, FloatVal(4)},  // rank 1.5 -> 4
+		{AggSpec{Func: "PERCENTILE_CONT", Arg: vcol, Arg2: &sql.LitFloat{V: 0}}, FloatVal(2)},    // min
+		{AggSpec{Func: "PERCENTILE_CONT", Arg: vcol, Arg2: &sql.LitFloat{V: 1}}, FloatVal(6)},    // max
+		{AggSpec{Func: "QUANTILE", Arg: vcol, Arg2: &sql.LitFloat{V: 0.25}}, FloatVal(3.5)},      // rank 0.75 -> 2+(4-2)*.75
+		{AggSpec{Func: "PERCENTILE_DISC", Arg: vcol, Arg2: &sql.LitFloat{V: 0.5}}, FloatVal(4)},  // ceil(.5*4)-1=1 -> 4
+		{AggSpec{Func: "PERCENTILE_DISC", Arg: vcol, Arg2: &sql.LitFloat{V: 0.75}}, FloatVal(4)}, // ceil(3)-1=2 -> 4
 	}
 	for _, c := range cases {
 		got, err := computeAgg(c.spec, rows, eval)
