@@ -13,9 +13,11 @@ PANDOC := pandoc
 # Documentation rendering (DIALECT.md -> HTML/PDF via pandoc).
 DOCS_DIR := docs
 DOCS_CSS := $(DOCS_DIR)/style.css
-# First available pandoc PDF engine, in preference order (typst/weasyprint are
-# the lightest to install on Arch); empty when none is present.
-PDF_ENGINE := $(firstword $(foreach e,typst weasyprint wkhtmltopdf tectonic xelatex lualatex pdflatex prince,$(if $(shell command -v $(e) 2>/dev/null),$(e))))
+# First available pandoc PDF engine, in preference order: LaTeX (xelatex/lualatex)
+# for the most conventional typography, then the lighter typst / weasyprint;
+# empty when none is present. Override on the command line to force one, e.g.
+# `make docs PDF_ENGINE=typst`.
+PDF_ENGINE ?= $(firstword $(foreach e,xelatex lualatex tectonic typst weasyprint wkhtmltopdf pdflatex prince,$(if $(shell command -v $(e) 2>/dev/null),$(e))))
 # Fonts for the PDF body/code. pandoc's default fonts (typst: none; LaTeX: Latin
 # Modern) are often absent, so we point at system fonts. Override if DejaVu is
 # not installed: `make docs-pdf DOC_MAINFONT="Noto Sans" DOC_MONOFONT="Noto Sans Mono"`.
@@ -98,6 +100,9 @@ $(DOCS_DIR)/DIALECT.html: DIALECT.md $(DOCS_CSS)
 	@echo "wrote $@"
 
 ## docs-pdf: render DIALECT.md to docs/DIALECT.pdf (needs a pandoc PDF engine)
+# No --highlight-style: pandoc's default code highlighting has no background, so
+# it avoids the `framed.sty` LaTeX package that background styles (e.g. tango)
+# pull in — keeping the LaTeX engines working without extra texlive packages.
 .PHONY: docs-pdf
 docs-pdf: DIALECT.md
 	@if [ -z "$(PDF_ENGINE)" ]; then \
@@ -108,7 +113,7 @@ docs-pdf: DIALECT.md
 	$(PANDOC) DIALECT.md \
 	  --toc --toc-depth=3 \
 	  --metadata title="Turntable SQL Dialect Reference" \
-	  --highlight-style=tango --pdf-engine=$(PDF_ENGINE) $(PDF_FONT_FLAGS) \
+	  --pdf-engine=$(PDF_ENGINE) $(PDF_FONT_FLAGS) \
 	  -o $(DOCS_DIR)/DIALECT.pdf
 	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE), font: $(DOC_MAINFONT))"
 
