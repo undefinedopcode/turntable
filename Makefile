@@ -26,6 +26,11 @@ DOC_MONOFONT ?= DejaVu Sans Mono
 # Only typst / xelatex / lualatex / tectonic honor -V mainfont (pdflatex can't use
 # system fonts; weasyprint/wkhtmltopdf style via docs/style.css).
 PDF_FONT_FLAGS := $(if $(filter $(PDF_ENGINE),typst xelatex lualatex tectonic),-V mainfont="$(DOC_MAINFONT)" -V monofont="$(DOC_MONOFONT)")
+# Body font size and page margin (override freely, e.g. DOC_MARGIN=1.25in).
+DOC_FONTSIZE ?= 10pt
+DOC_MARGIN   ?= 1.1in
+# LaTeX-only knobs: smaller body, wider margin, and the code-wrapping header.
+PDF_LATEX_FLAGS := $(if $(filter $(PDF_ENGINE),xelatex lualatex tectonic pdflatex),-V fontsize=$(DOC_FONTSIZE) -V geometry:margin=$(DOC_MARGIN) --include-in-header=$(DOCS_DIR)/latex-header.tex)
 
 .DEFAULT_GOAL := help
 
@@ -113,9 +118,9 @@ docs-pdf: DIALECT.md
 	$(PANDOC) DIALECT.md \
 	  --toc --toc-depth=3 \
 	  --metadata title="Turntable SQL Dialect Reference" \
-	  --pdf-engine=$(PDF_ENGINE) $(PDF_FONT_FLAGS) \
+	  --pdf-engine=$(PDF_ENGINE) $(PDF_FONT_FLAGS) $(PDF_LATEX_FLAGS) \
 	  -o $(DOCS_DIR)/DIALECT.pdf
-	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE), font: $(DOC_MAINFONT))"
+	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE), font: $(DOC_MAINFONT) $(DOC_FONTSIZE))"
 
 ## clean-docs: remove generated docs (keeps docs/style.css)
 .PHONY: clean-docs

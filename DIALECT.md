@@ -197,7 +197,7 @@ nullable; SQL `NULL` propagates through most expressions.
 CASE WHEN qty > 100 THEN 'bulk' WHEN qty > 0 THEN 'retail' ELSE 'none' END
 
 -- CAST(expr AS type): int|integer|bigint, float|real|double,
---                     string|text|varchar, bool|boolean, time|timestamp|datetime
+--   string|text|varchar, bool|boolean, time|timestamp|datetime
 CAST(amount AS int)
 
 -- EXTRACT(field FROM ts): YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, DOY
@@ -330,9 +330,10 @@ related rows, without collapsing them:
 
 ```sql
 SELECT name, dept, salary,
-       ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rank_in_dept,
-       SUM(salary)  OVER (PARTITION BY dept)                      AS dept_total,
-       salary - LAG(salary) OVER (ORDER BY salary)                AS gap
+       ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC)
+         AS rank_in_dept,
+       SUM(salary) OVER (PARTITION BY dept) AS dept_total,
+       salary - LAG(salary) OVER (ORDER BY salary) AS gap
 FROM emp
 ```
 
@@ -359,8 +360,9 @@ averages and rolling sums:
 
 ```sql
 SELECT t, v,
-       AVG(v) OVER (ORDER BY t ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS avg7,
-       SUM(v) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING)                 AS running
+       AVG(v) OVER (ORDER BY t ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+         AS avg7,
+       SUM(v) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING) AS running
 FROM series
 ```
 
@@ -371,7 +373,10 @@ column the offset is an `INTERVAL` — a rolling time window:
 
 ```sql
 SELECT ts, v,
-       AVG(v) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS avg_7d
+       AVG(v) OVER (
+         ORDER BY ts
+         RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW
+       ) AS avg_7d
 FROM metrics
 ```
 

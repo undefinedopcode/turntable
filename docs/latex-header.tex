@@ -1,0 +1,13 @@
+% LaTeX preamble additions for `make docs` (PDF via a LaTeX engine).
+% Renders code blocks a touch smaller, and — when the fvextra package is present
+% (Arch: texlive-latexextra) — wraps over-long code lines instead of letting them
+% run off the right margin. Without fvextra it falls back to plain fancyvrb, so
+% the build still works with a minimal texlive.
+\IfFileExists{fvextra.sty}{%
+  \usepackage{fvextra}%
+  \DefineVerbatimEnvironment{Highlighting}{Verbatim}{%
+    breaklines,breakanywhere,commandchars=\\\{\},fontsize=\small}%
+}{%
+  \DefineVerbatimEnvironment{Highlighting}{Verbatim}{%
+    commandchars=\\\{\},fontsize=\small}%
+}
