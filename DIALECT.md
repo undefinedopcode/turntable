@@ -391,7 +391,9 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Explicit window frames (`ROWS`/`RANGE BETWEEN …`), subqueries together with
-`GROUP BY`/aggregates/window functions, recursive CTEs (`WITH RECURSIVE`),
-parenthesized set-op grouping, non-equality / compound join conditions, and
-DML/DDL. See `DESIGN.md` §11 for the roadmap.
+Subqueries together with `GROUP BY` / aggregates / window functions in one query
+(a decorrelated `EXISTS` is the exception — it composes with `GROUP BY`),
+recursive CTEs (`WITH RECURSIVE`), parenthesized set-op grouping, column-list
+aliases (`t(a, b)` — alias the table, then reference its existing column names),
+the `GROUPS` window-frame unit (`ROWS`/`RANGE` are supported), non-equality /
+compound join conditions, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
