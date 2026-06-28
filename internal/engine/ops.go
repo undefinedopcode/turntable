@@ -1356,6 +1356,8 @@ func computeWindowPartition(spec WindowSpec, idxs []int, rows []Row, eval Evalua
 		return computeNtile(spec, idxs, rows, eval, result)
 	case "PERCENT_RANK", "CUME_DIST":
 		return computeDistRank(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
+	case "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE":
+		return computeWindowValue(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
 	case "SUM", "AVG", "COUNT", "MIN", "MAX":
 		return computeWindowAgg(spec, idxs, rows, eval, result)
 	}
@@ -1463,6 +1465,130 @@ func computeWindowOffset(spec WindowSpec, idxs []int, rows []Row, eval Evaluator
 		default:
 			result[ri] = Null()
 		}
+	}
+	return nil
+}
+
+// windowFrameRanges returns, per ordered position, the [lo, hi] index range of
+// the frame: the default frame (whole partition, or running-through-peers when
+// ORDER BY'd) when none is given, else an explicit ROWS / RANGE frame. Reuses
+// frameBoundIndex / rangeFrameBounds.
+func windowFrameRanges(spec WindowSpec, idxs []int, rows []Row, eval Evaluator) ([]int, []int, error) {
+	n := len(idxs)
+	los, his := make([]int, n), make([]int, n)
+	switch {
+	case spec.Frame == nil && len(spec.OrderBy) == 0:
+		for i := 0; i < n; i++ {
+			los[i], his[i] = 0, n-1
+		}
+	case spec.Frame == nil: // default running frame: [0, last peer]
+		for i := 0; i < n; {
+			j := i + 1
+			for j < n {
+				eq, err := windowPeers(spec.OrderBy, rows[idxs[j-1]], rows[idxs[j]], eval)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !eq {
+					break
+				}
+				j++
+			}
+			for k := i; k < j; k++ {
+				los[k], his[k] = 0, j-1
+			}
+			i = j
+		}
+	case strings.EqualFold(spec.Frame.Unit, "RANGE"):
+		if len(spec.OrderBy) != 1 {
+			return nil, nil, fmt.Errorf("RANGE frame requires exactly one ORDER BY column")
+		}
+		desc := spec.OrderBy[0].Desc
+		ovals := make([]Value, n)
+		for pos, ri := range idxs {
+			v, err := eval.Eval(spec.OrderBy[0].Expr, rows[ri])
+			if err != nil {
+				return nil, nil, err
+			}
+			ovals[pos] = v
+		}
+		for pos := 0; pos < n; pos++ {
+			lo, hi, err := rangeFrameBounds(spec.Frame, ovals, pos, desc, eval)
+			if err != nil {
+				return nil, nil, err
+			}
+			los[pos], his[pos] = lo, hi
+		}
+	default: // ROWS
+		startOff, err := frameOffsetInt(spec.Frame.Start, eval)
+		if err != nil {
+			return nil, nil, err
+		}
+		endOff, err := frameOffsetInt(spec.Frame.End, eval)
+		if err != nil {
+			return nil, nil, err
+		}
+		for pos := 0; pos < n; pos++ {
+			lo := frameBoundIndex(spec.Frame.Start.Kind, startOff, pos, n)
+			hi := frameBoundIndex(spec.Frame.End.Kind, endOff, pos, n)
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > n-1 {
+				hi = n - 1
+			}
+			los[pos], his[pos] = lo, hi
+		}
+	}
+	return los, his, nil
+}
+
+// computeWindowValue implements FIRST_VALUE / LAST_VALUE / NTH_VALUE: the
+// argument evaluated at the first / last / n-th row of each row's frame (NULL if
+// that position falls outside the frame). NB: with the default frame, LAST_VALUE
+// is the current row — use an explicit frame (e.g. ROWS BETWEEN UNBOUNDED
+// PRECEDING AND UNBOUNDED FOLLOWING) for the partition's last value.
+func computeWindowValue(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, which string) error {
+	if len(spec.Args) == 0 {
+		return fmt.Errorf("%s requires an argument", which)
+	}
+	nth := 1
+	if which == "NTH_VALUE" {
+		if len(spec.Args) < 2 {
+			return fmt.Errorf("NTH_VALUE requires (expr, n)")
+		}
+		nv, err := eval.Eval(spec.Args[1], rows[idxs[0]])
+		if err != nil {
+			return err
+		}
+		k, ok := nv.AsInt()
+		if !ok || k < 1 {
+			return fmt.Errorf("NTH_VALUE n must be a positive integer")
+		}
+		nth = int(k)
+	}
+	los, his, err := windowFrameRanges(spec, idxs, rows, eval)
+	if err != nil {
+		return err
+	}
+	for pos := 0; pos < len(idxs); pos++ {
+		lo, hi := los[pos], his[pos]
+		src := lo
+		switch which {
+		case "LAST_VALUE":
+			src = hi
+		case "NTH_VALUE":
+			src = lo + nth - 1
+		}
+		if lo > hi || src < lo || src > hi {
+			result[idxs[pos]] = Null()
+			continue
+		}
+		v, err := eval.Eval(spec.Args[0], rows[idxs[src]])
+		if err != nil {
+			return err
+		}
+		result[idxs[pos]] = v
 	}
 	return nil
 }

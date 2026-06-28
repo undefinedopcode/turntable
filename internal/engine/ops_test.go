@@ -488,3 +488,47 @@ func TestTemporalArith(t *testing.T) {
 		t.Errorf("time - time = %v, want 168h", got)
 	}
 }
+
+func TestWindowValue(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "t", Type: TypeInt}, {Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(tv, v int64) Row { return Row{Values: []Value{IntVal(tv), IntVal(v)}} }
+	rows := []Row{mk(1, 10), mk(2, 40), mk(3, 20)}
+	order := []sql.OrderTerm{{Expr: &sql.ColRef{Name: "t"}}}
+	vcol := []sql.Expr{&sql.ColRef{Name: "v"}}
+	full := &sql.WindowFrame{Unit: "ROWS",
+		Start: sql.FrameBound{Kind: "UNBOUNDED_PRECEDING"}, End: sql.FrameBound{Kind: "UNBOUNDED_FOLLOWING"}}
+
+	// FIRST_VALUE over the default frame = the partition's first row (10) for all.
+	fv, err := computeWindow(WindowSpec{Func: "FIRST_VALUE", Args: vcol, OrderBy: order}, rows, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range rows {
+		if n, _ := fv[i].AsInt(); n != 10 {
+			t.Errorf("FIRST_VALUE row %d = %v, want 10", i, fv[i])
+		}
+	}
+	// LAST_VALUE over the full frame = the partition's last row (20).
+	lv, _ := computeWindow(WindowSpec{Func: "LAST_VALUE", Args: vcol, OrderBy: order, Frame: full}, rows, eval)
+	for i := range rows {
+		if n, _ := lv[i].AsInt(); n != 20 {
+			t.Errorf("LAST_VALUE row %d = %v, want 20", i, lv[i])
+		}
+	}
+	// LAST_VALUE over the DEFAULT frame = the current row.
+	lvd, _ := computeWindow(WindowSpec{Func: "LAST_VALUE", Args: vcol, OrderBy: order}, rows, eval)
+	for i, w := range []int64{10, 40, 20} {
+		if n, _ := lvd[i].AsInt(); n != w {
+			t.Errorf("LAST_VALUE(default) row %d = %v, want %d", i, lvd[i], w)
+		}
+	}
+	// NTH_VALUE(v, 2) over the full frame = the second row (40).
+	nv, _ := computeWindow(WindowSpec{Func: "NTH_VALUE",
+		Args: []sql.Expr{&sql.ColRef{Name: "v"}, &sql.LitInt{V: 2}}, OrderBy: order, Frame: full}, rows, eval)
+	for i := range rows {
+		if n, _ := nv[i].AsInt(); n != 40 {
+			t.Errorf("NTH_VALUE row %d = %v, want 40", i, nv[i])
+		}
+	}
+}

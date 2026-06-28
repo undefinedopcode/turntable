@@ -312,6 +312,8 @@ Supported functions:
 | `ROW_NUMBER()` | 1-based position within the partition |
 | `RANK()` / `DENSE_RANK()` | rank by the `ORDER BY` (with / without gaps for ties) |
 | `LAG(expr[, n[, default]])` / `LEAD(...)` | value `n` rows back / forward (default `1`; `default` or `NULL` past the edge) |
+| `FIRST_VALUE(expr)` / `LAST_VALUE(expr)` | value at the first / last row of the frame |
+| `NTH_VALUE(expr, n)` | value at the `n`-th row of the frame (`NULL` if absent) |
 | `NTILE(n)` | bucket the partition into `n` ~equal groups (`1..n`) |
 | `PERCENT_RANK()` | `(rank - 1) / (rows - 1)` |
 | `CUME_DIST()` | fraction of rows at or before the current peer group |
@@ -344,9 +346,12 @@ FROM metrics
 RANGE needs exactly one `ORDER BY` column (numeric, or timestamp with an
 `INTERVAL` offset). `GROUPS` is not supported.
 
-Without a frame, a window aggregate covers the whole partition when there is no
-`ORDER BY`, or a running frame (cumulative through the current row, ties sharing
-one value) when there is. Window calls may be wrapped in scalar expressions and
+Without a frame, a window aggregate (and `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`)
+covers the whole partition when there is no `ORDER BY`, or a running frame
+(cumulative through the current row, ties sharing one value) when there is — so
+`LAST_VALUE` over the default frame is the *current* row; use an explicit frame
+(`ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`) for the partition's
+last value. Window calls may be wrapped in scalar expressions and
 used in `ORDER BY`. Combining window functions with `GROUP BY` in one query is
 not yet supported.
 
