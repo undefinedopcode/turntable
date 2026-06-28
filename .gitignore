@@ -22,3 +22,5 @@ internal/cli/webui/*.tsbuildinfo
 # generated docs (run `make docs`; docs/style.css is the only committed file)
 docs/DIALECT.html
 docs/DIALECT.pdf
+# scratch notes — never committed
+LLAMINGTON.md
