@@ -72,15 +72,41 @@ func (p *Parser) expectKW(word string) error {
 	return nil
 }
 
+// expectWord consumes a bare word (keyword or identifier) — used for the
+// materialized-view grammar so words like VIEW/DATA stay non-reserved.
+func (p *Parser) expectWord(word string) error {
+	if !p.word(word) {
+		return p.errf("expected %q", word)
+	}
+	p.advance()
+	return nil
+}
+
 func (p *Parser) errf(format string, args ...any) error {
 	t := p.cur()
 	return fmt.Errorf("parse error at offset %d (token %q): %s",
 		t.Pos, t.Value, fmt.Sprintf(format, args...))
 }
 
-// ParseStatement parses a single statement: a SELECT/UNION, optionally preceded
-// by a WITH clause of common table expressions.
+// ParseStatement parses a single statement: a query (SELECT/UNION, optionally
+// preceded by a WITH clause) or a materialized-view command (CREATE/REFRESH/DROP
+// MATERIALIZED VIEW). The matview keywords are matched as bare words (not
+// reserved) so column names like "view" or "data" keep working.
 func (p *Parser) ParseStatement() (Statement, error) {
+	switch {
+	case p.word("CREATE"):
+		return p.parseCreateMatView()
+	case p.word("REFRESH"):
+		return p.parseRefreshMatView()
+	case p.word("DROP"):
+		return p.parseDropMatView()
+	}
+	return p.parseQuery()
+}
+
+// parseQuery parses a SELECT/UNION, optionally preceded by a WITH clause. It is
+// the query grammar shared by the top level and by a materialized-view body.
+func (p *Parser) parseQuery() (Statement, error) {
 	if p.kw("WITH") {
 		return p.parseWith()
 	}
@@ -88,6 +114,121 @@ func (p *Parser) ParseStatement() (Statement, error) {
 		return nil, p.errf("expected SELECT")
 	}
 	return p.parseSelectOrSetOp()
+}
+
+// parseCreateMatView parses
+// `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]`.
+func (p *Parser) parseCreateMatView() (Statement, error) {
+	p.advance() // CREATE
+	if err := p.expectWord("MATERIALIZED"); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("VIEW"); err != nil {
+		return nil, err
+	}
+	s := &CreateMatViewStmt{}
+	if p.word("IF") {
+		p.advance()
+		if err := p.expectWord("NOT"); err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("EXISTS"); err != nil {
+			return nil, err
+		}
+		s.IfNotExists = true
+	}
+	name, err := p.parseViewName()
+	if err != nil {
+		return nil, err
+	}
+	s.Name = name
+	if err := p.expectWord("AS"); err != nil {
+		return nil, err
+	}
+	q, err := p.parseQuery()
+	if err != nil {
+		return nil, err
+	}
+	s.Query = q
+	nd, err := p.parseWithDataSuffix()
+	if err != nil {
+		return nil, err
+	}
+	s.WithNoData = nd
+	return s, nil
+}
+
+// parseRefreshMatView parses `REFRESH MATERIALIZED VIEW name [WITH [NO] DATA]`.
+func (p *Parser) parseRefreshMatView() (Statement, error) {
+	p.advance() // REFRESH
+	if err := p.expectWord("MATERIALIZED"); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("VIEW"); err != nil {
+		return nil, err
+	}
+	name, err := p.parseViewName()
+	if err != nil {
+		return nil, err
+	}
+	nd, err := p.parseWithDataSuffix()
+	if err != nil {
+		return nil, err
+	}
+	return &RefreshMatViewStmt{Name: name, WithNoData: nd}, nil
+}
+
+// parseDropMatView parses `DROP MATERIALIZED VIEW [IF EXISTS] name`.
+func (p *Parser) parseDropMatView() (Statement, error) {
+	p.advance() // DROP
+	if err := p.expectWord("MATERIALIZED"); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("VIEW"); err != nil {
+		return nil, err
+	}
+	s := &DropMatViewStmt{}
+	if p.word("IF") {
+		p.advance()
+		if err := p.expectWord("EXISTS"); err != nil {
+			return nil, err
+		}
+		s.IfExists = true
+	}
+	name, err := p.parseViewName()
+	if err != nil {
+		return nil, err
+	}
+	s.Name = name
+	return s, nil
+}
+
+// parseViewName reads a materialized-view name (a bare identifier).
+func (p *Parser) parseViewName() (string, error) {
+	t := p.cur()
+	if t.Kind != TKIdent {
+		return "", p.errf("expected materialized view name")
+	}
+	p.advance()
+	return t.Value, nil
+}
+
+// parseWithDataSuffix parses an optional trailing `WITH DATA` / `WITH NO DATA`,
+// returning whether NO DATA was given.
+func (p *Parser) parseWithDataSuffix() (bool, error) {
+	if !p.kw("WITH") {
+		return false, nil
+	}
+	p.advance() // WITH
+	noData := false
+	if p.word("NO") {
+		p.advance()
+		noData = true
+	}
+	if err := p.expectWord("DATA"); err != nil {
+		return false, err
+	}
+	return noData, nil
 }
 
 // parseWith parses `WITH name AS ( <query> ) [, ...] <body>`.

@@ -25,6 +25,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
 	"github.com/april/turntable/internal/connector/connectors/linearc"
 	"github.com/april/turntable/internal/connector/connectors/logc"
+	"github.com/april/turntable/internal/connector/connectors/memc"
 	"github.com/april/turntable/internal/connector/connectors/parquetc"
 	"github.com/april/turntable/internal/connector/connectors/sqlc"
 	"github.com/april/turntable/internal/connector/connectors/trelloc"
@@ -56,6 +57,11 @@ type App struct {
 	// uploadDir is a per-serve temporary directory holding files uploaded
 	// through the web UI; it is created in serve() and removed on shutdown.
 	uploadDir string
+
+	// mem backs session-scoped materialized views; matViews keeps each view's
+	// defining query (by name) so REFRESH can re-run it. See matview.go.
+	mem      *memc.Connector
+	matViews map[string]*matView
 }
 
 // NewApp builds an App with all built-in connectors registered.
@@ -80,12 +86,16 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(trelloc.New())
 	_ = reg.RegisterConnector(azdevopsc.New())
 	_ = reg.RegisterConnector(claudelogsc.New())
+	mem := memc.New()
+	_ = reg.RegisterConnector(mem) // also serves "mem:<view>" qualified refs
 	return &App{
-		Out:    os.Stdout,
-		Err:    os.Stderr,
-		Reg:    reg,
-		Output: render.FormatTable,
-		Funcs:  engine.NewFuncRegistry(),
+		Out:      os.Stdout,
+		Err:      os.Stderr,
+		Reg:      reg,
+		Output:   render.FormatTable,
+		Funcs:    engine.NewFuncRegistry(),
+		mem:      mem,
+		matViews: map[string]*matView{},
 	}
 }
 
@@ -475,6 +485,18 @@ func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet boo
 		fmt.Fprintf(errw, "parse error: %v\n", err)
 		return 1
 	}
+
+	// Materialized-view commands are session statements, not row-producing
+	// queries; they are handled outside the plan/exec/render path.
+	switch s := stmt.(type) {
+	case *sql.CreateMatViewStmt:
+		return a.createMatView(ctx, s, explain, out, errw)
+	case *sql.RefreshMatViewStmt:
+		return a.refreshMatView(ctx, s, explain, out, errw)
+	case *sql.DropMatViewStmt:
+		return a.dropMatView(s, explain, errw)
+	}
+
 	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		fmt.Fprintf(errw, "plan error: %v\n", err)

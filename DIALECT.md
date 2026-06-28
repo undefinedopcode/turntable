@@ -23,7 +23,11 @@ SELECT [DISTINCT] <select_list>
 [ UNION [ALL] <select> ]...
 ```
 
-- **Read-only**: no `INSERT`/`UPDATE`/`DELETE`/DDL.
+- **Read-only** with respect to data sources: no `INSERT`/`UPDATE`/`DELETE`, and
+  no DDL that writes to a connector. The one stateful construct is the in-memory
+  [materialized view](#materialized-views) (`CREATE/REFRESH/DROP MATERIALIZED
+  VIEW`), which only buffers query results in the session — it never modifies a
+  source.
 - A trailing `;` is accepted. Only one statement per query (except `UNION`).
 - `FROM` is optional: `SELECT 1 + 1` evaluates a single row (handy in the REPL).
 - `SELECT *` and `alias.*` expand all columns (not allowed with aggregation).
@@ -166,6 +170,48 @@ each has an `ALL` form:
 `ORDER BY`/`LIMIT` applies to the whole result. `NULL`s are treated as equal for
 duplicate elimination. (Parenthesized set-op grouping to override precedence is
 not yet supported — use a CTE or derived table.)
+
+---
+
+## Materialized views
+
+A **materialized view** runs a query once, buffers the result in memory, and
+exposes it as a named source for the rest of the session. Use it to assemble
+data from several connectors (especially slow ones) once, then query and
+re-query the snapshot cheaply. The syntax follows PostgreSQL:
+
+```sql
+CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]
+REFRESH MATERIALIZED VIEW name [WITH [NO] DATA]
+DROP MATERIALIZED VIEW [IF EXISTS] name
+```
+
+- `<query>` is any `SELECT` / set-operation / `WITH` query, across any
+  connectors. It is executed at `CREATE` time and the rows are held in memory.
+- The view's columns take their **unqualified** output names (a projected
+  `e.name` becomes `name`). Two columns that reduce to the same name are
+  rejected — give one an `AS` alias, as PostgreSQL requires.
+- `WITH NO DATA` defines the view without running the query; it is unscannable
+  until a `REFRESH` populates it.
+- `REFRESH MATERIALIZED VIEW` re-runs the stored query and replaces the rows
+  (the view is **not** auto-updated when its sources change). `WITH NO DATA`
+  resets it to the unpopulated state.
+- `DROP MATERIALIZED VIEW` removes the rows and unregisters the name.
+
+```sql
+CREATE MATERIALIZED VIEW sales AS
+  SELECT o.id, o.amount, c.region
+  FROM orders o JOIN customers c ON c.id = o.customer_id;
+
+SELECT region, SUM(amount) AS revenue FROM sales GROUP BY region;
+SELECT * FROM sales WHERE amount > 1000 ORDER BY amount DESC;
+```
+
+Views are **session-scoped** (held in memory for the life of the REPL or process)
+and not persisted to disk. They are available in the REPL and one-shot CLI;
+`.tables` lists them with a `(mem)` tag. A view referenced multiple times in one
+query also materializes just once — see [Common table expressions](#common-table-expressions-with)
+for the query-scoped equivalent.
 
 ---
 

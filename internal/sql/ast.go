@@ -68,6 +68,39 @@ type WithStmt struct {
 
 func (*WithStmt) stmtNode() {}
 
+// CreateMatViewStmt is `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query>
+// [WITH [NO] DATA]`. It defines a session-scoped, in-memory materialized view:
+// the query is run once and its rows buffered, then exposed as a source named
+// Name. WithNoData defines the view without populating it (unscannable until a
+// REFRESH), mirroring PostgreSQL.
+type CreateMatViewStmt struct {
+	Name        string
+	Query       Statement // *SelectStmt, *SetOpStmt, or *WithStmt
+	IfNotExists bool
+	WithNoData  bool
+}
+
+func (*CreateMatViewStmt) stmtNode() {}
+
+// RefreshMatViewStmt is `REFRESH MATERIALIZED VIEW name [WITH [NO] DATA]`. It
+// re-runs the view's stored query and replaces its buffered rows. WithNoData
+// resets the view to the unpopulated state instead.
+type RefreshMatViewStmt struct {
+	Name       string
+	WithNoData bool
+}
+
+func (*RefreshMatViewStmt) stmtNode() {}
+
+// DropMatViewStmt is `DROP MATERIALIZED VIEW [IF EXISTS] name`. It removes the
+// view's buffered rows and unregisters its source.
+type DropMatViewStmt struct {
+	Name     string
+	IfExists bool
+}
+
+func (*DropMatViewStmt) stmtNode() {}
+
 // SelectList is the projection list.
 type SelectList struct {
 	Items []SelectItem

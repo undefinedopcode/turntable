@@ -88,6 +88,18 @@ func (r *Registry) RegisterSource(name string, conn Connector, ds Dataset) error
 	return nil
 }
 
+// RemoveSource unregisters a logical name, reporting whether it existed. Used
+// to drop session-scoped sources such as materialized views.
+func (r *Registry) RemoveSource(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.sources[name]; !ok {
+		return false
+	}
+	delete(r.sources, name)
+	return true
+}
+
 // Resolve looks up a logical name. The returned ok is false if not found.
 func (r *Registry) Resolve(name string) (Source, bool) {
 	r.mu.RLock()

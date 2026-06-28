@@ -164,7 +164,12 @@ interfaces:
   `ScanResponse` (what the connector *actually applied* — the engine re-applies
   the residual). `Expr` is aliased from `internal/sql`.
 - `registry.go` maps logical source names → `Source{Conn, Dataset}` and short
-  prefixes (`csv`, `sql`, …) → `Connector` instances.
+  prefixes (`csv`, `sql`, …) → `Connector` instances. `RemoveSource` unregisters
+  a name (used by `DROP MATERIALIZED VIEW`).
+- `connectors/memc` is the odd one out: an in-memory `Schema`+`[]Row` store
+  (`Put`/`Drop`/`Has`, `Populated` flag) that backs materialized views (see
+  `internal/cli/matview.go`) rather than locating external data. It applies no
+  pushdown.
 - `connectors/<name>/` are the implementations, in three families:
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
@@ -249,7 +254,20 @@ interfaces:
 
 **`internal/cli`** wires it together. `cli.go` `NewApp()` registers all built-in
 connectors and owns flag/config handling; `repl.go` is the interactive loop
-(readline history, tab completion, dot-commands); `serve.go` (`--serve`) is the
+(readline history, tab completion, dot-commands). **Materialized views**
+(`matview.go`): `CREATE/REFRESH/DROP MATERIALIZED VIEW` (parsed in
+`internal/sql` to `*CreateMatViewStmt`/`*RefreshMatViewStmt`/`*DropMatViewStmt`,
+with the matview keywords matched as non-reserved words so columns named `view`/
+`data` still parse) are session statements dispatched in `runQueryInto` *before*
+`plan.Build`, not row-producing queries. `createMatView` plans (and, unless
+`WITH NO DATA`, executes) the defining query and buffers the rows in the `memc`
+connector (`App.mem`, an in-memory `Schema`+`[]Row` store registered under the
+`mem` prefix), registers the view as a source, and records the defining query in
+`App.matViews` so `REFRESH` can re-run it. The stored schema is normalized to
+unqualified column names (`viewSchema`/`unqualifyName`; a genuine duplicate is
+rejected, like PostgreSQL). Views are session-scoped (in-memory, not persisted);
+the web `/api/query` path does **not** route these statements yet (they reach
+`plan.Build` and get an "unsupported statement" error). `serve.go` (`--serve`) is the
 web UI — an HTTP server exposing the same parse/plan/exec path as a JSON API.
 Endpoints: `GET/POST /api/query`, `GET /api/sources` (list) / `POST /api/sources`
 (register at runtime, the web `.use` — goes through `registerSourceExpand`, so

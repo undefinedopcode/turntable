@@ -754,3 +754,85 @@ func TestParseColumnAliases(t *testing.T) {
 		t.Errorf("table-func ColAliases = %v, want [n]", got)
 	}
 }
+
+func TestParseCreateMatView(t *testing.T) {
+	stmt, err := Parse("CREATE MATERIALIZED VIEW v AS SELECT a FROM t WHERE a > 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stmt.(*CreateMatViewStmt)
+	if !ok {
+		t.Fatalf("got %T, want *CreateMatViewStmt", stmt)
+	}
+	if s.Name != "v" {
+		t.Errorf("name = %q, want v", s.Name)
+	}
+	if s.IfNotExists || s.WithNoData {
+		t.Errorf("flags = %v/%v, want false/false", s.IfNotExists, s.WithNoData)
+	}
+	if _, ok := s.Query.(*SelectStmt); !ok {
+		t.Errorf("query = %T, want *SelectStmt", s.Query)
+	}
+}
+
+func TestParseCreateMatViewFlags(t *testing.T) {
+	stmt, err := Parse("CREATE MATERIALIZED VIEW IF NOT EXISTS v AS SELECT 1 WITH NO DATA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := stmt.(*CreateMatViewStmt)
+	if !s.IfNotExists {
+		t.Error("IfNotExists = false, want true")
+	}
+	if !s.WithNoData {
+		t.Error("WithNoData = false, want true")
+	}
+}
+
+func TestParseCreateMatViewWithCTE(t *testing.T) {
+	// The view body may itself be a WITH query.
+	stmt, err := Parse("CREATE MATERIALIZED VIEW v AS WITH x AS (SELECT a FROM t) SELECT a FROM x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := stmt.(*CreateMatViewStmt)
+	if _, ok := s.Query.(*WithStmt); !ok {
+		t.Errorf("query = %T, want *WithStmt", s.Query)
+	}
+}
+
+func TestParseRefreshMatView(t *testing.T) {
+	stmt, err := Parse("REFRESH MATERIALIZED VIEW v WITH NO DATA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stmt.(*RefreshMatViewStmt)
+	if !ok {
+		t.Fatalf("got %T, want *RefreshMatViewStmt", stmt)
+	}
+	if s.Name != "v" || !s.WithNoData {
+		t.Errorf("name=%q noData=%v, want v/true", s.Name, s.WithNoData)
+	}
+}
+
+func TestParseDropMatView(t *testing.T) {
+	stmt, err := Parse("DROP MATERIALIZED VIEW IF EXISTS v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stmt.(*DropMatViewStmt)
+	if !ok {
+		t.Fatalf("got %T, want *DropMatViewStmt", stmt)
+	}
+	if s.Name != "v" || !s.IfExists {
+		t.Errorf("name=%q ifExists=%v, want v/true", s.Name, s.IfExists)
+	}
+}
+
+// TestMatViewWordsNotReserved confirms VIEW/DATA stay usable as identifiers.
+func TestMatViewWordsNotReserved(t *testing.T) {
+	s := mustParseSelect(t, "SELECT view, data FROM t")
+	if len(s.Items.Items) != 2 {
+		t.Fatalf("got %d select items, want 2", len(s.Items.Items))
+	}
+}
