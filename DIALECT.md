@@ -203,6 +203,7 @@ Run `.functions` in the REPL for the live list.
 | `REGEXP_REPLACE(s, pattern, repl[, flags])` | regex replace (`repl` uses `$1`/`${name}` group refs; `flags` `'g'` = all) |
 | `REGEXP_EXTRACT(s, pattern[, group])` | pull a substring out by regex: with `group` the n-th capture (0 = whole match), else the first capturing group (or the whole match if the pattern has none); NULL on no match. Returns a string — wrap in `CAST(… AS int/float)` to compute on it |
 | `REGEXP_MATCHES(s, pattern)` | alias of the 2-arg `REGEXP_EXTRACT` |
+| `EXTRACT_VALUE(key FROM s)` / `EXTRACT_VALUE(s, key)` | pull the value of `key` out of a `key: value` / `key=value` string (e.g. a log message or logfmt line); the value is a quoted `"…"`/`'…'` or a bare run, and `key` must sit on a separator boundary. NULL if absent. Returns a string — `CAST` to compute on it |
 
 ### Numeric
 

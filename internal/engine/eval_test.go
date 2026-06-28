@@ -280,6 +280,14 @@ func TestNewStringFunctions(t *testing.T) {
 		{"REGEXP_EXTRACT", []Value{StringVal("abc 42"), StringVal(`(\d+)`), IntVal(5)}, Null()}, // group out of range
 		{"REGEXP_EXTRACT", []Value{Null(), StringVal(`(\d+)`)}, Null()},
 		{"REGEXP_MATCHES", []Value{StringVal("a1b2"), StringVal(`(\d)`)}, StringVal("1")}, // alias still works
+		// EXTRACT_VALUE: key: value, key=value, quoted value, miss, boundary.
+		{"EXTRACT_VALUE", []Value{StringVal("GET /x status: 200 len: 5"), StringVal("status")}, StringVal("200")},
+		{"EXTRACT_VALUE", []Value{StringVal("level=info user=alice"), StringVal("level")}, StringVal("info")},
+		{"EXTRACT_VALUE", []Value{StringVal(`level=info note="hello world" n=1`), StringVal("note")}, StringVal("hello world")},
+		{"EXTRACT_VALUE", []Value{StringVal("a: 1 b: 2"), StringVal("zzz")}, Null()},        // missing key
+		{"EXTRACT_VALUE", []Value{StringVal("xlen: 5"), StringVal("len")}, Null()},          // key only as a substring
+		{"EXTRACT_VALUE", []Value{StringVal("k=1,j=2,status: 9"), StringVal("j")}, StringVal("2")}, // comma-separated
+		{"EXTRACT_VALUE", []Value{Null(), StringVal("k")}, Null()},
 	}
 	for _, c := range cases {
 		fn := fr.Lookup(c.name)

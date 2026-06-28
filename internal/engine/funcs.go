@@ -109,6 +109,7 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("REGEXP_REPLACE", funcRegexpReplace)
 	r.Register("REGEXP_MATCHES", funcRegexpMatches)
 	r.Register("REGEXP_EXTRACT", funcRegexpExtract)
+	r.Register("EXTRACT_VALUE", funcExtractValue)
 	r.Register("REPEAT", funcRepeat)
 	r.Register("REVERSE", funcReverse)
 	r.Register("INITCAP", funcInitcap)
@@ -461,6 +462,39 @@ func funcRegexpMatches(args []Value) (Value, error) {
 		return Value{}, fmt.Errorf("REGEXP_MATCHES expects 2 args")
 	}
 	return funcRegexpExtract(args)
+}
+
+// funcExtractValue pulls the value of a key out of a structured string — the
+// `key: value` / `key=value` shape common in log messages and logfmt. The value
+// is the token after the first `:`/`=` (a quoted "…"/'…' or a bare run), with the
+// key required to sit on a separator boundary. EXTRACT_VALUE(s, key); the parser
+// also accepts EXTRACT_VALUE(key FROM s). NULL if the key is not present.
+func funcExtractValue(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("EXTRACT_VALUE expects 2 args (string, key)")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	key := args[1].AsString()
+	if key == "" {
+		return Null(), nil
+	}
+	re, err := compileRe(`(?:^|[\s,;])` + regexp.QuoteMeta(key) + `\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s,;]+))`)
+	if err != nil {
+		return Value{}, fmt.Errorf("EXTRACT_VALUE: %v", err)
+	}
+	m := re.FindStringSubmatch(args[0].AsString())
+	if m == nil {
+		return Null(), nil
+	}
+	// The value is whichever of the quoted/bare alternatives participated.
+	for _, g := range m[1:] {
+		if g != "" {
+			return StringVal(g), nil
+		}
+	}
+	return StringVal(""), nil // key present with an empty value
 }
 
 // funcRegexpExtract pulls a substring out of a string by regular expression.

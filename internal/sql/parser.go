@@ -726,6 +726,8 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return p.parseExtract()
 	case p.kw("POSITION"):
 		return p.parsePosition()
+	case t.Kind == TKIdent && strings.EqualFold(t.Value, "EXTRACT_VALUE"):
+		return p.parseExtractValue()
 	case p.kw("EXISTS"):
 		return p.parseExists()
 	case p.op("("):
@@ -950,6 +952,42 @@ func (p *Parser) parsePosition() (Expr, error) {
 		return nil, err
 	}
 	return &PositionExpr{Substr: sub, Str: str}, nil
+}
+
+// parseExtractValue parses EXTRACT_VALUE(key FROM source) — pull the value of a
+// key out of a "key: value" / "key=value" string — also accepting the plain
+// EXTRACT_VALUE(source, key) call form. Both lower to EXTRACT_VALUE(source, key).
+func (p *Parser) parseExtractValue() (Expr, error) {
+	p.advance() // EXTRACT_VALUE
+	if err := p.expectOp("("); err != nil {
+		return nil, err
+	}
+	first, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if p.kw("FROM") {
+		p.advance()
+		source, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectOp(")"); err != nil {
+			return nil, err
+		}
+		return &FuncCall{Name: "EXTRACT_VALUE", Args: []Expr{source, first}}, nil
+	}
+	if err := p.expectOp(","); err != nil {
+		return nil, err
+	}
+	key, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return &FuncCall{Name: "EXTRACT_VALUE", Args: []Expr{first, key}}, nil
 }
 
 // parseExists parses EXISTS (subquery). A leading NOT is handled by parseNot.

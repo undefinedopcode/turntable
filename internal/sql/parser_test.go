@@ -54,6 +54,28 @@ func TestParseImplicitAlias(t *testing.T) {
 	}
 }
 
+func TestParseExtractValue(t *testing.T) {
+	// Both EXTRACT_VALUE(key FROM source) and EXTRACT_VALUE(source, key) lower to
+	// a FuncCall with args ordered (source, key).
+	for _, q := range []string{
+		"SELECT EXTRACT_VALUE('status' FROM msg) AS s FROM t",
+		"SELECT EXTRACT_VALUE(msg, 'status') AS s FROM t",
+	} {
+		s := mustParseSelect(t, q)
+		fc, ok := s.Items.Items[0].Expr.(*FuncCall)
+		if !ok || fc.Name != "EXTRACT_VALUE" || len(fc.Args) != 2 {
+			t.Fatalf("%q: expected EXTRACT_VALUE FuncCall with 2 args, got %#v", q, s.Items.Items[0].Expr)
+		}
+		if _, ok := fc.Args[0].(*ColRef); !ok {
+			t.Errorf("%q: arg0 should be the source column msg, got %#v", q, fc.Args[0])
+		}
+		key, ok := fc.Args[1].(*LitString)
+		if !ok || key.V != "status" {
+			t.Errorf("%q: arg1 should be the key 'status', got %#v", q, fc.Args[1])
+		}
+	}
+}
+
 func mustParseSelect(t *testing.T, q string) *SelectStmt {
 	t.Helper()
 	stmt, err := Parse(q)
