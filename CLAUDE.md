@@ -87,8 +87,12 @@ A query moves through fixed stages, one package each:
    column (mirroring the aggregate `$aggN` extraction via the shared
    `rewriteFuncs`), and the projection/ORDER BY reference those columns. The
    `WindowIter` materializes, partitions, orders, and computes per spec
-   (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD and aggregate windows; default frames
-   only). Window + GROUP BY in one query is rejected for now.
+   (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD and aggregate windows). Aggregate windows
+   support an explicit `ROWS BETWEEN … AND …` frame (`WindowSpec.Frame`, parsed
+   into `sql.WindowFrame`/`FrameBound`; `frameBoundIndex` resolves bounds per
+   row) for moving averages / rolling sums; RANGE/GROUPS units error, and the
+   default frame (whole partition, or running when ORDER BY'd) applies when no
+   frame is given. Window + GROUP BY in one query is rejected for now.
    A non-correlated `WHERE/HAVING x IN (SELECT ...)` is handled differently:
    `resolveInSubqueries` executes the subquery at build time and folds its one
    column into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no

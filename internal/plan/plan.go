@@ -1619,6 +1619,7 @@ func (x *winExtractor) rewrite(e sql.Expr) sql.Expr {
 			Args:        fc.Args,
 			PartitionBy: fc.Over.PartitionBy,
 			OrderBy:     fc.Over.OrderBy,
+			Frame:       fc.Over.Frame,
 		})
 		x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 		return &sql.ColRef{Name: name}

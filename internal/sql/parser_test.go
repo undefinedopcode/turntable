@@ -161,6 +161,43 @@ func TestParseWindowFunction(t *testing.T) {
 	if len(fc.Over.OrderBy) != 2 || !fc.Over.OrderBy[0].Desc || fc.Over.OrderBy[1].Desc {
 		t.Errorf("ORDER BY = %+v, want [c DESC, d ASC]", fc.Over.OrderBy)
 	}
+	if fc.Over.Frame != nil {
+		t.Errorf("no frame expected, got %+v", fc.Over.Frame)
+	}
+}
+
+func TestParseWindowFrame(t *testing.T) {
+	// BETWEEN form with numeric + CURRENT ROW bounds.
+	s := mustParseSelect(t, "SELECT AVG(v) OVER (ORDER BY t ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM x")
+	f := s.Items.Items[0].Expr.(*FuncCall).Over.Frame
+	if f == nil || f.Unit != "ROWS" {
+		t.Fatalf("frame = %+v, want ROWS", f)
+	}
+	if f.Start.Kind != "PRECEDING" || f.Start.Offset != 2 {
+		t.Errorf("start = %+v, want 2 PRECEDING", f.Start)
+	}
+	if f.End.Kind != "CURRENT_ROW" {
+		t.Errorf("end = %+v, want CURRENT ROW", f.End)
+	}
+
+	// Single-bound shorthand: `ROWS UNBOUNDED PRECEDING` => end CURRENT ROW.
+	s = mustParseSelect(t, "SELECT SUM(v) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING) FROM x")
+	f = s.Items.Items[0].Expr.(*FuncCall).Over.Frame
+	if f.Start.Kind != "UNBOUNDED_PRECEDING" || f.End.Kind != "CURRENT_ROW" {
+		t.Errorf("shorthand frame = %+v", f)
+	}
+
+	// FOLLOWING bound.
+	s = mustParseSelect(t, "SELECT SUM(v) OVER (ORDER BY t ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM x")
+	f = s.Items.Items[0].Expr.(*FuncCall).Over.Frame
+	if f.End.Kind != "FOLLOWING" || f.End.Offset != 1 {
+		t.Errorf("end = %+v, want 1 FOLLOWING", f.End)
+	}
+
+	// RANGE is rejected for now.
+	if _, err := Parse("SELECT SUM(v) OVER (ORDER BY t RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM x"); err == nil {
+		t.Error("expected an error for a RANGE frame")
+	}
 }
 
 func TestParseUnaryMinus(t *testing.T) {

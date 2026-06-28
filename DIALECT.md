@@ -296,8 +296,8 @@ SELECT name, dept, salary,
 FROM emp
 ```
 
-`OVER ( [PARTITION BY ...] [ORDER BY ...] )` — both clauses optional. Supported
-functions:
+`OVER ( [PARTITION BY ...] [ORDER BY ...] [frame] )` — all clauses optional.
+Supported functions:
 
 | Function | Result |
 |----------|--------|
@@ -306,11 +306,25 @@ functions:
 | `LAG(expr[, n[, default]])` / `LEAD(...)` | value `n` rows back / forward (default `1`; `default` or `NULL` past the edge) |
 | `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` `(expr)` | aggregate over the window |
 
-A window aggregate covers the whole partition when there is no `ORDER BY`, or a
-running frame (cumulative through the current row, ties sharing one value) when
-there is. Window calls may be wrapped in scalar expressions and used in
-`ORDER BY`. Explicit frame clauses (`ROWS`/`RANGE BETWEEN …`) and combining
-window functions with `GROUP BY` in one query are not yet supported.
+**Frames** narrow which rows an aggregate covers, by physical row offset:
+`ROWS BETWEEN <start> AND <end>`, where each bound is `UNBOUNDED PRECEDING`,
+`<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, or `UNBOUNDED FOLLOWING`
+(a single `ROWS <start>` means `… AND CURRENT ROW`). This is how you get moving
+averages and rolling sums:
+
+```sql
+SELECT t, v,
+       AVG(v) OVER (ORDER BY t ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS avg7,
+       SUM(v) OVER (ORDER BY t ROWS UNBOUNDED PRECEDING)                 AS running
+FROM series
+```
+
+Without a frame, a window aggregate covers the whole partition when there is no
+`ORDER BY`, or a running frame (cumulative through the current row, ties sharing
+one value) when there is. Window calls may be wrapped in scalar expressions and
+used in `ORDER BY`. Only the `ROWS` frame unit is supported (`RANGE`/`GROUPS`
+error); combining window functions with `GROUP BY` in one query is not yet
+supported.
 
 ---
 

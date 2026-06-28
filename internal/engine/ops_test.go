@@ -295,3 +295,39 @@ func TestDistinctIter(t *testing.T) {
 		t.Fatalf("got %d rows, want 2", len(got))
 	}
 }
+
+func TestWindowFrame(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "t", Type: TypeInt}, {Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(tv, v int64) Row { return Row{Values: []Value{IntVal(tv), IntVal(v)}} }
+	rows := []Row{mk(1, 10), mk(2, 20), mk(3, 30), mk(4, 40), mk(5, 50)}
+	order := []sql.OrderTerm{{Expr: &sql.ColRef{Name: "t"}}}
+	vcol := []sql.Expr{&sql.ColRef{Name: "v"}}
+
+	check := func(label string, frame *sql.WindowFrame, want []float64) {
+		got, err := computeWindow(WindowSpec{Func: "SUM", Args: vcol, OrderBy: order, Frame: frame}, rows, eval)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		for i, w := range want {
+			if f, _ := got[i].AsFloat(); f != w {
+				t.Errorf("%s row %d = %v, want %v", label, i, got[i], w)
+			}
+		}
+	}
+	// Trailing 3-row sum: ROWS BETWEEN 2 PRECEDING AND CURRENT ROW.
+	check("trailing3", &sql.WindowFrame{Unit: "ROWS",
+		Start: sql.FrameBound{Kind: "PRECEDING", Offset: 2},
+		End:   sql.FrameBound{Kind: "CURRENT_ROW"}},
+		[]float64{10, 30, 60, 90, 120})
+	// Centered, clamped at the edges: 1 PRECEDING .. 1 FOLLOWING.
+	check("centered", &sql.WindowFrame{Unit: "ROWS",
+		Start: sql.FrameBound{Kind: "PRECEDING", Offset: 1},
+		End:   sql.FrameBound{Kind: "FOLLOWING", Offset: 1}},
+		[]float64{30, 60, 90, 120, 90})
+	// Running total: UNBOUNDED PRECEDING .. CURRENT ROW.
+	check("running", &sql.WindowFrame{Unit: "ROWS",
+		Start: sql.FrameBound{Kind: "UNBOUNDED_PRECEDING"},
+		End:   sql.FrameBound{Kind: "CURRENT_ROW"}},
+		[]float64{10, 30, 60, 100, 150})
+}

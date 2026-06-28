@@ -207,6 +207,23 @@ func (*FuncCall) exprNode() {}
 type WindowSpec struct {
 	PartitionBy []Expr
 	OrderBy     []OrderTerm
+	Frame       *WindowFrame // explicit ROWS frame; nil = the default frame
+}
+
+// WindowFrame is an explicit window frame: `ROWS BETWEEN <start> AND <end>`.
+// Only the ROWS unit (physical row offsets) is supported.
+type WindowFrame struct {
+	Unit  string // "ROWS"
+	Start FrameBound
+	End   FrameBound
+}
+
+// FrameBound is one edge of a window frame.
+type FrameBound struct {
+	// Kind is one of: UNBOUNDED_PRECEDING, PRECEDING, CURRENT_ROW, FOLLOWING,
+	// UNBOUNDED_FOLLOWING.
+	Kind   string
+	Offset int // row count for PRECEDING / FOLLOWING
 }
 
 // ExistsExpr is EXISTS (subquery): true if the subquery yields any row. NOT

@@ -48,6 +48,14 @@ func (p *Parser) op(s string) bool {
 	return t.Kind == TKOperator && t.Value == s
 }
 
+// word matches a bare word whether it lexed as a keyword or an identifier —
+// used for the non-reserved noise words of the window-frame grammar (ROWS,
+// PRECEDING, UNBOUNDED, …) so they don't have to be reserved.
+func (p *Parser) word(s string) bool {
+	t := p.cur()
+	return (t.Kind == TKKeyword || t.Kind == TKIdent) && strings.EqualFold(t.Value, s)
+}
+
 func (p *Parser) expectOp(s string) error {
 	if !p.op(s) {
 		return p.errf("expected %q", s)
@@ -1059,8 +1067,86 @@ func (p *Parser) parseWindowSpec() (*WindowSpec, error) {
 			p.advance()
 		}
 	}
+	if p.word("ROWS") || p.word("RANGE") || p.word("GROUPS") {
+		frame, err := p.parseWindowFrame()
+		if err != nil {
+			return nil, err
+		}
+		w.Frame = frame
+	}
 	if err := p.expectOp(")"); err != nil {
 		return nil, err
 	}
 	return w, nil
+}
+
+// parseWindowFrame parses `ROWS <bound>` or `ROWS BETWEEN <bound> AND <bound>`.
+// Only the ROWS unit is supported (RANGE/GROUPS error). A single bound is the
+// frame start with an implicit CURRENT ROW end.
+func (p *Parser) parseWindowFrame() (*WindowFrame, error) {
+	unit := strings.ToUpper(p.advance().Value)
+	if unit != "ROWS" {
+		return nil, p.errf("only ROWS window frames are supported, got %s", unit)
+	}
+	f := &WindowFrame{Unit: unit}
+	if p.word("BETWEEN") {
+		p.advance()
+		start, err := p.parseFrameBound()
+		if err != nil {
+			return nil, err
+		}
+		if !p.word("AND") {
+			return nil, p.errf("expected AND in window frame")
+		}
+		p.advance()
+		end, err := p.parseFrameBound()
+		if err != nil {
+			return nil, err
+		}
+		f.Start, f.End = start, end
+	} else {
+		start, err := p.parseFrameBound()
+		if err != nil {
+			return nil, err
+		}
+		f.Start = start
+		f.End = FrameBound{Kind: "CURRENT_ROW"}
+	}
+	return f, nil
+}
+
+func (p *Parser) parseFrameBound() (FrameBound, error) {
+	switch {
+	case p.word("UNBOUNDED"):
+		p.advance()
+		if p.word("PRECEDING") {
+			p.advance()
+			return FrameBound{Kind: "UNBOUNDED_PRECEDING"}, nil
+		}
+		if p.word("FOLLOWING") {
+			p.advance()
+			return FrameBound{Kind: "UNBOUNDED_FOLLOWING"}, nil
+		}
+		return FrameBound{}, p.errf("expected PRECEDING or FOLLOWING after UNBOUNDED")
+	case p.word("CURRENT"):
+		p.advance()
+		if !p.word("ROW") {
+			return FrameBound{}, p.errf("expected ROW after CURRENT")
+		}
+		p.advance()
+		return FrameBound{Kind: "CURRENT_ROW"}, nil
+	case p.cur().Kind == TKInt:
+		t := p.advance()
+		n, _ := strconv.Atoi(t.Value)
+		if p.word("PRECEDING") {
+			p.advance()
+			return FrameBound{Kind: "PRECEDING", Offset: n}, nil
+		}
+		if p.word("FOLLOWING") {
+			p.advance()
+			return FrameBound{Kind: "FOLLOWING", Offset: n}, nil
+		}
+		return FrameBound{}, p.errf("expected PRECEDING or FOLLOWING after %s", t.Value)
+	}
+	return FrameBound{}, p.errf("expected a window frame bound")
 }

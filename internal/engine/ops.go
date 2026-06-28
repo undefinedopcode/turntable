@@ -1071,6 +1071,7 @@ type WindowSpec struct {
 	Args        []sql.Expr
 	PartitionBy []sql.Expr
 	OrderBy     []sql.OrderTerm
+	Frame       *sql.WindowFrame // explicit ROWS frame; nil = default
 }
 
 // WindowIter computes window-function columns and appends them to each child
@@ -1331,6 +1332,31 @@ func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, r
 		return acc.add(v)
 	}
 
+	// An explicit ROWS frame: recompute the aggregate over the physical row
+	// window [start, end] (clamped to the partition) for each row. This is the
+	// moving-average / rolling-sum case.
+	if spec.Frame != nil {
+		n := len(idxs)
+		for pos := 0; pos < n; pos++ {
+			lo := frameBoundIndex(spec.Frame.Start, pos, n)
+			hi := frameBoundIndex(spec.Frame.End, pos, n)
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > n-1 {
+				hi = n - 1
+			}
+			acc := winAcc{fn: strings.ToUpper(spec.Func)}
+			for j := lo; j <= hi; j++ { // lo > hi (empty frame) just skips
+				if err := add(&acc, idxs[j]); err != nil {
+					return err
+				}
+			}
+			result[idxs[pos]] = acc.result()
+		}
+		return nil
+	}
+
 	if len(spec.OrderBy) == 0 {
 		acc := winAcc{fn: strings.ToUpper(spec.Func)}
 		for _, ri := range idxs {
@@ -1368,6 +1394,23 @@ func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, r
 		}
 	}
 	return nil
+}
+
+// frameBoundIndex resolves a ROWS frame bound to a (possibly out-of-range)
+// row index within an n-row partition, for the row at ordinal `pos`.
+func frameBoundIndex(b sql.FrameBound, pos, n int) int {
+	switch b.Kind {
+	case "UNBOUNDED_PRECEDING":
+		return 0
+	case "UNBOUNDED_FOLLOWING":
+		return n - 1
+	case "PRECEDING":
+		return pos - b.Offset
+	case "FOLLOWING":
+		return pos + b.Offset
+	default: // CURRENT_ROW
+		return pos
+	}
 }
 
 // winAcc accumulates a window aggregate. NULLs are skipped (except COUNT(*),
