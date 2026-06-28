@@ -63,6 +63,14 @@ export function Results({ result }: { result: QueryResult | null }) {
     );
   }
 
+  if (result.notice != null) {
+    return (
+      <div className="results">
+        <div className="banner ok">{result.notice}</div>
+      </div>
+    );
+  }
+
   if (result.explain != null) {
     return (
       <div className="results">

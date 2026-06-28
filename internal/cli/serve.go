@@ -137,7 +137,10 @@ type queryResponse struct {
 	ElapsedMs int64       `json:"elapsed_ms"`
 	Truncated bool        `json:"truncated,omitempty"`
 	Explain   string      `json:"explain,omitempty"`
-	Error     string      `json:"error,omitempty"`
+	// Notice carries the human-readable result of a session statement that
+	// produces no rows (e.g. CREATE/REFRESH/DROP MATERIALIZED VIEW).
+	Notice string `json:"notice,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // handleQuery runs one SELECT and returns columns + rows as JSON. Query errors
@@ -159,8 +162,23 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
+
+	stmt, perr := sql.Parse(req.Query)
+	if perr != nil {
+		writeJSON(w, queryResponse{Error: "parse error: " + perr.Error(), ElapsedMs: time.Since(start).Milliseconds()})
+		return
+	}
+
+	// Materialized-view statements are session commands, not row queries: handle
+	// them here (the plan/exec path does not support them) and return a notice.
+	if resp, ok := a.matViewResponse(r.Context(), stmt, req.Explain); ok {
+		resp.ElapsedMs = time.Since(start).Milliseconds()
+		writeJSON(w, resp)
+		return
+	}
+
 	if req.Explain {
-		text, err := a.explainQuery(r.Context(), req.Query)
+		text, err := a.explainStmt(r.Context(), stmt)
 		resp := queryResponse{Explain: text, ElapsedMs: time.Since(start).Milliseconds()}
 		if err != nil {
 			resp.Error = err.Error()
@@ -169,7 +187,7 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, rows, truncated, err := a.execQuery(r.Context(), req.Query)
+	schema, rows, truncated, err := a.execStmt(r.Context(), stmt)
 	if err != nil {
 		writeJSON(w, queryResponse{Error: err.Error(), ElapsedMs: time.Since(start).Milliseconds()})
 		return
@@ -195,13 +213,63 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// execQuery parses, plans, and executes a SELECT, returning the schema and rows
-// (capped). The row cap honors --max-rows, else defaultServeMaxRows.
+// matViewResponse handles a materialized-view session statement for the web API,
+// returning a filled queryResponse and true. For any other statement it returns
+// (zero, false) so the caller proceeds with the normal plan/exec path. Under
+// explain it returns the inner/stored query's plan instead of running anything.
+func (a *App) matViewResponse(ctx context.Context, stmt sql.Statement, explain bool) (queryResponse, bool) {
+	var notice string
+	var err error
+	switch s := stmt.(type) {
+	case *sql.CreateMatViewStmt:
+		if explain {
+			return a.explainResponse(ctx, s.Query), true
+		}
+		notice, err = a.createMatViewCore(ctx, s)
+	case *sql.RefreshMatViewStmt:
+		if explain {
+			mv, ok := a.matViews[s.Name]
+			if !ok {
+				return queryResponse{Error: fmt.Sprintf("materialized view %q does not exist", s.Name)}, true
+			}
+			return a.explainResponse(ctx, mv.query), true
+		}
+		notice, err = a.refreshMatViewCore(ctx, s)
+	case *sql.DropMatViewStmt:
+		if explain {
+			return queryResponse{Notice: fmt.Sprintf("DROP MATERIALIZED VIEW %s (no plan)", s.Name)}, true
+		}
+		notice, err = a.dropMatViewCore(s)
+	default:
+		return queryResponse{}, false
+	}
+	if err != nil {
+		return queryResponse{Error: err.Error()}, true
+	}
+	return queryResponse{Notice: notice}, true
+}
+
+// explainResponse builds query and returns its plan as an explain response.
+func (a *App) explainResponse(ctx context.Context, query sql.Statement) queryResponse {
+	text, err := a.explainStmt(ctx, query)
+	if err != nil {
+		return queryResponse{Error: err.Error()}
+	}
+	return queryResponse{Explain: text}
+}
+
+// execQuery parses and executes a query (used by tests); execStmt does the work.
 func (a *App) execQuery(ctx context.Context, query string) (engine.Schema, []engine.Row, bool, error) {
 	stmt, err := sql.Parse(query)
 	if err != nil {
 		return engine.Schema{}, nil, false, fmt.Errorf("parse error: %w", err)
 	}
+	return a.execStmt(ctx, stmt)
+}
+
+// execStmt plans and executes a SELECT, returning the schema and rows (capped).
+// The row cap honors --max-rows, else defaultServeMaxRows.
+func (a *App) execStmt(ctx context.Context, stmt sql.Statement) (engine.Schema, []engine.Row, bool, error) {
 	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		return engine.Schema{}, nil, false, fmt.Errorf("plan error: %w", err)
@@ -235,6 +303,10 @@ func (a *App) explainQuery(ctx context.Context, query string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse error: %w", err)
 	}
+	return a.explainStmt(ctx, stmt)
+}
+
+func (a *App) explainStmt(ctx context.Context, stmt sql.Statement) (string, error) {
 	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		return "", fmt.Errorf("plan error: %w", err)

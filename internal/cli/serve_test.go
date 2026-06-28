@@ -415,3 +415,56 @@ func TestExposureNote(t *testing.T) {
 		t.Errorf("exposureNote(0.0.0.0) = %q, want a warning", got)
 	}
 }
+
+func TestHandleQueryMatView(t *testing.T) {
+	dir := t.TempDir()
+	emp := `[{"name":"Ann","dept":"eng"},{"name":"Bob","dept":"eng"},{"name":"Di","dept":"sales"}]`
+	path := filepath.Join(dir, "emp.json")
+	if err := os.WriteFile(path, []byte(emp), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp()
+	ref := "json:" + path
+	// body marshals a query (and optional explain) into a request JSON, escaping
+	// the embedded SQL correctly.
+	body := func(q string, explain bool) string {
+		b, _ := json.Marshal(map[string]any{"query": q, "explain": explain})
+		return string(b)
+	}
+
+	// CREATE returns a notice, no rows.
+	resp := postQuery(t, a, body("CREATE MATERIALIZED VIEW eng AS SELECT name FROM "+ref+" WHERE dept = 'eng'", false))
+	if resp.Error != "" {
+		t.Fatalf("create error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Notice, "created (2 rows)") {
+		t.Errorf("notice = %q", resp.Notice)
+	}
+
+	// The view is queryable and appears in /api/sources.
+	q := postQuery(t, a, body("SELECT name FROM eng ORDER BY name", false))
+	if q.Error != "" || q.Count != 2 {
+		t.Fatalf("select: err=%q count=%d", q.Error, q.Count)
+	}
+	srcReq := httptest.NewRequest(http.MethodGet, "/api/sources", nil)
+	srcRec := httptest.NewRecorder()
+	a.handleSources(srcRec, srcReq)
+	if !strings.Contains(srcRec.Body.String(), `"eng"`) {
+		t.Errorf("view not in sources: %s", srcRec.Body.String())
+	}
+
+	// explain on CREATE returns the inner plan, not a notice.
+	ex := postQuery(t, a, body("CREATE MATERIALIZED VIEW x AS SELECT name FROM "+ref, true))
+	if ex.Explain == "" || !strings.Contains(ex.Explain, "Scan") {
+		t.Errorf("explain = %q", ex.Explain)
+	}
+
+	// DROP returns a notice and removes the source.
+	d := postQuery(t, a, body("DROP MATERIALIZED VIEW eng", false))
+	if !strings.Contains(d.Notice, "dropped") {
+		t.Errorf("drop notice = %q", d.Notice)
+	}
+	if after := postQuery(t, a, body("SELECT * FROM eng", false)); after.Error == "" {
+		t.Error("expected error querying a dropped view")
+	}
+}

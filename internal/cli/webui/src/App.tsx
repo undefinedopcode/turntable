@@ -91,6 +91,11 @@ export function App() {
         setResult(data);
         if (data.error) {
           setStatus(data.elapsed_ms != null ? `${data.elapsed_ms} ms` : "");
+        } else if (data.notice != null) {
+          // A session statement (e.g. CREATE/DROP MATERIALIZED VIEW) — refresh
+          // the source list/autocompletion since the available views changed.
+          setStatus(`${data.elapsed_ms} ms`);
+          setSourcesVersion((v) => v + 1);
         } else if (data.explain != null) {
           setStatus(`${data.elapsed_ms} ms`);
         } else {
@@ -138,6 +143,7 @@ export function App() {
           onRunQuery={runNow}
           currentQuery={query}
           historyVersion={historyVersion}
+          sourcesVersion={sourcesVersion}
         />
         <Gutter dir="col" onPointerDown={dragSidebar} />
         <section

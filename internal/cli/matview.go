@@ -20,86 +20,110 @@ type matView struct {
 	query sql.Statement
 }
 
-// createMatView handles CREATE MATERIALIZED VIEW: it plans (and, unless WITH NO
-// DATA, executes) the defining query, buffers the rows in the mem connector, and
-// registers the view as a source usable by later queries. Under --explain it
-// prints the inner query's plan and creates nothing.
+// The createMatView/refreshMatView/dropMatView wrappers adapt the shared core
+// operations (which return a status notice + error) to the CLI/REPL: --explain
+// prints the inner plan, a notice goes to errw, and an error sets exit code 1.
+// serve.go reuses the same *Core methods for the web API.
+
 func (a *App) createMatView(ctx context.Context, s *sql.CreateMatViewStmt, explain bool, out, errw io.Writer) int {
 	if explain {
 		return a.explainStatement(ctx, s.Query, out, errw)
 	}
-	if _, exists := a.Reg.Resolve(s.Name); exists {
-		if s.IfNotExists {
-			fmt.Fprintf(errw, "materialized view %q already exists, skipping\n", s.Name)
-			return 0
-		}
-		fmt.Fprintf(errw, "error: a source named %q already exists\n", s.Name)
-		return 1
-	}
-	tbl, err := a.materialize(ctx, s.Query, !s.WithNoData)
-	if err != nil {
-		fmt.Fprintf(errw, "error: %v\n", err)
-		return 1
-	}
-	a.mem.Put(s.Name, tbl)
-	if err := a.Reg.RegisterSource(s.Name, a.mem, connector.Dataset{Name: s.Name, Source: s.Name}); err != nil {
-		a.mem.Drop(s.Name)
-		fmt.Fprintf(errw, "error: %v\n", err)
-		return 1
-	}
-	a.matViews[s.Name] = &matView{name: s.Name, query: s.Query}
-	if s.WithNoData {
-		fmt.Fprintf(errw, "materialized view %q created (no data; run REFRESH to populate)\n", s.Name)
-	} else {
-		fmt.Fprintf(errw, "materialized view %q created (%d rows)\n", s.Name, len(tbl.Rows))
-	}
-	return 0
+	notice, err := a.createMatViewCore(ctx, s)
+	return noticeExit(notice, err, errw)
 }
 
-// refreshMatView re-runs a view's stored query and replaces its buffered rows.
-// Under --explain it prints the stored query's plan and refreshes nothing.
 func (a *App) refreshMatView(ctx context.Context, s *sql.RefreshMatViewStmt, explain bool, out, errw io.Writer) int {
-	mv, ok := a.matViews[s.Name]
-	if !ok {
-		fmt.Fprintf(errw, "error: materialized view %q does not exist\n", s.Name)
-		return 1
-	}
 	if explain {
+		mv, ok := a.matViews[s.Name]
+		if !ok {
+			fmt.Fprintf(errw, "error: materialized view %q does not exist\n", s.Name)
+			return 1
+		}
 		return a.explainStatement(ctx, mv.query, out, errw)
 	}
-	tbl, err := a.materialize(ctx, mv.query, !s.WithNoData)
-	if err != nil {
-		fmt.Fprintf(errw, "error: %v\n", err)
-		return 1
-	}
-	a.mem.Put(s.Name, tbl)
-	if s.WithNoData {
-		fmt.Fprintf(errw, "materialized view %q reset (no data)\n", s.Name)
-	} else {
-		fmt.Fprintf(errw, "materialized view %q refreshed (%d rows)\n", s.Name, len(tbl.Rows))
-	}
-	return 0
+	notice, err := a.refreshMatViewCore(ctx, s)
+	return noticeExit(notice, err, errw)
 }
 
-// dropMatView removes a view's rows and unregisters its source.
 func (a *App) dropMatView(s *sql.DropMatViewStmt, explain bool, errw io.Writer) int {
 	if explain {
 		fmt.Fprintf(errw, "DROP MATERIALIZED VIEW %s (no plan)\n", s.Name)
 		return 0
 	}
+	notice, err := a.dropMatViewCore(s)
+	return noticeExit(notice, err, errw)
+}
+
+// noticeExit prints a core operation's notice (or error) and returns the CLI
+// exit code.
+func noticeExit(notice string, err error, errw io.Writer) int {
+	if err != nil {
+		fmt.Fprintf(errw, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(errw, notice)
+	return 0
+}
+
+// createMatViewCore plans (and, unless WITH NO DATA, executes) the defining
+// query, buffers the rows in the mem connector, and registers the view as a
+// source. It returns a status notice; an IF NOT EXISTS collision is a non-error
+// no-op.
+func (a *App) createMatViewCore(ctx context.Context, s *sql.CreateMatViewStmt) (string, error) {
+	if _, exists := a.Reg.Resolve(s.Name); exists {
+		if s.IfNotExists {
+			return fmt.Sprintf("materialized view %q already exists, skipping", s.Name), nil
+		}
+		return "", fmt.Errorf("a source named %q already exists", s.Name)
+	}
+	tbl, err := a.materialize(ctx, s.Query, !s.WithNoData)
+	if err != nil {
+		return "", err
+	}
+	a.mem.Put(s.Name, tbl)
+	if err := a.Reg.RegisterSource(s.Name, a.mem, connector.Dataset{Name: s.Name, Source: s.Name}); err != nil {
+		a.mem.Drop(s.Name)
+		return "", err
+	}
+	a.matViews[s.Name] = &matView{name: s.Name, query: s.Query}
+	if s.WithNoData {
+		return fmt.Sprintf("materialized view %q created (no data; run REFRESH to populate)", s.Name), nil
+	}
+	return fmt.Sprintf("materialized view %q created (%d rows)", s.Name, len(tbl.Rows)), nil
+}
+
+// refreshMatViewCore re-runs a view's stored query and replaces its buffered
+// rows.
+func (a *App) refreshMatViewCore(ctx context.Context, s *sql.RefreshMatViewStmt) (string, error) {
+	mv, ok := a.matViews[s.Name]
+	if !ok {
+		return "", fmt.Errorf("materialized view %q does not exist", s.Name)
+	}
+	tbl, err := a.materialize(ctx, mv.query, !s.WithNoData)
+	if err != nil {
+		return "", err
+	}
+	a.mem.Put(s.Name, tbl)
+	if s.WithNoData {
+		return fmt.Sprintf("materialized view %q reset (no data)", s.Name), nil
+	}
+	return fmt.Sprintf("materialized view %q refreshed (%d rows)", s.Name, len(tbl.Rows)), nil
+}
+
+// dropMatViewCore removes a view's rows and unregisters its source. An IF EXISTS
+// miss is a non-error no-op.
+func (a *App) dropMatViewCore(s *sql.DropMatViewStmt) (string, error) {
 	if !a.mem.Has(s.Name) {
 		if s.IfExists {
-			fmt.Fprintf(errw, "materialized view %q does not exist, skipping\n", s.Name)
-			return 0
+			return fmt.Sprintf("materialized view %q does not exist, skipping", s.Name), nil
 		}
-		fmt.Fprintf(errw, "error: materialized view %q does not exist\n", s.Name)
-		return 1
+		return "", fmt.Errorf("materialized view %q does not exist", s.Name)
 	}
 	a.mem.Drop(s.Name)
 	a.Reg.RemoveSource(s.Name)
 	delete(a.matViews, s.Name)
-	fmt.Fprintf(errw, "materialized view %q dropped\n", s.Name)
-	return 0
+	return fmt.Sprintf("materialized view %q dropped", s.Name), nil
 }
 
 // materialize plans the view's query and, when populate is true, executes it and

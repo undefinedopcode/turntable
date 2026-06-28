@@ -19,6 +19,7 @@ interface SidebarProps {
   onRunQuery: (q: string) => void;
   currentQuery: string;
   historyVersion: number;
+  sourcesVersion: number;
 }
 
 export function Sidebar({
@@ -28,6 +29,7 @@ export function Sidebar({
   onRunQuery,
   currentQuery,
   historyVersion,
+  sourcesVersion,
 }: SidebarProps) {
   const [sources, setSources] = useState<Source[] | null>(null);
   const [error, setError] = useState<string>("");
@@ -39,7 +41,9 @@ export function Sidebar({
       .then(setSources)
       .catch((e) => setError(String(e)));
   };
-  useEffect(reload, []);
+  // Reload on mount and whenever the source set changes (e.g. a materialized
+  // view was created or dropped).
+  useEffect(reload, [sourcesVersion]);
 
   const shown = (sources ?? []).filter((s) =>
     s.name.toLowerCase().includes(search.trim().toLowerCase()),

@@ -17,6 +17,7 @@ export interface QueryResult {
   elapsed_ms: number;
   truncated?: boolean;
   explain?: string;
+  notice?: string;
   error?: string;
 }
 
