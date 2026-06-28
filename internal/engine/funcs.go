@@ -75,9 +75,11 @@ func (r *FuncRegistry) Names() []string {
 // the Aggregate operator, not the scalar registry; listed here for discovery.
 func Aggregates() []string {
 	return []string{
-		"AVG", "COUNT", "MAX", "MEDIAN", "MIN", "PERCENTILE_CONT",
-		"PERCENTILE_DISC", "QUANTILE", "STDDEV", "STDDEV_POP", "STDDEV_SAMP",
-		"STRING_AGG", "SUM", "VARIANCE", "VAR_POP", "VAR_SAMP",
+		"AVG", "CORR", "COUNT", "COVAR_POP", "COVAR_SAMP", "MAX", "MEDIAN", "MIN",
+		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE", "REGR_AVGX", "REGR_AVGY",
+		"REGR_COUNT", "REGR_INTERCEPT", "REGR_R2", "REGR_SLOPE", "STDDEV",
+		"STDDEV_POP", "STDDEV_SAMP", "STRING_AGG", "SUM", "VARIANCE", "VAR_POP",
+		"VAR_SAMP",
 	}
 }
 
@@ -1167,7 +1169,9 @@ func IsAggregate(name string) bool {
 	case "COUNT", "SUM", "AVG", "MIN", "MAX",
 		"MEDIAN", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
 		"VARIANCE", "VAR_SAMP", "VAR_POP", "STRING_AGG",
-		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE":
+		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE",
+		"CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE", "REGR_INTERCEPT",
+		"REGR_R2", "REGR_COUNT", "REGR_AVGX", "REGR_AVGY":
 		return true
 	}
 	return false

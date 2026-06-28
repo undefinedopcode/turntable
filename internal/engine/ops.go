@@ -591,6 +591,88 @@ func (a *AggregateIter) Close() error {
 	return a.child.Close()
 }
 
+// computeRegr computes the two-argument statistical aggregates (correlation,
+// covariance, linear regression) over paired (y, x) values from spec.Arg (y) and
+// spec.Arg2 (x), skipping rows where either is NULL. Argument order follows SQL:
+// the dependent variable y is first, e.g. CORR(y, x) / REGR_SLOPE(y, x).
+func computeRegr(name string, spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
+	if spec.Arg2 == nil {
+		return Value{}, fmt.Errorf("%s expects 2 args, e.g. %s(y, x)", name, name)
+	}
+	var n int
+	var sx, sy, sxx, syy, sxy float64
+	for _, r := range rows {
+		yv, err := eval.Eval(spec.Arg, r)
+		if err != nil {
+			return Value{}, err
+		}
+		xv, err := eval.Eval(spec.Arg2, r)
+		if err != nil {
+			return Value{}, err
+		}
+		if yv.IsNull() || xv.IsNull() {
+			continue
+		}
+		y, ok1 := yv.AsFloat()
+		x, ok2 := xv.AsFloat()
+		if !ok1 || !ok2 {
+			return Value{}, fmt.Errorf("%s requires numeric args", name)
+		}
+		n++
+		sx, sy, sxx, syy, sxy = sx+x, sy+y, sxx+x*x, syy+y*y, sxy+x*y
+	}
+	if name == "REGR_COUNT" {
+		return IntVal(int64(n)), nil
+	}
+	if n == 0 {
+		return Null(), nil
+	}
+	fn := float64(n)
+	mx, my := sx/fn, sy/fn
+	// Centered sums of squares / cross-products: Σ(x-x̄)², Σ(y-ȳ)², Σ(x-x̄)(y-ȳ).
+	cxx := sxx - sx*sx/fn
+	cyy := syy - sy*sy/fn
+	cxy := sxy - sx*sy/fn
+	switch name {
+	case "REGR_AVGX":
+		return FloatVal(mx), nil
+	case "REGR_AVGY":
+		return FloatVal(my), nil
+	case "COVAR_POP":
+		return FloatVal(cxy / fn), nil
+	case "COVAR_SAMP":
+		if n < 2 {
+			return Null(), nil
+		}
+		return FloatVal(cxy / (fn - 1)), nil
+	case "REGR_SLOPE":
+		if cxx == 0 {
+			return Null(), nil
+		}
+		return FloatVal(cxy / cxx), nil
+	case "REGR_INTERCEPT":
+		if cxx == 0 {
+			return Null(), nil
+		}
+		return FloatVal(my - (cxy/cxx)*mx), nil
+	case "CORR":
+		if cxx == 0 || cyy == 0 {
+			return Null(), nil
+		}
+		return FloatVal(cxy / math.Sqrt(cxx*cyy)), nil
+	case "REGR_R2":
+		if cxx == 0 {
+			return Null(), nil
+		}
+		if cyy == 0 {
+			return FloatVal(1), nil // x varies but y is constant
+		}
+		r := cxy / math.Sqrt(cxx*cyy)
+		return FloatVal(r * r), nil
+	}
+	return Value{}, fmt.Errorf("unknown aggregate %s", name)
+}
+
 func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 	name := strings.ToUpper(spec.Func)
 	// COUNT(*) counts rows regardless of nullness; DISTINCT is meaningless on it.
@@ -598,6 +680,13 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 		if cr, ok := spec.Arg.(*sql.ColRef); ok && cr.Name == "*" && cr.Qualifier == "" {
 			return IntVal(int64(len(rows))), nil
 		}
+	}
+
+	// Two-argument statistical aggregates pair both columns per row.
+	switch name {
+	case "CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE", "REGR_INTERCEPT",
+		"REGR_R2", "REGR_COUNT", "REGR_AVGX", "REGR_AVGY":
+		return computeRegr(name, spec, rows, eval)
 	}
 
 	// Evaluate the argument over each row, dropping NULLs and (with DISTINCT)

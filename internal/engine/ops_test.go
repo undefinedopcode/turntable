@@ -331,3 +331,49 @@ func TestWindowFrame(t *testing.T) {
 		End:   sql.FrameBound{Kind: "CURRENT_ROW"}},
 		[]float64{10, 30, 60, 100, 150})
 }
+
+func TestComputeRegr(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "x", Type: TypeInt}, {Name: "y", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(x, y int64) Row { return Row{Values: []Value{IntVal(x), IntVal(y)}} }
+	// y = 2x + 1 over x=1..3: slope 2, intercept 1, corr 1.
+	rows := []Row{mk(1, 3), mk(2, 5), mk(3, 7)}
+	x := &sql.ColRef{Name: "x"}
+	y := &sql.ColRef{Name: "y"}
+	// AggSpec for f(y, x): Arg = y (dependent), Arg2 = x.
+	cases := []struct {
+		fn   string
+		want Value
+	}{
+		{"REGR_SLOPE", FloatVal(2)},
+		{"REGR_INTERCEPT", FloatVal(1)},
+		{"CORR", FloatVal(1)},
+		{"REGR_R2", FloatVal(1)},
+		{"REGR_COUNT", IntVal(3)},
+		{"REGR_AVGX", FloatVal(2)},
+		{"REGR_AVGY", FloatVal(5)},
+		{"COVAR_POP", FloatVal(4.0 / 3.0)},
+		{"COVAR_SAMP", FloatVal(2)},
+	}
+	for _, c := range cases {
+		got, err := computeAgg(AggSpec{Func: c.fn, Arg: y, Arg2: x}, rows, eval)
+		if err != nil {
+			t.Errorf("%s: %v", c.fn, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s = %v, want %v", c.fn, got, c.want)
+		}
+	}
+	// Constant x -> slope/corr undefined (NULL); empty -> NULL; COVAR_SAMP of 1 -> NULL.
+	flat := []Row{mk(5, 1), mk(5, 9)}
+	if got, _ := computeAgg(AggSpec{Func: "REGR_SLOPE", Arg: y, Arg2: x}, flat, eval); !got.IsNull() {
+		t.Errorf("REGR_SLOPE with constant x = %v, want NULL", got)
+	}
+	if got, _ := computeAgg(AggSpec{Func: "CORR", Arg: y, Arg2: x}, nil, eval); !got.IsNull() {
+		t.Errorf("CORR of empty = %v, want NULL", got)
+	}
+	if got, _ := computeAgg(AggSpec{Func: "COVAR_SAMP", Arg: y, Arg2: x}, []Row{mk(1, 1)}, eval); !got.IsNull() {
+		t.Errorf("COVAR_SAMP of one pair = %v, want NULL", got)
+	}
+}

@@ -265,6 +265,13 @@ Used with (or without) `GROUP BY`:
 | `STDDEV` / `STDDEV_SAMP` / `STDDEV_POP` | standard deviation (`STDDEV` = sample) |
 | `VARIANCE` / `VAR_SAMP` / `VAR_POP` | variance (`VARIANCE` = sample) |
 | `STRING_AGG(expr, sep)` | concatenate values, separated by `sep` (input order) |
+| `CORR(y, x)` | Pearson correlation coefficient |
+| `COVAR_POP(y, x)` / `COVAR_SAMP(y, x)` | population / sample covariance |
+| `REGR_SLOPE(y, x)` / `REGR_INTERCEPT(y, x)` / `REGR_R2(y, x)` | least-squares line of `y` on `x`, and its R² |
+| `REGR_COUNT(y, x)` / `REGR_AVGX(y, x)` / `REGR_AVGY(y, x)` | paired count / mean of `x` / mean of `y` |
+
+The two-argument stats take the dependent variable first (`CORR(y, x)`) and skip
+rows where either side is NULL.
 
 Each accepts a leading `DISTINCT` (`COUNT(DISTINCT region)`,
 `SUM(DISTINCT amount)`, `STRING_AGG(DISTINCT tag, ',')`), which deduplicates the
