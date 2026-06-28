@@ -83,3 +83,43 @@ func TestFullOuterKeywordExec(t *testing.T) {
 		t.Fatalf("full outer rows = %d, want 4", got)
 	}
 }
+
+// TestNonEquiJoinExec exercises a pure non-equality ON (no equi-key), which the
+// planner lowers to a nested-loop join. s1 = {1,2,2}, s2 = {2,3}; a.n < b.n
+// pairs: 1<{2,3}=2, 2<{3}=1, 2<{3}=1 → 4 rows.
+func TestNonEquiJoinExec(t *testing.T) {
+	reg := rowsRegistry(t)
+	rows := runQuery(t, reg, "SELECT a.n AS an, b.n AS bn FROM s1 AS a JOIN s2 AS b ON a.n < b.n")
+	if len(rows) != 4 {
+		t.Fatalf("non-equi join rows = %d, want 4", len(rows))
+	}
+}
+
+// TestResidualJoinExec exercises an equi-key plus a non-equi residual conjunct.
+// s1 = {1,2,2}, s2 = {2,3}; a.n = b.n matches the two n=2 rows, and the residual
+// a.n > 1 keeps both. With a.n > 5 the residual rejects all → 0.
+func TestResidualJoinExec(t *testing.T) {
+	reg := rowsRegistry(t)
+	if rows := runQuery(t, reg, "SELECT a.n FROM s1 AS a JOIN s2 AS b ON a.n = b.n AND a.n > 1"); len(rows) != 2 {
+		t.Fatalf("equi+residual rows = %d, want 2", len(rows))
+	}
+	if rows := runQuery(t, reg, "SELECT a.n FROM s1 AS a JOIN s2 AS b ON a.n = b.n AND a.n > 5"); len(rows) != 0 {
+		t.Fatalf("equi+failing-residual rows = %d, want 0", len(rows))
+	}
+}
+
+// TestLeftJoinResidualExec verifies a residual that rejects every keyed match
+// still keeps the left rows, NULL-padded. s1 = {1,2,2}; with a.n = b.n AND
+// a.n > 5 nothing matches, so all three left rows survive with a NULL right.
+func TestLeftJoinResidualExec(t *testing.T) {
+	reg := rowsRegistry(t)
+	rows := runQuery(t, reg, "SELECT a.n AS an, b.n AS bn FROM s1 AS a LEFT JOIN s2 AS b ON a.n = b.n AND a.n > 5")
+	if len(rows) != 3 {
+		t.Fatalf("left join residual rows = %d, want 3", len(rows))
+	}
+	for _, r := range rows {
+		if !r.Values[1].IsNull() {
+			t.Errorf("expected NULL right column, got %v", r.Values[1])
+		}
+	}
+}

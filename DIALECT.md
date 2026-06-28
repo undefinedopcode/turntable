@@ -36,10 +36,27 @@ SELECT [DISTINCT] <select_list>
 ### Joins
 
 `INNER JOIN` (default), `LEFT`, `RIGHT`, and `FULL` (the `OUTER` keyword is
-optional), on a single equality condition (`a.x = b.y`) — including across
-connectors. The unmatched side of an outer join is filled with `NULL`s. Compound
-or non-equality join conditions are not yet supported (put extra predicates in
-`WHERE`).
+optional) — including across connectors. The unmatched side of an outer join is
+filled with `NULL`s.
+
+The `ON` condition may be compound. Each `a.x = b.y` equality conjunct (columns
+on opposite sides, joined by `AND`) becomes a hash key, so a multi-column join
+like `ON a.x = b.x AND a.y = b.y` still runs as a single hash pass. Any remaining
+conjunct — a non-equality (`a.ts < b.ts`), an equality over expressions or a
+constant, or one touching a single side — is applied as a residual filter on each
+matched pair:
+
+```sql
+SELECT e.name, d.name
+FROM employees e
+JOIN departments d
+  ON e.dept_id = d.id AND e.salary >= d.min_salary
+```
+
+A join whose `ON` has **no** equality conjunct at all (e.g. `ON a.lo <= b.v AND
+b.v <= a.hi`) runs as a nested loop — correct, but `O(left × right)`; prefer at
+least one equi-key where possible. `--explain` tags the join with `[N keys]`,
+`[residual]`, and/or `[nested loop]`.
 
 ### Table functions (`generate_series`)
 
@@ -412,5 +429,5 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 Subqueries together with `GROUP BY` / aggregates / window functions in one query
 (a decorrelated `EXISTS` is the exception — it composes with `GROUP BY`),
 recursive CTEs (`WITH RECURSIVE`), parenthesized set-op grouping, the `GROUPS`
-window-frame unit (`ROWS`/`RANGE` are supported), non-equality / compound join
-conditions, and DML/DDL. See `DESIGN.md` §11 for the roadmap.
+window-frame unit (`ROWS`/`RANGE` are supported), and DML/DDL. See `DESIGN.md`
+§11 for the roadmap.

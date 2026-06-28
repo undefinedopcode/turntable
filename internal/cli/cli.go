@@ -625,6 +625,19 @@ func formatPlan(n plan.Node, depth int) string {
 		if label == "" {
 			label = "Join"
 		}
+		var notes []string
+		switch {
+		case len(node.LeftKeys) == 0:
+			notes = append(notes, "nested loop")
+		case len(node.LeftKeys) > 1:
+			notes = append(notes, fmt.Sprintf("%d keys", len(node.LeftKeys)))
+		}
+		if node.Residual != nil {
+			notes = append(notes, "residual")
+		}
+		if len(notes) > 0 {
+			label += " [" + strings.Join(notes, ", ") + "]"
+		}
 		return indent + label + "\n" + formatPlan(node.Left, depth+1) + "\n" + formatPlan(node.Right, depth+1)
 	case *plan.Aggregate:
 		var aggNames []string

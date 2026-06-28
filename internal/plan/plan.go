@@ -135,15 +135,19 @@ type Project struct {
 	Distinct bool
 }
 
-// Join combines two relations.
+// Join combines two relations. The ON condition is split into zero or more
+// equi-key pairs (LeftKeys/RightKeys, hashed) plus an optional Residual
+// predicate evaluated per candidate pair; with no key pairs the join runs as a
+// nested loop. LeftKeys and RightKeys are parallel.
 type Join struct {
-	Kind     sql.JoinKind
-	Left     Node
-	Right    Node
-	LeftKey  engine.KeyExtractor
-	RightKey engine.KeyExtractor
-	Schema   engine.Schema
-	Aliases  []engine.AliasRange // all contributing aliases in the combined schema
+	Kind      sql.JoinKind
+	Left      Node
+	Right     Node
+	LeftKeys  []engine.KeyExtractor
+	RightKeys []engine.KeyExtractor
+	Residual  sql.Expr // non-equi ON remainder, applied to each candidate pair (nil if none)
+	Schema    engine.Schema
+	Aliases   []engine.AliasRange // all contributing aliases in the combined schema
 }
 
 // Aggregate groups rows.
@@ -695,7 +699,7 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		lk, rk, err := bc.splitJoinKeys(j.On, schema, aliases, rightSchema, rightAlias)
+		lks, rks, residual, err := bc.splitJoin(j.On, schema, aliases, rightSchema, rightAlias)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
@@ -705,7 +709,7 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 		})
 		leftNode = &Join{
 			Kind: j.Kind, Left: leftNode, Right: rightNode,
-			LeftKey: lk, RightKey: rk, Schema: combined,
+			LeftKeys: lks, RightKeys: rks, Residual: residual, Schema: combined,
 			Aliases: aliases,
 		}
 		schema = combined
@@ -874,32 +878,55 @@ func (bc *buildCtx) buildTableFunc(tr sql.TableRef) (Node, engine.Schema, string
 	return node, node.Schema, alias, nil
 }
 
-// splitJoinKeys takes an ON expression of the form a.x = b.y and returns two
-// KeyExtractor closures. The left side is the already-combined relation (with
-// aliases), the right side is the new table being joined. Key indices are into
-// the combined schema on that side.
-func (bc *buildCtx) splitJoinKeys(on sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (engine.KeyExtractor, engine.KeyExtractor, error) {
-	bin, ok := on.(*sql.BinaryOp)
+// splitJoin analyzes a JOIN ON expression. Each top-level AND conjunct of the
+// form leftcol = rightcol (one column resolving to the already-combined left
+// side, the other to the right side being joined) becomes a hash-key pair; every
+// other conjunct — a non-equality comparison, an equality over expressions or
+// literals, or one touching a single side — is collected into a residual
+// predicate the engine evaluates on each candidate pair. With at least one key
+// pair the join hashes on the composite key; with none it runs as a nested loop
+// applying the residual to every pair. Key indices are into the combined schema
+// (left) / the new right schema. leftKeys and rightKeys are returned in parallel.
+func (bc *buildCtx) splitJoin(on sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (leftKeys, rightKeys []engine.KeyExtractor, residual sql.Expr, err error) {
+	var resid []sql.Expr
+	for _, c := range splitConjuncts(on) {
+		lIdx, rIdx, ok := bc.equiKey(c, leftSchema, leftAliases, rightSchema, rightAlias)
+		if !ok {
+			resid = append(resid, c)
+			continue
+		}
+		li, ri := lIdx, rIdx
+		leftKeys = append(leftKeys, func(row engine.Row) engine.Value {
+			if li >= 0 && li < len(row.Values) {
+				return row.Values[li]
+			}
+			return engine.Null()
+		})
+		rightKeys = append(rightKeys, func(row engine.Row) engine.Value {
+			if ri >= 0 && ri < len(row.Values) {
+				return row.Values[ri]
+			}
+			return engine.Null()
+		})
+	}
+	if len(leftKeys) == 0 && len(resid) == 0 {
+		return nil, nil, nil, fmt.Errorf("JOIN ON has no usable condition")
+	}
+	return leftKeys, rightKeys, andConjuncts(resid), nil
+}
+
+// equiKey reports whether conjunct c is `leftcol = rightcol` with the columns on
+// opposite join sides and, if so, returns the left/right column indices.
+func (bc *buildCtx) equiKey(c sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (int, int, bool) {
+	bin, ok := c.(*sql.BinaryOp)
 	if !ok || bin.Op != "=" {
-		return nil, nil, fmt.Errorf("JOIN ON must be a single equality a.x = b.y (compound predicates not yet supported)")
+		return 0, 0, false
 	}
 	lIdx, rIdx, err := bc.classifyJoinOperands(bin.Left, bin.Right, leftSchema, leftAliases, rightSchema, rightAlias)
 	if err != nil {
-		return nil, nil, err
+		return 0, 0, false
 	}
-	lk := func(row engine.Row) engine.Value {
-		if lIdx >= 0 && lIdx < len(row.Values) {
-			return row.Values[lIdx]
-		}
-		return engine.Null()
-	}
-	rk := func(row engine.Row) engine.Value {
-		if rIdx >= 0 && rIdx < len(row.Values) {
-			return row.Values[rIdx]
-		}
-		return engine.Null()
-	}
-	return lk, rk, nil
+	return lIdx, rIdx, true
 }
 
 // classifyJoinOperands determines which operand belongs to which side and
@@ -1345,12 +1372,12 @@ func (bc *buildCtx) tryDecorrelate(c sql.Expr, base Node, baseSchema engine.Sche
 	}
 
 	leftAliases := baseAliasRanges(base, baseSchema)
-	lk, rk, err := bc.splitJoinKeys(corr, baseSchema, leftAliases, rightSchema, rightAlias)
-	if err != nil {
+	lks, rks, joinResid, err := bc.splitJoin(corr, baseSchema, leftAliases, rightSchema, rightAlias)
+	if err != nil || len(lks) != 1 || joinResid != nil {
 		return nil, false, nil // not a plain a.x = b.y key: leave to Apply
 	}
 	return &Join{
-		Kind: kind, Left: base, Right: right, LeftKey: lk, RightKey: rk,
+		Kind: kind, Left: base, Right: right, LeftKeys: lks, RightKeys: rks,
 		Schema: baseSchema, Aliases: leftAliases,
 	}, true, nil
 }

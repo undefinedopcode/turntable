@@ -132,11 +132,19 @@ A query moves through fixed stages, one package each:
    aligned to a `Schema`. `ops.go` = operators, `eval.go` = expression
    evaluation, `funcs.go` = the scalar + aggregate **function registry**
    (`FuncRegistry`), `value.go`/`types.go` = the `Value`/`Type`/`Schema`/`Row`
-   model. Joins: in-memory hash equi-join (`HashJoinIter`) supporting
-   INNER/LEFT/RIGHT/FULL (plus planner-only SEMI/ANTI for decorrelated EXISTS);
-   the `ON` must be a single `a.x = b.y` equality (no
-   compound/non-equi conditions) — the left side is the build side, the right is
-   streamed, and the unmatched side of an outer join is NULL-padded.
+   model. Joins: in-memory `HashJoinIter` supporting INNER/LEFT/RIGHT/FULL (plus
+   planner-only SEMI/ANTI for decorrelated EXISTS). The planner's `splitJoin`
+   divides `ON` into `a.x = b.y` equi-conjuncts (each a hash-key pair; multiple
+   AND'd equalities → a **composite** bucket key) and a **residual** `sql.Expr`
+   (everything else — non-equality, expression/constant equality, single-side
+   conditions); the iterator hashes on the composite key and re-checks the
+   residual per candidate pair via an `Evaluator` over the combined schema. With
+   no equi-conjunct the key list is empty → all left rows share one bucket and it
+   degenerates to a nested-loop join (`O(left × right)`). The left side is the
+   build side, the right is streamed, and the unmatched side of an outer join is
+   NULL-padded (a left row whose every keyed partner fails the residual still
+   appears NULL-padded). `--explain` tags joins with `[N keys]`/`[residual]`/
+   `[nested loop]`.
 4. **`internal/render`** — formats the final rows. `render.go` +
    `stream_test.go`; csv/json/ndjson/yaml/raw stream row-by-row (bounded
    memory), `table` buffers to compute column widths.

@@ -109,7 +109,7 @@ func TestHashJoinIter(t *testing.T) {
 	rk := func(r Row) Value { return r.Values[0] }
 	// left = {(1,a),(2,b)}, right = {(1,x),(1,y),(9,z)}: id=1 yields 2 matches,
 	// left id=2 and right id=9 are unmatched.
-	it := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinInner, 2, 2)
+	it := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), []KeyExtractor{lk}, []KeyExtractor{rk}, nil, Evaluator{}, sql.JoinInner, 2, 2)
 	got, err := Materialize(context.Background(), it)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestHashJoinIter(t *testing.T) {
 		t.Fatalf("inner join got %d rows, want 2", len(got))
 	}
 	// Left join: + unmatched left (id=2), NULL-padded right.
-	it2 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinLeft, 2, 2)
+	it2 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), []KeyExtractor{lk}, []KeyExtractor{rk}, nil, Evaluator{}, sql.JoinLeft, 2, 2)
 	got2, err := Materialize(context.Background(), it2)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestHashJoinIter(t *testing.T) {
 		t.Fatalf("left join got %d rows, want 3", len(got2))
 	}
 	// Right join: 2 matches + unmatched right (id=9), NULL-padded left.
-	it3 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinRight, 2, 2)
+	it3 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), []KeyExtractor{lk}, []KeyExtractor{rk}, nil, Evaluator{}, sql.JoinRight, 2, 2)
 	got3, err := Materialize(context.Background(), it3)
 	if err != nil {
 		t.Fatal(err)
@@ -146,13 +146,39 @@ func TestHashJoinIter(t *testing.T) {
 		t.Error("right join: expected an unmatched right row with NULL-padded left")
 	}
 	// Full join: 2 matches + unmatched left (id=2) + unmatched right (id=9) = 4.
-	it4 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), lk, rk, sql.JoinFull, 2, 2)
+	it4 := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right), []KeyExtractor{lk}, []KeyExtractor{rk}, nil, Evaluator{}, sql.JoinFull, 2, 2)
 	got4, err := Materialize(context.Background(), it4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got4) != 4 {
 		t.Fatalf("full join got %d rows, want 4", len(got4))
+	}
+}
+
+func TestHashJoinComposite(t *testing.T) {
+	// Composite key on (col0, col1): a single-column key would over-match.
+	left := []Row{
+		{Values: []Value{IntVal(1), IntVal(1)}},
+		{Values: []Value{IntVal(1), IntVal(2)}},
+		{Values: []Value{IntVal(2), IntVal(1)}},
+	}
+	right := []Row{
+		{Values: []Value{IntVal(1), IntVal(2)}},
+		{Values: []Value{IntVal(1), IntVal(2)}},
+		{Values: []Value{IntVal(2), IntVal(2)}},
+	}
+	k0 := func(r Row) Value { return r.Values[0] }
+	k1 := func(r Row) Value { return r.Values[1] }
+	// Only left (1,2) matches right (1,2)×2 → 2 rows.
+	it := NewHashJoinIter(NewSliceIter(left), NewSliceIter(right),
+		[]KeyExtractor{k0, k1}, []KeyExtractor{k0, k1}, nil, Evaluator{}, sql.JoinInner, 2, 2)
+	got, err := Materialize(context.Background(), it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("composite inner join got %d rows, want 2", len(got))
 	}
 }
 

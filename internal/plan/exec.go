@@ -264,7 +264,16 @@ func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry, stric
 	}
 	leftWidth := len(leftSchema.Columns)
 	rightWidth := len(rightSchema.Columns)
-	it := engine.NewHashJoinIter(left, right, node.LeftKey, node.RightKey, node.Kind, leftWidth, rightWidth)
+	// The residual predicate (non-equi ON remainder) resolves columns over the
+	// combined [left..., right...] schema via the join's alias ranges.
+	var residualEval engine.Evaluator
+	if node.Residual != nil {
+		residualEval = engine.Evaluator{
+			Resolve: engine.JoinResolver(node.Schema, node.Aliases),
+			Funcs:   funcs, Strict: strict, Outer: outerFromCtx(ctx),
+		}
+	}
+	it := engine.NewHashJoinIter(left, right, node.LeftKeys, node.RightKeys, node.Residual, residualEval, node.Kind, leftWidth, rightWidth)
 	return it, node.Schema, nil
 }
 

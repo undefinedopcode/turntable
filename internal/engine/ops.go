@@ -248,22 +248,27 @@ func (l *LimitIter) Close() error {
 // column names or know about aliases/schemas.
 type KeyExtractor func(row Row) Value
 
-// HashJoinIter implements an in-memory hash equi-join supporting INNER, LEFT,
-// RIGHT, and FULL kinds. The left side is materialized as the build side; the
-// right side is streamed as the probe side. Only equi-join predicates
-// (a.col = b.col) are supported; residual non-equi predicates should be applied
-// by a separate Filter above the join. Output rows are always [left..., right...]
-// with the unmatched side NULL-padded.
+// HashJoinIter implements an in-memory join supporting INNER, LEFT, RIGHT, and
+// FULL kinds. The left side is materialized as the build side; the right side is
+// streamed as the probe side. The ON condition is split by the planner into zero
+// or more equi-key pairs (leftKeys/rightKeys, hashed into a composite bucket key)
+// plus an optional residual predicate evaluated on each candidate pair. With at
+// least one key pair this is a hash join; with none it degenerates to a nested
+// loop (every probe row pairs with every build row), the residual deciding each
+// match. Output rows are always [left..., right...] with the unmatched side
+// NULL-padded.
 type HashJoinIter struct {
-	left, right       RowIterator
-	leftKey, rightKey KeyExtractor
+	left, right         RowIterator
+	leftKeys, rightKeys []KeyExtractor
+	residual            sql.Expr // extra ON conditions, evaluated per candidate pair (nil if none)
+	eval                Evaluator // over the combined [left..., right...] schema, for residual
 
 	kind                  sql.JoinKind
 	leftWidth, rightWidth int // column counts, for NULL padding the missing side
 
 	leftRows []Row
 	// leftMatched is parallel to leftRows, set as probe rows match; bucket maps a
-	// join key to indices into leftRows.
+	// composite join key to indices into leftRows.
 	leftMatched []bool
 	bucket      map[string][]int
 	built       bool
@@ -277,18 +282,22 @@ type HashJoinIter struct {
 	closed bool
 }
 
-// NewHashJoinIter builds a hash join. leftKey/rightKey extract the join key from
-// each side's rows; leftWidth/rightWidth give the column counts used to NULL-pad
-// the missing side for outer joins.
+// NewHashJoinIter builds a join. leftKeys/rightKeys extract the composite join
+// key from each side's rows (empty → nested loop); residual (with eval over the
+// combined schema) is the non-equi remainder of ON; leftWidth/rightWidth give the
+// column counts used to NULL-pad the missing side for outer joins.
 func NewHashJoinIter(
 	left, right RowIterator,
-	leftKey, rightKey KeyExtractor,
+	leftKeys, rightKeys []KeyExtractor,
+	residual sql.Expr,
+	eval Evaluator,
 	kind sql.JoinKind,
 	leftWidth, rightWidth int,
 ) *HashJoinIter {
 	return &HashJoinIter{
 		left: left, right: right,
-		leftKey: leftKey, rightKey: rightKey,
+		leftKeys: leftKeys, rightKeys: rightKeys,
+		residual: residual, eval: eval,
 		kind: kind, leftWidth: leftWidth, rightWidth: rightWidth,
 	}
 }
@@ -305,7 +314,7 @@ func (j *HashJoinIter) build() error {
 		}
 		idx := len(j.leftRows)
 		j.leftRows = append(j.leftRows, r)
-		k := keyString(j.leftKey(r))
+		k := compositeKey(j.leftKeys, r)
 		j.bucket[k] = append(j.bucket[k], idx)
 	}
 	j.leftMatched = make([]bool, len(j.leftRows))
@@ -318,6 +327,53 @@ func keyString(v Value) string {
 		return "\x00null\x00"
 	}
 	return v.AsString()
+}
+
+// compositeKey joins each extractor's key into one bucket key. With no
+// extractors it returns a constant, so every row lands in a single bucket and
+// the join becomes a nested loop: each probe row pairs with every build row,
+// filtered by the residual.
+func compositeKey(keys []KeyExtractor, row Row) string {
+	switch len(keys) {
+	case 0:
+		return "" // single bucket: nested loop
+	case 1:
+		return keyString(keys[0](row))
+	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = keyString(k(row))
+	}
+	return strings.Join(parts, "\x00|\x00")
+}
+
+// anyNullKey reports whether any composite-key component is NULL (a NULL key
+// never matches, per SQL EXISTS / equi-join semantics).
+func anyNullKey(keys []KeyExtractor, row Row) bool {
+	for _, k := range keys {
+		if k(row).IsNull() {
+			return true
+		}
+	}
+	return false
+}
+
+// rowMatches reports whether a merged candidate row satisfies the residual ON
+// predicate (true when there is no residual). A NULL or non-true result is no
+// match, mirroring Filter semantics.
+func (j *HashJoinIter) rowMatches(merged Row) (bool, error) {
+	if j.residual == nil {
+		return true, nil
+	}
+	v, err := j.eval.Eval(j.residual, merged)
+	if err != nil {
+		return false, err
+	}
+	if v.IsNull() {
+		return false, nil
+	}
+	b, ok := v.AsBool()
+	return ok && b, nil
 }
 
 func (j *HashJoinIter) keepsUnmatchedLeft() bool {
@@ -354,21 +410,24 @@ func (j *HashJoinIter) Next() (Row, bool, error) {
 				j.rightDone = true
 				continue
 			}
-			idxs := j.bucket[keyString(j.rightKey(rr))]
-			if len(idxs) == 0 {
-				// Unmatched right row: emit it NULL-padded on the left for
-				// RIGHT/FULL; otherwise drop it.
-				if j.keepsUnmatchedRight() {
-					return mergeRows(nullRow(j.leftWidth), rr), true, nil
-				}
-				continue
-			}
 			j.pending = j.pending[:0]
-			for _, i := range idxs {
-				j.leftMatched[i] = true
-				j.pending = append(j.pending, mergeRows(j.leftRows[i], rr))
-			}
 			j.pendi = 0
+			for _, i := range j.bucket[compositeKey(j.rightKeys, rr)] {
+				merged := mergeRows(j.leftRows[i], rr)
+				m, err := j.rowMatches(merged)
+				if err != nil {
+					return Row{}, false, err
+				}
+				if m {
+					j.leftMatched[i] = true
+					j.pending = append(j.pending, merged)
+				}
+			}
+			// No build row matched (empty bucket, or all failed the residual):
+			// emit the right row NULL-padded on the left for RIGHT/FULL.
+			if len(j.pending) == 0 && j.keepsUnmatchedRight() {
+				j.pending = append(j.pending, mergeRows(nullRow(j.leftWidth), rr))
+			}
 			continue
 		}
 
@@ -401,11 +460,19 @@ func (j *HashJoinIter) nextSemiAnti() (Row, bool, error) {
 			if !ok {
 				break
 			}
-			rk := j.rightKey(rr)
-			if rk.IsNull() {
+			if anyNullKey(j.rightKeys, rr) {
 				continue
 			}
-			for _, i := range j.bucket[keyString(rk)] {
+			for _, i := range j.bucket[compositeKey(j.rightKeys, rr)] {
+				if j.residual != nil {
+					m, err := j.rowMatches(mergeRows(j.leftRows[i], rr))
+					if err != nil {
+						return Row{}, false, err
+					}
+					if !m {
+						continue
+					}
+				}
 				j.leftMatched[i] = true
 			}
 		}
