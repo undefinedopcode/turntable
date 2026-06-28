@@ -16,6 +16,14 @@ DOCS_CSS := $(DOCS_DIR)/style.css
 # First available pandoc PDF engine, in preference order (typst/weasyprint are
 # the lightest to install on Arch); empty when none is present.
 PDF_ENGINE := $(firstword $(foreach e,typst weasyprint wkhtmltopdf tectonic xelatex lualatex pdflatex prince,$(if $(shell command -v $(e) 2>/dev/null),$(e))))
+# Fonts for the PDF body/code. pandoc's default fonts (typst: none; LaTeX: Latin
+# Modern) are often absent, so we point at system fonts. Override if DejaVu is
+# not installed: `make docs-pdf DOC_MAINFONT="Noto Sans" DOC_MONOFONT="Noto Sans Mono"`.
+DOC_MAINFONT ?= DejaVu Sans
+DOC_MONOFONT ?= DejaVu Sans Mono
+# Only typst / xelatex / lualatex / tectonic honor -V mainfont (pdflatex can't use
+# system fonts; weasyprint/wkhtmltopdf style via docs/style.css).
+PDF_FONT_FLAGS := $(if $(filter $(PDF_ENGINE),typst xelatex lualatex tectonic),-V mainfont="$(DOC_MAINFONT)" -V monofont="$(DOC_MONOFONT)")
 
 .DEFAULT_GOAL := help
 
@@ -100,9 +108,9 @@ docs-pdf: DIALECT.md
 	$(PANDOC) DIALECT.md \
 	  --toc --toc-depth=3 \
 	  --metadata title="Turntable SQL Dialect Reference" \
-	  --highlight-style=tango --pdf-engine=$(PDF_ENGINE) \
+	  --highlight-style=tango --pdf-engine=$(PDF_ENGINE) $(PDF_FONT_FLAGS) \
 	  -o $(DOCS_DIR)/DIALECT.pdf
-	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE))"
+	@echo "wrote $(DOCS_DIR)/DIALECT.pdf (engine: $(PDF_ENGINE), font: $(DOC_MAINFONT))"
 
 ## clean-docs: remove generated docs (keeps docs/style.css)
 .PHONY: clean-docs
