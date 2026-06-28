@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/april/turntable/internal/sql"
 )
@@ -1495,10 +1496,18 @@ func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, r
 		if strings.EqualFold(spec.Frame.Unit, "RANGE") {
 			return computeWindowRange(spec, idxs, rows, eval, result, add)
 		}
+		startOff, err := frameOffsetInt(spec.Frame.Start, eval)
+		if err != nil {
+			return err
+		}
+		endOff, err := frameOffsetInt(spec.Frame.End, eval)
+		if err != nil {
+			return err
+		}
 		n := len(idxs)
 		for pos := 0; pos < n; pos++ {
-			lo := frameBoundIndex(spec.Frame.Start, pos, n)
-			hi := frameBoundIndex(spec.Frame.End, pos, n)
+			lo := frameBoundIndex(spec.Frame.Start.Kind, startOff, pos, n)
+			hi := frameBoundIndex(spec.Frame.End.Kind, endOff, pos, n)
 			if lo < 0 {
 				lo = 0
 			}
@@ -1557,19 +1566,35 @@ func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, r
 
 // frameBoundIndex resolves a ROWS frame bound to a (possibly out-of-range)
 // row index within an n-row partition, for the row at ordinal `pos`.
-func frameBoundIndex(b sql.FrameBound, pos, n int) int {
-	switch b.Kind {
+func frameBoundIndex(kind string, offset, pos, n int) int {
+	switch kind {
 	case "UNBOUNDED_PRECEDING":
 		return 0
 	case "UNBOUNDED_FOLLOWING":
 		return n - 1
 	case "PRECEDING":
-		return pos - b.Offset
+		return pos - offset
 	case "FOLLOWING":
-		return pos + b.Offset
+		return pos + offset
 	default: // CURRENT_ROW
 		return pos
 	}
+}
+
+// frameOffsetInt evaluates a ROWS frame bound's (constant) integer row offset.
+func frameOffsetInt(b sql.FrameBound, eval Evaluator) (int, error) {
+	if b.Offset == nil || (b.Kind != "PRECEDING" && b.Kind != "FOLLOWING") {
+		return 0, nil
+	}
+	v, err := eval.Eval(b.Offset, Row{})
+	if err != nil {
+		return 0, err
+	}
+	n, ok := v.AsInt()
+	if !ok || n < 0 {
+		return 0, fmt.Errorf("ROWS frame offset must be a non-negative integer")
+	}
+	return int(n), nil
 }
 
 // computeWindowRange evaluates a RANGE frame: the frame for a row is defined by
@@ -1591,7 +1616,7 @@ func computeWindowRange(spec WindowSpec, idxs []int, rows []Row, eval Evaluator,
 		ovals[pos] = v
 	}
 	for pos := 0; pos < n; pos++ {
-		lo, hi, err := rangeFrameBounds(spec.Frame, ovals, pos, desc)
+		lo, hi, err := rangeFrameBounds(spec.Frame, ovals, pos, desc, eval)
 		if err != nil {
 			return err
 		}
@@ -1608,12 +1633,12 @@ func computeWindowRange(spec WindowSpec, idxs []int, rows []Row, eval Evaluator,
 
 // rangeFrameBounds resolves the [lo, hi] ordered-position range covered by a
 // RANGE frame for the row at `pos`, given the ordered values and sort direction.
-func rangeFrameBounds(frame *sql.WindowFrame, ovals []Value, pos int, desc bool) (int, int, error) {
+func rangeFrameBounds(frame *sql.WindowFrame, ovals []Value, pos int, desc bool, eval Evaluator) (int, int, error) {
 	n := len(ovals)
 	cur := ovals[pos]
 	lo := 0
 	if frame.Start.Kind != "UNBOUNDED_PRECEDING" {
-		target, err := rangeTarget(frame.Start, cur, desc)
+		target, err := rangeTarget(frame.Start, cur, desc, eval)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -1623,7 +1648,7 @@ func rangeFrameBounds(frame *sql.WindowFrame, ovals []Value, pos int, desc bool)
 	}
 	hi := n - 1
 	if frame.End.Kind != "UNBOUNDED_FOLLOWING" {
-		target, err := rangeTarget(frame.End, cur, desc)
+		target, err := rangeTarget(frame.End, cur, desc, eval)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -1635,23 +1660,42 @@ func rangeFrameBounds(frame *sql.WindowFrame, ovals []Value, pos int, desc bool)
 }
 
 // rangeTarget computes the value edge a RANGE bound refers to: the current value
-// for CURRENT ROW, or cur ± offset for PRECEDING/FOLLOWING (sign flipped for DESC).
-func rangeTarget(b sql.FrameBound, cur Value, desc bool) (Value, error) {
+// for CURRENT ROW, or cur ± offset for PRECEDING/FOLLOWING (sign flipped for
+// DESC). The offset is numeric for a numeric ORDER BY column, or an INTERVAL
+// duration for a timestamp column.
+func rangeTarget(b sql.FrameBound, cur Value, desc bool, eval Evaluator) (Value, error) {
 	if b.Kind == "CURRENT_ROW" {
 		return cur, nil
 	}
-	f, ok := cur.AsFloat()
-	if !ok {
-		return Value{}, fmt.Errorf("RANGE PRECEDING/FOLLOWING needs a numeric ORDER BY value")
+	off, err := eval.Eval(b.Offset, Row{})
+	if err != nil {
+		return Value{}, err
 	}
 	add := b.Kind == "FOLLOWING"
 	if desc {
 		add = !add
 	}
-	if add {
-		return FloatVal(f + float64(b.Offset)), nil
+	// Timestamp ORDER BY column: the offset must be an INTERVAL duration.
+	if ct, ok := cur.V.(time.Time); ok {
+		d, ok := off.V.(time.Duration)
+		if !ok {
+			return Value{}, fmt.Errorf("RANGE over a timestamp needs an INTERVAL offset")
+		}
+		if !add {
+			d = -d
+		}
+		return TimeVal(ct.Add(d)), nil
 	}
-	return FloatVal(f - float64(b.Offset)), nil
+	// Numeric ORDER BY column.
+	f, ok1 := cur.AsFloat()
+	of, ok2 := off.AsFloat()
+	if !ok1 || !ok2 {
+		return Value{}, fmt.Errorf("RANGE offset must be numeric (or INTERVAL for a timestamp)")
+	}
+	if add {
+		return FloatVal(f + of), nil
+	}
+	return FloatVal(f - of), nil
 }
 
 // rangeAtOrAfter / rangeAtOrBefore test a value against a frame edge in sort

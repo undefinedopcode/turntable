@@ -92,7 +92,9 @@ A query moves through fixed stages, one package each:
    parsed into `sql.WindowFrame`/`FrameBound`): ROWS uses physical offsets
    (`frameBoundIndex`) for moving averages; RANGE is value-based
    (`computeWindowRange` — peers share a frame, offsets are value windows;
-   single ORDER BY, numeric for offsets). GROUPS errors; the default frame
+   single ORDER BY, numeric offset, or a timestamp column with an `INTERVAL`
+   offset for rolling time windows — `INTERVAL '…'` is an `sql.IntervalLit`
+   evaluating to a `TypeDuration`, and `Arith` does time±duration / time−time). GROUPS errors; the default frame
    (whole partition, or running when ORDER BY'd) applies when none is given.
    Distribution window fns NTILE/PERCENT_RANK/CUME_DIST and the two-column stats
    CORR/COVAR_*/REGR_* (paired via AggSpec.Arg2, `computeRegr`) also live here.

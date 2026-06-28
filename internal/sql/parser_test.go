@@ -166,6 +166,13 @@ func TestParseWindowFunction(t *testing.T) {
 	}
 }
 
+func frameOffsetLit(e Expr) int64 {
+	if l, ok := e.(*LitInt); ok {
+		return l.V
+	}
+	return -1
+}
+
 func TestParseWindowFrame(t *testing.T) {
 	// BETWEEN form with numeric + CURRENT ROW bounds.
 	s := mustParseSelect(t, "SELECT AVG(v) OVER (ORDER BY t ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM x")
@@ -173,7 +180,7 @@ func TestParseWindowFrame(t *testing.T) {
 	if f == nil || f.Unit != "ROWS" {
 		t.Fatalf("frame = %+v, want ROWS", f)
 	}
-	if f.Start.Kind != "PRECEDING" || f.Start.Offset != 2 {
+	if f.Start.Kind != "PRECEDING" || frameOffsetLit(f.Start.Offset) != 2 {
 		t.Errorf("start = %+v, want 2 PRECEDING", f.Start)
 	}
 	if f.End.Kind != "CURRENT_ROW" {
@@ -190,8 +197,16 @@ func TestParseWindowFrame(t *testing.T) {
 	// FOLLOWING bound.
 	s = mustParseSelect(t, "SELECT SUM(v) OVER (ORDER BY t ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM x")
 	f = s.Items.Items[0].Expr.(*FuncCall).Over.Frame
-	if f.End.Kind != "FOLLOWING" || f.End.Offset != 1 {
+	if f.End.Kind != "FOLLOWING" || frameOffsetLit(f.End.Offset) != 1 {
 		t.Errorf("end = %+v, want 1 FOLLOWING", f.End)
+	}
+
+	// INTERVAL offset (time-series) parses to an IntervalLit.
+	s = mustParseSelect(t, "SELECT AVG(v) OVER (ORDER BY t RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) FROM x")
+	f = s.Items.Items[0].Expr.(*FuncCall).Over.Frame
+	il, ok := f.Start.Offset.(*IntervalLit)
+	if f.Unit != "RANGE" || !ok || il.Spec != "7 days" {
+		t.Errorf("interval frame = %+v / %+v", f, f.Start.Offset)
 	}
 
 	// RANGE parses (Unit reflects it); GROUPS is rejected.
@@ -384,8 +399,8 @@ func TestParseTrailingSemicolon(t *testing.T) {
 		"SELECT 1;",
 		"SELECT 1 ;",
 		"SELECT region FROM t WHERE x = 1 LIMIT 5;",
-		"SELECT 1;;",        // multiple trailing semicolons
-		"SELECT 1;\n",       // trailing newline after the semicolon
+		"SELECT 1;;",                        // multiple trailing semicolons
+		"SELECT 1;\n",                       // trailing newline after the semicolon
 		"SELECT * FROM http://h/data.json;", // trailing ';' after a URL ref
 	}
 	for _, q := range ok {

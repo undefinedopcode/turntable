@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/april/turntable/internal/sql"
 )
@@ -317,13 +318,13 @@ func TestWindowFrame(t *testing.T) {
 	}
 	// Trailing 3-row sum: ROWS BETWEEN 2 PRECEDING AND CURRENT ROW.
 	check("trailing3", &sql.WindowFrame{Unit: "ROWS",
-		Start: sql.FrameBound{Kind: "PRECEDING", Offset: 2},
+		Start: sql.FrameBound{Kind: "PRECEDING", Offset: &sql.LitInt{V: 2}},
 		End:   sql.FrameBound{Kind: "CURRENT_ROW"}},
 		[]float64{10, 30, 60, 90, 120})
 	// Centered, clamped at the edges: 1 PRECEDING .. 1 FOLLOWING.
 	check("centered", &sql.WindowFrame{Unit: "ROWS",
-		Start: sql.FrameBound{Kind: "PRECEDING", Offset: 1},
-		End:   sql.FrameBound{Kind: "FOLLOWING", Offset: 1}},
+		Start: sql.FrameBound{Kind: "PRECEDING", Offset: &sql.LitInt{V: 1}},
+		End:   sql.FrameBound{Kind: "FOLLOWING", Offset: &sql.LitInt{V: 1}}},
 		[]float64{30, 60, 90, 120, 90})
 	// Running total: UNBOUNDED PRECEDING .. CURRENT ROW.
 	check("running", &sql.WindowFrame{Unit: "ROWS",
@@ -440,10 +441,50 @@ func TestWindowRangeFrame(t *testing.T) {
 	gap := []Row{mk(1, 10), mk(3, 30), mk(4, 40), mk(5, 50)}
 	got, _ = computeWindow(WindowSpec{Func: "SUM", Args: vcol, OrderBy: order,
 		Frame: &sql.WindowFrame{Unit: "RANGE",
-			Start: sql.FrameBound{Kind: "PRECEDING", Offset: 1}, End: cur}}, gap, eval)
+			Start: sql.FrameBound{Kind: "PRECEDING", Offset: &sql.LitInt{V: 1}}, End: cur}}, gap, eval)
 	for i, w := range []float64{10, 30, 70, 90} {
 		if f, _ := got[i].AsFloat(); f != w {
 			t.Errorf("RANGE value-window row %d = %v, want %v", i, got[i], w)
 		}
+	}
+}
+
+func TestWindowRangeInterval(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "ts", Type: TypeTime}, {Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	day := func(s string) time.Time { tm, _ := time.Parse("2006-01-02", s); return tm }
+	mk := func(s string, v int64) Row { return Row{Values: []Value{TimeVal(day(s)), IntVal(v)}} }
+	// Daily values with a gap (nothing on the 4th-7th).
+	rows := []Row{mk("2024-03-01", 10), mk("2024-03-02", 20), mk("2024-03-03", 30), mk("2024-03-08", 40), mk("2024-03-09", 50)}
+	frame := &sql.WindowFrame{Unit: "RANGE",
+		Start: sql.FrameBound{Kind: "PRECEDING", Offset: &sql.IntervalLit{Spec: "7 days"}},
+		End:   sql.FrameBound{Kind: "CURRENT_ROW"}}
+	got, err := computeWindow(WindowSpec{Func: "SUM",
+		Args:    []sql.Expr{&sql.ColRef{Name: "v"}},
+		OrderBy: []sql.OrderTerm{{Expr: &sql.ColRef{Name: "ts"}}},
+		Frame:   frame}, rows, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mar 8 includes Mar 1 (8-7=1, inclusive); Mar 9 drops it.
+	for i, w := range []float64{10, 30, 60, 100, 140} {
+		if f, _ := got[i].AsFloat(); f != w {
+			t.Errorf("7-day window row %d = %v, want %v", i, got[i], w)
+		}
+	}
+}
+
+func TestTemporalArith(t *testing.T) {
+	d := func(s string) time.Time { tm, _ := time.Parse("2006-01-02", s); return tm }
+	week := Value{Type: TypeDuration, V: 7 * 24 * time.Hour}
+	// time + duration -> time
+	got, _ := Arith("+", TimeVal(d("2024-03-01")), week)
+	if !got.V.(time.Time).Equal(d("2024-03-08")) {
+		t.Errorf("time + 7d = %v, want 2024-03-08", got)
+	}
+	// time - time -> duration
+	got, _ = Arith("-", TimeVal(d("2024-03-08")), TimeVal(d("2024-03-01")))
+	if got.V.(time.Duration) != 7*24*time.Hour {
+		t.Errorf("time - time = %v, want 168h", got)
 	}
 }

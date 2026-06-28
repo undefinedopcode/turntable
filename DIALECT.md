@@ -228,6 +228,7 @@ Domain errors (`SQRT(-1)`, `LN(0)`, …) return `NULL` rather than NaN/∞.
 |----------|--------|
 | `NOW()` / `CURRENT_TIMESTAMP` | current timestamp |
 | `CURRENT_DATE` | today at 00:00 |
+| `INTERVAL '<spec>'` | a duration literal (e.g. `'7 days'`, `'2h30m'`). Add/subtract with a timestamp: `ts + INTERVAL '1 day'`, `NOW() - INTERVAL '1 hour'`; `ts1 - ts2` yields a duration |
 | `DATE(x)` | truncate a timestamp to the date |
 | `DATE_TRUNC(unit, ts)` | truncate to `second/minute/hour/day/week/month/quarter/year` |
 | `DATE_ADD(ts, interval)` | add an interval string (e.g. `'1 day'`, `'2h30m'`) |
@@ -331,9 +332,17 @@ FROM series
 
 `RANGE` frames work on the `ORDER BY` **value** instead of row position: peers
 (equal values) share a frame, and `n PRECEDING`/`n FOLLOWING` select a value
-window (`v` within `cur ± n`, so gaps are skipped). RANGE needs exactly one
-`ORDER BY` column, and offset bounds need it to be numeric. `GROUPS` is not
-supported.
+window (`v` within `cur ± n`, so gaps are skipped). For a **timestamp** order
+column the offset is an `INTERVAL` — a rolling time window:
+
+```sql
+SELECT ts, v,
+       AVG(v) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS avg_7d
+FROM metrics
+```
+
+RANGE needs exactly one `ORDER BY` column (numeric, or timestamp with an
+`INTERVAL` offset). `GROUPS` is not supported.
 
 Without a frame, a window aggregate covers the whole partition when there is no
 `ORDER BY`, or a running frame (cumulative through the current row, ties sharing

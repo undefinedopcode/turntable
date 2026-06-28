@@ -730,6 +730,14 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return p.parseCase()
 	case p.kw("CAST"):
 		return p.parseCast()
+	case p.kw("INTERVAL"):
+		p.advance()
+		s := p.cur()
+		if s.Kind != TKString {
+			return nil, p.errf("expected a string after INTERVAL, e.g. INTERVAL '7 days'")
+		}
+		p.advance()
+		return &IntervalLit{Spec: s.Value}, nil
 	case p.kw("EXTRACT"):
 		return p.parseExtract()
 	case p.kw("POSITION"):
@@ -1135,18 +1143,20 @@ func (p *Parser) parseFrameBound() (FrameBound, error) {
 		}
 		p.advance()
 		return FrameBound{Kind: "CURRENT_ROW"}, nil
-	case p.cur().Kind == TKInt:
-		t := p.advance()
-		n, _ := strconv.Atoi(t.Value)
-		if p.word("PRECEDING") {
-			p.advance()
-			return FrameBound{Kind: "PRECEDING", Offset: n}, nil
-		}
-		if p.word("FOLLOWING") {
-			p.advance()
-			return FrameBound{Kind: "FOLLOWING", Offset: n}, nil
-		}
-		return FrameBound{}, p.errf("expected PRECEDING or FOLLOWING after %s", t.Value)
 	}
-	return FrameBound{}, p.errf("expected a window frame bound")
+	// Offset bound: `<expr> PRECEDING|FOLLOWING`, where <expr> is an integer (for
+	// ROWS) or an integer / INTERVAL '…' (for RANGE).
+	off, err := p.parseExpr()
+	if err != nil {
+		return FrameBound{}, err
+	}
+	if p.word("PRECEDING") {
+		p.advance()
+		return FrameBound{Kind: "PRECEDING", Offset: off}, nil
+	}
+	if p.word("FOLLOWING") {
+		p.advance()
+		return FrameBound{Kind: "FOLLOWING", Offset: off}, nil
+	}
+	return FrameBound{}, p.errf("expected PRECEDING or FOLLOWING after the frame offset")
 }

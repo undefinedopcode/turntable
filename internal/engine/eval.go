@@ -50,6 +50,12 @@ func (e Evaluator) Eval(expr sql.Expr, row Row) (Value, error) {
 		return BoolVal(ex.V), nil
 	case *sql.LitNull:
 		return Null(), nil
+	case *sql.IntervalLit:
+		d, err := parseInterval(ex.Spec)
+		if err != nil {
+			return Value{}, fmt.Errorf("INTERVAL: %v", err)
+		}
+		return Value{Type: TypeDuration, V: d}, nil
 
 	case *sql.ColRef:
 		idx := e.Resolve(ex.Qualifier, ex.Name)

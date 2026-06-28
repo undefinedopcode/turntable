@@ -196,6 +196,10 @@ func Arith(op string, a, b Value) (Value, error) {
 	if a.IsNull() || b.IsNull() {
 		return Null(), nil
 	}
+	// Temporal arithmetic when either side is a time or a duration.
+	if a.Type == TypeTime || a.Type == TypeDuration || b.Type == TypeTime || b.Type == TypeDuration {
+		return temporalArith(op, a, b)
+	}
 	// If both are ints and op is not "/", keep int.
 	ai, aok := a.AsInt()
 	bi, bok := b.AsInt()
@@ -232,6 +236,31 @@ func Arith(op string, a, b Value) (Value, error) {
 		return FloatVal(r), nil
 	}
 	return Value{}, fmt.Errorf("unknown arithmetic op %q", op)
+}
+
+// temporalArith handles +/- on times and durations: time ± duration -> time,
+// time - time -> duration, duration ± duration -> duration.
+func temporalArith(op string, a, b Value) (Value, error) {
+	at, aIsT := a.V.(time.Time)
+	bt, bIsT := b.V.(time.Time)
+	ad, aIsD := a.V.(time.Duration)
+	bd, bIsD := b.V.(time.Duration)
+	dur := func(d time.Duration) Value { return Value{Type: TypeDuration, V: d} }
+	switch {
+	case op == "+" && aIsT && bIsD:
+		return TimeVal(at.Add(bd)), nil
+	case op == "+" && aIsD && bIsT:
+		return TimeVal(bt.Add(ad)), nil
+	case op == "-" && aIsT && bIsD:
+		return TimeVal(at.Add(-bd)), nil
+	case op == "-" && aIsT && bIsT:
+		return dur(at.Sub(bt)), nil
+	case op == "+" && aIsD && bIsD:
+		return dur(ad + bd), nil
+	case op == "-" && aIsD && bIsD:
+		return dur(ad - bd), nil
+	}
+	return Value{}, fmt.Errorf("cannot apply %q to %s and %s", op, a.Type, b.Type)
 }
 
 // Negate negates a numeric value.

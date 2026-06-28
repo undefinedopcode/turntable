@@ -129,11 +129,16 @@ type LitString struct{ V string }
 type LitBool struct{ V bool }
 type LitNull struct{}
 
-func (*LitInt) exprNode()    {}
-func (*LitFloat) exprNode()  {}
-func (*LitString) exprNode() {}
-func (*LitBool) exprNode()   {}
-func (*LitNull) exprNode()   {}
+// IntervalLit is `INTERVAL '<spec>'` — a duration literal (e.g. '7 days',
+// '2h30m'), parsed like the DATE_ADD interval string.
+type IntervalLit struct{ Spec string }
+
+func (*LitInt) exprNode()      {}
+func (*LitFloat) exprNode()    {}
+func (*LitString) exprNode()   {}
+func (*LitBool) exprNode()     {}
+func (*LitNull) exprNode()     {}
+func (*IntervalLit) exprNode() {}
 
 // Refs
 type ColRef struct {
@@ -222,8 +227,10 @@ type WindowFrame struct {
 type FrameBound struct {
 	// Kind is one of: UNBOUNDED_PRECEDING, PRECEDING, CURRENT_ROW, FOLLOWING,
 	// UNBOUNDED_FOLLOWING.
-	Kind   string
-	Offset int // row count for PRECEDING / FOLLOWING
+	Kind string
+	// Offset is the PRECEDING/FOLLOWING distance: an integer for ROWS, or an
+	// integer / INTERVAL for RANGE (nil for the other bound kinds).
+	Offset Expr
 }
 
 // ExistsExpr is EXISTS (subquery): true if the subquery yields any row. NOT
