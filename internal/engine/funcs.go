@@ -145,6 +145,7 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("CURRENT_DATE", funcCurrentDate)
 	r.Register("CONVERT_TZ", funcConvertTZ)
 	r.Register("FROM_TZ", funcFromTZ)
+	r.Register("DATE_BIN", funcDateBin)
 }
 
 func funcCoalesce(args []Value) (Value, error) {
@@ -973,6 +974,44 @@ func funcDateTrunc(args []Value) (Value, error) {
 		return TimeVal(base.AddDate(0, 0, -days)), nil
 	}
 	return Value{}, fmt.Errorf("DATE_TRUNC: unknown unit %q", unit)
+}
+
+// funcDateBin buckets a timestamp into fixed-width `stride` intervals aligned to
+// `origin`: DATE_BIN(stride, ts, origin) = origin + floor((ts-origin)/stride) *
+// stride. Like DATE_TRUNC but for arbitrary strides (15 minutes, 6 hours, …).
+// `stride` is an INTERVAL (or an interval string).
+func funcDateBin(args []Value) (Value, error) {
+	if len(args) != 3 {
+		return Value{}, fmt.Errorf("DATE_BIN expects 3 args (stride, timestamp, origin)")
+	}
+	if args[0].IsNull() || args[1].IsNull() || args[2].IsNull() {
+		return Null(), nil
+	}
+	stride, ok := args[0].V.(time.Duration)
+	if !ok {
+		d, err := parseInterval(args[0].AsString())
+		if err != nil {
+			return Value{}, fmt.Errorf("DATE_BIN: stride must be an INTERVAL: %v", err)
+		}
+		stride = d
+	}
+	if stride <= 0 {
+		return Value{}, fmt.Errorf("DATE_BIN: stride must be positive")
+	}
+	ts, ok := asTimeVal(args[1])
+	if !ok {
+		return Value{}, fmt.Errorf("DATE_BIN: second arg must be a timestamp")
+	}
+	origin, ok := asTimeVal(args[2])
+	if !ok {
+		return Value{}, fmt.Errorf("DATE_BIN: third arg must be a timestamp")
+	}
+	diff := ts.Sub(origin)
+	n := diff / stride
+	if diff < 0 && diff%stride != 0 {
+		n-- // floor toward negative infinity
+	}
+	return TimeVal(origin.Add(n * stride)), nil
 }
 
 func funcDateAdd(args []Value) (Value, error) {

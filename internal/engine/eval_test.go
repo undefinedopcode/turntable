@@ -474,3 +474,32 @@ func TestTimezoneFunctions(t *testing.T) {
 		t.Error("CONVERT_TZ with bogus zone: expected error")
 	}
 }
+
+func TestDateBin(t *testing.T) {
+	fr := NewFuncRegistry()
+	origin, _ := parseTime("2024-03-10T00:00:00Z")
+	stride := Value{Type: TypeDuration, V: 15 * time.Minute}
+	cases := []struct {
+		ts   string
+		want string
+	}{
+		{"2024-03-10T00:37:00Z", "2024-03-10T00:30:00Z"}, // floors into the 00:30 bucket
+		{"2024-03-10T00:00:00Z", "2024-03-10T00:00:00Z"}, // exact boundary
+		{"2024-03-10T00:14:59Z", "2024-03-10T00:00:00Z"},
+	}
+	for _, c := range cases {
+		ts, _ := parseTime(c.ts)
+		want, _ := parseTime(c.want)
+		got, err := fr.Lookup("DATE_BIN")([]Value{stride, TimeVal(ts), TimeVal(origin)})
+		if err != nil {
+			t.Fatalf("DATE_BIN(%s): %v", c.ts, err)
+		}
+		if !got.V.(time.Time).Equal(want) {
+			t.Errorf("DATE_BIN(15m, %s) = %v, want %s", c.ts, got, c.want)
+		}
+	}
+	// A string stride is accepted; a non-positive stride errors.
+	if _, err := fr.Lookup("DATE_BIN")([]Value{StringVal("1 hour"), TimeVal(origin), TimeVal(origin)}); err != nil {
+		t.Errorf("string stride: %v", err)
+	}
+}

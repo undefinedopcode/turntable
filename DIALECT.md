@@ -231,6 +231,7 @@ Domain errors (`SQRT(-1)`, `LN(0)`, …) return `NULL` rather than NaN/∞.
 | `INTERVAL '<spec>'` | a duration literal (e.g. `'7 days'`, `'2h30m'`). Add/subtract with a timestamp: `ts + INTERVAL '1 day'`, `NOW() - INTERVAL '1 hour'`; `ts1 - ts2` yields a duration |
 | `DATE(x)` | truncate a timestamp to the date |
 | `DATE_TRUNC(unit, ts)` | truncate to `second/minute/hour/day/week/month/quarter/year` |
+| `DATE_BIN(stride, ts, origin)` | bucket `ts` into fixed `stride` intervals (any width, e.g. `INTERVAL '15 minutes'`) aligned to `origin` |
 | `DATE_ADD(ts, interval)` | add an interval string (e.g. `'1 day'`, `'2h30m'`) |
 | `AGE(ts1, ts2)` | duration `ts1 - ts2` (one-arg form returns `ts1`) |
 | `TO_TIMESTAMP(epoch)` | time from unix epoch seconds |
