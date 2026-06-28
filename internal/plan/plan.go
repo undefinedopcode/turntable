@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
@@ -48,6 +49,19 @@ type Scan struct {
 // NoFrom is a synthetic single-row, zero-column relation for "SELECT <expr>"
 // queries that have no FROM clause (e.g. scratch math in the REPL).
 type NoFrom struct{}
+
+// TableFunc is a set-returning function in FROM (currently generate_series),
+// resolved at plan time to its concrete bounds — an integer or timestamp series
+// of one column, under an alias.
+type TableFunc struct {
+	IsTime              bool
+	IntStart, IntStop   int64
+	IntStep             int64
+	TimeStart, TimeStop time.Time
+	TimeStep            time.Duration
+	Schema              engine.Schema
+	Alias               string
+}
 
 // Subquery is a derived table: a FROM-clause subquery whose child plan produces
 // the rows, presented under an alias. It passes the child's rows through
@@ -166,6 +180,7 @@ func (*Aggregate) planNode() {}
 func (*Sort) planNode()      {}
 func (*Limit) planNode()     {}
 func (*NoFrom) planNode()    {}
+func (*TableFunc) planNode() {}
 
 // buildCtx carries planner state down the tree.
 type buildCtx struct {
@@ -701,6 +716,9 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 
 // buildTableRef resolves a single FROM/JOIN table reference into a Scan node.
 func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string, error) {
+	if tr.Func != nil {
+		return bc.buildTableFunc(tr)
+	}
 	if tr.Subquery != nil {
 		alias := tr.Alias
 		if alias == "" {
@@ -755,6 +773,71 @@ func (bc *buildCtx) buildTableRef(tr sql.TableRef) (Node, engine.Schema, string,
 		}
 	}
 	return &Scan{Source: src, Schema: schema, Alias: alias}, schema, alias, nil
+}
+
+// buildTableFunc resolves a FROM-clause table function. generate_series(start,
+// stop[, step]) produces a one-column relation: an integer series, or a
+// timestamp series when start/stop are timestamps and step is an INTERVAL. The
+// (constant) arguments are evaluated at plan time so the schema type is known.
+func (bc *buildCtx) buildTableFunc(tr sql.TableRef) (Node, engine.Schema, string, error) {
+	fc := tr.Func
+	alias := tr.Alias
+	if alias == "" {
+		alias = strings.ToLower(fc.Name)
+	}
+	if !strings.EqualFold(fc.Name, "generate_series") {
+		return nil, engine.Schema{}, "", fmt.Errorf("unknown table function %q", fc.Name)
+	}
+	if len(fc.Args) < 2 || len(fc.Args) > 3 {
+		return nil, engine.Schema{}, "", fmt.Errorf("generate_series expects (start, stop[, step])")
+	}
+	ev := engine.Evaluator{Funcs: engine.NewFuncRegistry(), Resolve: func(string, string) int { return -1 }}
+	vals := make([]engine.Value, len(fc.Args))
+	for i, a := range fc.Args {
+		v, err := ev.Eval(a, engine.Row{})
+		if err != nil {
+			return nil, engine.Schema{}, "", fmt.Errorf("generate_series argument %d: %w", i+1, err)
+		}
+		if v.IsNull() {
+			return nil, engine.Schema{}, "", fmt.Errorf("generate_series arguments must not be NULL")
+		}
+		vals[i] = v
+	}
+
+	node := &TableFunc{Alias: alias}
+	if vals[0].Type == engine.TypeTime {
+		start, _ := vals[0].V.(time.Time)
+		stop, ok := vals[1].V.(time.Time)
+		if !ok {
+			return nil, engine.Schema{}, "", fmt.Errorf("generate_series: stop must be a timestamp like start")
+		}
+		if len(fc.Args) != 3 {
+			return nil, engine.Schema{}, "", fmt.Errorf("a timestamp generate_series needs an INTERVAL step")
+		}
+		step, ok := vals[2].V.(time.Duration)
+		if !ok || step == 0 {
+			return nil, engine.Schema{}, "", fmt.Errorf("generate_series step must be a non-zero INTERVAL")
+		}
+		node.IsTime, node.TimeStart, node.TimeStop, node.TimeStep = true, start, stop, step
+		node.Schema = engine.Schema{Columns: []engine.Column{{Name: "value", Type: engine.TypeTime, Nullable: false}}}
+	} else {
+		start, ok1 := vals[0].AsInt()
+		stop, ok2 := vals[1].AsInt()
+		if !ok1 || !ok2 {
+			return nil, engine.Schema{}, "", fmt.Errorf("generate_series start/stop must be integers or timestamps")
+		}
+		step := int64(1)
+		if len(fc.Args) == 3 {
+			s, ok := vals[2].AsInt()
+			if !ok || s == 0 {
+				return nil, engine.Schema{}, "", fmt.Errorf("generate_series step must be a non-zero integer")
+			}
+			step = s
+		}
+		node.IntStart, node.IntStop, node.IntStep = start, stop, step
+		node.Schema = engine.Schema{Columns: []engine.Column{{Name: "value", Type: engine.TypeInt, Nullable: false}}}
+	}
+	return node, node.Schema, alias, nil
 }
 
 // splitJoinKeys takes an ON expression of the form a.x = b.y and returns two
@@ -1099,6 +1182,8 @@ func baseAliasRanges(n Node, schema engine.Schema) []engine.AliasRange {
 	case *Scan:
 		return []engine.AliasRange{{Alias: x.Alias, Start: 0, End: len(schema.Columns)}}
 	case *Subquery:
+		return []engine.AliasRange{{Alias: x.Alias, Start: 0, End: len(schema.Columns)}}
+	case *TableFunc:
 		return []engine.AliasRange{{Alias: x.Alias, Start: 0, End: len(schema.Columns)}}
 	}
 	return []engine.AliasRange{{Alias: "", Start: 0, End: len(schema.Columns)}}

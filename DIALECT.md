@@ -41,6 +41,24 @@ connectors. The unmatched side of an outer join is filled with `NULL`s. Compound
 or non-equality join conditions are not yet supported (put extra predicates in
 `WHERE`).
 
+### Table functions (`generate_series`)
+
+`FROM generate_series(start, stop[, step])` produces a one-column relation
+(column `value`) — an **integer** series, or a **timestamp** series when
+`start`/`stop` are timestamps and `step` is an `INTERVAL`. `stop` is inclusive;
+`step` may be negative. The main use is **gap-filling** a time series — LEFT JOIN
+the dense series against your data so missing periods still produce a row:
+
+```sql
+SELECT d.value AS day, COALESCE(SUM(m.v), 0) AS total
+FROM generate_series(CAST('2024-03-01' AS timestamp),
+                     CAST('2024-03-31' AS timestamp), INTERVAL '1 day') AS d
+LEFT JOIN (SELECT DATE_TRUNC('day', ts) AS day, v FROM metrics) AS m
+       ON m.day = d.value
+GROUP BY d.value
+ORDER BY day
+```
+
 ### Common table expressions (`WITH`)
 
 Name one or more queries up front, then reference them by name in `FROM`/`JOIN`

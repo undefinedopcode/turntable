@@ -9,6 +9,33 @@ import (
 	"github.com/april/turntable/internal/sql"
 )
 
+// maxSeriesRows bounds a generate_series materialization (a guard against a
+// runaway range, not a product limit).
+const maxSeriesRows = 10_000_000
+
+// generateSeries materializes a TableFunc into one-column rows.
+func generateSeries(n *TableFunc) ([]engine.Row, error) {
+	var rows []engine.Row
+	emit := func(v engine.Value) bool {
+		rows = append(rows, engine.Row{Values: []engine.Value{v}})
+		return len(rows) <= maxSeriesRows
+	}
+	if n.IsTime {
+		for cur := n.TimeStart; !(n.TimeStep > 0 && cur.After(n.TimeStop)) && !(n.TimeStep < 0 && cur.Before(n.TimeStop)); cur = cur.Add(n.TimeStep) {
+			if !emit(engine.TimeVal(cur)) {
+				return nil, fmt.Errorf("generate_series exceeded %d rows", maxSeriesRows)
+			}
+		}
+		return rows, nil
+	}
+	for cur := n.IntStart; !(n.IntStep > 0 && cur > n.IntStop) && !(n.IntStep < 0 && cur < n.IntStop); cur += n.IntStep {
+		if !emit(engine.IntVal(cur)) {
+			return nil, fmt.Errorf("generate_series exceeded %d rows", maxSeriesRows)
+		}
+	}
+	return rows, nil
+}
+
 // Exec converts a Plan's root Node into an engine.RowIterator, threading the
 // per-stage schema and alias so that column references resolve correctly.
 //
@@ -94,6 +121,13 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 	case *NoFrom:
 		// One empty row; a zero-column schema.
 		return engine.NewSliceIter([]engine.Row{{}}), engine.Schema{}, nil
+
+	case *TableFunc:
+		rows, err := generateSeries(node)
+		if err != nil {
+			return nil, engine.Schema{}, err
+		}
+		return engine.NewSliceIter(rows), node.Schema, nil
 
 	case *Filter:
 		child, schema, err := execNode(ctx, node.Child, funcs, strict)

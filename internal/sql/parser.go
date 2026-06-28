@@ -380,6 +380,13 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 			}
 			tr.Prefix = name
 			tr.Source = src
+		} else if p.op("(") {
+			// Table (set-returning) function in FROM, e.g. generate_series(...).
+			fc, err := p.parseTableFunc(name)
+			if err != nil {
+				return tr, err
+			}
+			tr.Func = fc
 		} else {
 			tr.Name = name
 		}
@@ -398,6 +405,30 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 		tr.Alias = p.advance().Value
 	}
 	return tr, nil
+}
+
+// parseTableFunc parses the `(arg, …)` of a FROM-clause table function; the
+// opening paren is at the cursor.
+func (p *Parser) parseTableFunc(name string) (*FuncCall, error) {
+	p.advance() // (
+	fc := &FuncCall{Name: name}
+	if !p.op(")") {
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			fc.Args = append(fc.Args, e)
+			if !p.op(",") {
+				break
+			}
+			p.advance()
+		}
+	}
+	if err := p.expectOp(")"); err != nil {
+		return nil, err
+	}
+	return fc, nil
 }
 
 // parseSourceString reads the remainder of a qualified source spec until the

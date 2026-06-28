@@ -89,6 +89,7 @@ type TableRef struct {
 	Name   string
 
 	Subquery Statement // when FROM (SELECT ... [UNION ...]) AS alias; a *SelectStmt or *SetOpStmt
+	Func     *FuncCall // when FROM f(args) — a table (set-returning) function, e.g. generate_series
 	Alias    string
 }
 

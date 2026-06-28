@@ -729,3 +729,13 @@ func TestParsePrefixedDSNRef(t *testing.T) {
 		t.Errorf("source = %q", s.From.Source)
 	}
 }
+
+func TestParseTableFunc(t *testing.T) {
+	s := mustParseSelect(t, "SELECT value FROM generate_series(1, 10, 2) AS g")
+	if s.From.Func == nil || s.From.Func.Name != "generate_series" || len(s.From.Func.Args) != 3 {
+		t.Fatalf("FROM func = %+v, want generate_series with 3 args", s.From.Func)
+	}
+	if s.From.Alias != "g" {
+		t.Errorf("alias = %q, want g", s.From.Alias)
+	}
+}

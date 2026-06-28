@@ -69,8 +69,10 @@ A query moves through fixed stages, one package each:
    `Registry`, infers/merges schemas, validates columns/types, and builds a
    tree of `plan.Node` (`Scan`, `Filter`, `Project`, `Join`, aggregate, etc.,
    plus `NoFrom` for `SELECT <expr>` with no FROM, `Subquery` for an aliased
-   FROM-clause derived table, and `SetOp` (a binary `Op`/`All`/`Left`/`Right`
-   node) for `UNION`/`INTERSECT`/`EXCEPT`). `Build` takes a `sql.Statement` and
+   FROM-clause derived table, `TableFunc` for a FROM-clause set-returning
+   function (`generate_series`, resolved at plan time to int/timestamp bounds via
+   `buildTableFunc`; exec materializes it through `generateSeries`), and `SetOp`
+   (a binary `Op`/`All`/`Left`/`Right` node) for `UNION`/`INTERSECT`/`EXCEPT`). `Build` takes a `sql.Statement` and
    dispatches on `*SelectStmt` vs `*SetOpStmt` (set operations) vs `*WithStmt`
    (CTEs); `buildSetOp` folds the flat branch list by precedence (INTERSECT
    tightest, UNION/EXCEPT left-associative) into binary `SetOp` nodes under the
