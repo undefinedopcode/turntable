@@ -579,6 +579,15 @@ func formatPlan(n plan.Node, depth int) string {
 		return indent + "NoFrom"
 	case *plan.Subquery:
 		return indent + "Subquery " + node.Alias + "\n" + formatPlan(node.Child, depth+1)
+	case *plan.CTERef:
+		// Every reference shares one materialization (run once, replayed); the
+		// [materialized] tag marks that, and the CTE's plan is shown under each
+		// reference for readability.
+		line := indent + "CTE " + node.Name + " [materialized]"
+		if node.Mat != nil && node.Mat.Plan != nil {
+			return line + "\n" + formatPlan(node.Mat.Plan, depth+1)
+		}
+		return line
 	case *plan.SetOp:
 		names := map[sql.SetOpKind]string{
 			sql.SetUnion: "Union", sql.SetIntersect: "Intersect", sql.SetExcept: "Except",

@@ -72,6 +72,49 @@ type Subquery struct {
 	Alias  string
 }
 
+// CTERef references a materialized common table expression. Every reference to
+// the same CTE shares one *cteMaterialization, so the CTE's plan runs at most
+// once per query (the first reference pulled triggers it) and its rows are
+// replayed from an in-memory buffer for subsequent references — improving
+// performance when a CTE is used multiple times, and giving a consistent
+// snapshot across all references within the query. A CTERef is always wrapped in
+// a Subquery for per-reference column qualification.
+type CTERef struct {
+	Name string
+	Mat  *cteMaterialization
+}
+
+// cteMaterialization is the shared, build-time plan plus exec-time row cache for
+// one CTE. Plan/Schema are filled at plan time; rows/done/err are filled lazily
+// the first time any reference is executed (the plan is single-use, so caching
+// exec state on it is safe).
+type cteMaterialization struct {
+	Plan   Node
+	Schema engine.Schema
+
+	rows []engine.Row
+	done bool
+	err  error
+}
+
+// ensure runs the CTE's plan to completion once, caching the rows (and any
+// error). Subsequent calls are no-ops. ctx/funcs/strict come from the first
+// reference pulled; a CTE is never correlated to the enclosing query, so the
+// particular caller does not matter.
+func (m *cteMaterialization) ensure(ctx context.Context, funcs *engine.FuncRegistry, strict bool) error {
+	if m.done {
+		return m.err
+	}
+	m.done = true
+	it, _, err := execNode(ctx, m.Plan, funcs, strict)
+	if err != nil {
+		m.err = err
+		return err
+	}
+	m.rows, m.err = engine.Materialize(ctx, it)
+	return m.err
+}
+
 // SetOp combines two query plans by UNION, INTERSECT, or EXCEPT (its branches
 // must share a column count). All selects the multiset form (keep duplicates per
 // the operator's rule) over the default distinct form. A chain of set operations
@@ -174,6 +217,7 @@ type Limit struct {
 
 func (*Scan) planNode()      {}
 func (*Subquery) planNode()  {}
+func (*CTERef) planNode()    {}
 func (*SetOp) planNode()     {}
 func (*Window) planNode()    {}
 func (*Apply) planNode()     {}
@@ -195,10 +239,13 @@ type buildCtx struct {
 }
 
 // cteEntry is a registered common table expression. visiting guards against a
-// CTE referencing itself (recursive CTEs are not supported).
+// CTE referencing itself (recursive CTEs are not supported) during the one-time
+// build; mat is the shared materialization, built on the first reference and
+// reused by every later reference.
 type cteEntry struct {
 	query    sql.Statement
 	visiting bool
+	mat      *cteMaterialization
 }
 
 // Build resolves and validates a parsed statement (a SELECT or a UNION of
@@ -288,8 +335,9 @@ func (bc *buildCtx) buildSetOp(s *sql.SetOpStmt) (Node, engine.Schema, error) {
 }
 
 // buildWith registers the WITH clause's CTEs (each in scope for the later CTEs
-// and the body) and builds the body. CTEs are expanded where referenced, so a
-// CTE used twice is planned twice — fine for a read-only engine.
+// and the body) and builds the body. Each CTE's plan is built once on first
+// reference and shared (see buildCTE), so a CTE used twice is planned once and
+// materialized once at run time.
 func (bc *buildCtx) buildWith(s *sql.WithStmt) (Node, engine.Schema, error) {
 	if bc.ctes == nil {
 		bc.ctes = map[string]*cteEntry{}
@@ -316,20 +364,30 @@ func (bc *buildCtx) buildStatement(stmt sql.Statement) (Node, engine.Schema, err
 	}
 }
 
-// buildCTE plans a reference to the named CTE, wrapping it in a Subquery node so
-// its columns qualify under the reference alias. It guards against recursion.
+// buildCTE plans a reference to the named CTE, wrapping a shared CTERef in a
+// Subquery node so its columns qualify under the reference alias. The CTE's plan
+// is built once (on the first reference) and shared via the cteEntry, so it
+// executes at most once per query and is replayed for later references. It
+// guards against recursion during that one-time build.
 func (bc *buildCtx) buildCTE(name, alias string) (Node, engine.Schema, error) {
 	e := bc.ctes[name]
-	if e.visiting {
-		return nil, engine.Schema{}, fmt.Errorf("recursive CTE %q is not supported", name)
+	if e.mat == nil {
+		if e.visiting {
+			return nil, engine.Schema{}, fmt.Errorf("recursive CTE %q is not supported", name)
+		}
+		e.visiting = true
+		child, schema, err := bc.buildStatement(e.query)
+		e.visiting = false
+		if err != nil {
+			return nil, engine.Schema{}, fmt.Errorf("CTE %q: %w", name, err)
+		}
+		e.mat = &cteMaterialization{Plan: child, Schema: schema}
 	}
-	e.visiting = true
-	defer func() { e.visiting = false }()
-	child, schema, err := bc.buildStatement(e.query)
-	if err != nil {
-		return nil, engine.Schema{}, fmt.Errorf("CTE %q: %w", name, err)
-	}
-	return &Subquery{Child: child, Schema: schema, Alias: alias}, schema, nil
+	return &Subquery{
+		Child:  &CTERef{Name: name, Mat: e.mat},
+		Schema: e.mat.Schema,
+		Alias:  alias,
+	}, e.mat.Schema, nil
 }
 
 // BuildOption configures a Plan during Build.

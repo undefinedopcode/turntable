@@ -86,8 +86,15 @@ A query moves through fixed stages, one package each:
    schema — positional, so it works for base tables (which lose pushdown when
    renamed), derived tables, and table functions alike. `buildWith` registers each CTE in `buildCtx.ctes`, then
    `buildTableRef` resolves a bare name to a CTE (shadowing a registered source)
-   before the registry, expanding it as a `Subquery` per reference (with a
-   `visiting` guard rejecting recursion). Window functions (`f(...) OVER (...)`,
+   before the registry. The CTE's plan is built **once** on its first reference
+   (a `visiting` guard rejects recursion during that build) and shared via a
+   `*cteMaterialization` (`cteEntry.mat`); each reference is a `Subquery` wrapping
+   a `CTERef` that points at that shared materialization. At exec, the first
+   `CTERef` pulled runs the CTE's plan to completion and buffers its rows
+   (`cteMaterialization.ensure`); every reference replays the buffer via its own
+   `cteReplayIter` cursor — so a multiply-referenced CTE executes (and hits its
+   sources) once, and all references see a consistent snapshot. `--explain` tags
+   the node `CTE <name> [materialized]`. Window functions (`f(...) OVER (...)`,
    `FuncCall.Over` set) get a `Window` node between the post-WHERE rows and the
    projection: `buildWindow` lifts each window call into an appended `$winN`
    column (mirroring the aggregate `$aggN` extraction via the shared

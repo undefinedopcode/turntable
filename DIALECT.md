@@ -102,8 +102,12 @@ WITH eng AS (SELECT name, salary FROM emp WHERE dept = 'eng'),
 SELECT * FROM rich ORDER BY name
 ```
 
-A CTE is expanded wherever it is referenced (referencing it twice plans it
-twice). Recursive CTEs (`WITH RECURSIVE`) are not supported.
+A CTE is **materialized once per query**: its plan runs a single time and the
+resulting rows are buffered in memory and replayed at every reference. So a CTE
+used several times — or self-joined — touches its underlying sources only once
+(important when a source has latency), and all references see a consistent
+snapshot. (A side effect: even a singly-referenced CTE buffers its rows rather
+than streaming.) Recursive CTEs (`WITH RECURSIVE`) are not supported.
 
 ### Subqueries
 

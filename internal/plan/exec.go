@@ -90,6 +90,11 @@ func execNode(ctx context.Context, n Node, funcs *engine.FuncRegistry, strict bo
 		}
 		return child, node.Schema, nil
 
+	case *CTERef:
+		// Replay the shared materialization; the first reference pulled runs the
+		// CTE's plan once and buffers its rows.
+		return &cteReplayIter{ctx: ctx, m: node.Mat, funcs: funcs, strict: strict}, node.Mat.Schema, nil
+
 	case *SetOp:
 		left, _, err := execNode(ctx, node.Left, funcs, strict)
 		if err != nil {
@@ -402,6 +407,36 @@ func (a *applyIter) Close() error {
 	}
 	a.closed = true
 	return a.child.Close()
+}
+
+// cteReplayIter yields a CTE's materialized rows. The first iterator (across all
+// references) to be pulled triggers the one-time materialization; each iterator
+// keeps its own cursor into the shared buffer, so references are independent
+// passes over the same snapshot.
+type cteReplayIter struct {
+	ctx    context.Context
+	m      *cteMaterialization
+	funcs  *engine.FuncRegistry
+	strict bool
+	i      int
+	closed bool
+}
+
+func (it *cteReplayIter) Next() (engine.Row, bool, error) {
+	if err := it.m.ensure(it.ctx, it.funcs, it.strict); err != nil {
+		return engine.Row{}, false, err
+	}
+	if it.i >= len(it.m.rows) {
+		return engine.Row{}, false, nil
+	}
+	r := it.m.rows[it.i]
+	it.i++
+	return r, true, nil
+}
+
+func (it *cteReplayIter) Close() error {
+	it.closed = true
+	return nil
 }
 
 // projectOutputSchema builds the output schema from a projection's output list.
