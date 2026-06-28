@@ -1488,10 +1488,13 @@ func computeWindowAgg(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, r
 		return acc.add(v)
 	}
 
-	// An explicit ROWS frame: recompute the aggregate over the physical row
-	// window [start, end] (clamped to the partition) for each row. This is the
-	// moving-average / rolling-sum case.
+	// An explicit frame: recompute the aggregate over the per-row window. ROWS
+	// uses physical offsets (moving averages / rolling sums); RANGE uses the
+	// ORDER BY value (so peers share a frame, and offsets are value windows).
 	if spec.Frame != nil {
+		if strings.EqualFold(spec.Frame.Unit, "RANGE") {
+			return computeWindowRange(spec, idxs, rows, eval, result, add)
+		}
 		n := len(idxs)
 		for pos := 0; pos < n; pos++ {
 			lo := frameBoundIndex(spec.Frame.Start, pos, n)
@@ -1567,6 +1570,104 @@ func frameBoundIndex(b sql.FrameBound, pos, n int) int {
 	default: // CURRENT_ROW
 		return pos
 	}
+}
+
+// computeWindowRange evaluates a RANGE frame: the frame for a row is defined by
+// the ORDER BY *value*, not row position. Peers (equal values) share a frame,
+// and PRECEDING/FOLLOWING offsets select a value window (cur ± n). It requires a
+// single ORDER BY column; offset bounds additionally require it to be numeric.
+func computeWindowRange(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, add func(*winAcc, int) error) error {
+	if len(spec.OrderBy) != 1 {
+		return fmt.Errorf("RANGE frame requires exactly one ORDER BY column")
+	}
+	desc := spec.OrderBy[0].Desc
+	n := len(idxs)
+	ovals := make([]Value, n) // the order-by value at each ordered position
+	for pos, ri := range idxs {
+		v, err := eval.Eval(spec.OrderBy[0].Expr, rows[ri])
+		if err != nil {
+			return err
+		}
+		ovals[pos] = v
+	}
+	for pos := 0; pos < n; pos++ {
+		lo, hi, err := rangeFrameBounds(spec.Frame, ovals, pos, desc)
+		if err != nil {
+			return err
+		}
+		acc := winAcc{fn: strings.ToUpper(spec.Func)}
+		for j := lo; j <= hi; j++ {
+			if err := add(&acc, idxs[j]); err != nil {
+				return err
+			}
+		}
+		result[idxs[pos]] = acc.result()
+	}
+	return nil
+}
+
+// rangeFrameBounds resolves the [lo, hi] ordered-position range covered by a
+// RANGE frame for the row at `pos`, given the ordered values and sort direction.
+func rangeFrameBounds(frame *sql.WindowFrame, ovals []Value, pos int, desc bool) (int, int, error) {
+	n := len(ovals)
+	cur := ovals[pos]
+	lo := 0
+	if frame.Start.Kind != "UNBOUNDED_PRECEDING" {
+		target, err := rangeTarget(frame.Start, cur, desc)
+		if err != nil {
+			return 0, 0, err
+		}
+		for lo < n && !rangeAtOrAfter(ovals[lo], target, desc) {
+			lo++
+		}
+	}
+	hi := n - 1
+	if frame.End.Kind != "UNBOUNDED_FOLLOWING" {
+		target, err := rangeTarget(frame.End, cur, desc)
+		if err != nil {
+			return 0, 0, err
+		}
+		for hi >= 0 && !rangeAtOrBefore(ovals[hi], target, desc) {
+			hi--
+		}
+	}
+	return lo, hi, nil
+}
+
+// rangeTarget computes the value edge a RANGE bound refers to: the current value
+// for CURRENT ROW, or cur ± offset for PRECEDING/FOLLOWING (sign flipped for DESC).
+func rangeTarget(b sql.FrameBound, cur Value, desc bool) (Value, error) {
+	if b.Kind == "CURRENT_ROW" {
+		return cur, nil
+	}
+	f, ok := cur.AsFloat()
+	if !ok {
+		return Value{}, fmt.Errorf("RANGE PRECEDING/FOLLOWING needs a numeric ORDER BY value")
+	}
+	add := b.Kind == "FOLLOWING"
+	if desc {
+		add = !add
+	}
+	if add {
+		return FloatVal(f + float64(b.Offset)), nil
+	}
+	return FloatVal(f - float64(b.Offset)), nil
+}
+
+// rangeAtOrAfter / rangeAtOrBefore test a value against a frame edge in sort
+// order (for DESC the comparisons invert, since values descend along the rows).
+func rangeAtOrAfter(v, target Value, desc bool) bool {
+	if desc {
+		return Compare(v, target) <= 0
+	}
+	return Compare(v, target) >= 0
+}
+
+func rangeAtOrBefore(v, target Value, desc bool) bool {
+	if desc {
+		return Compare(v, target) >= 0
+	}
+	return Compare(v, target) <= 0
 }
 
 // winAcc accumulates a window aggregate. NULLs are skipped (except COUNT(*),

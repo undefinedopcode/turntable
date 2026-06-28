@@ -194,9 +194,13 @@ func TestParseWindowFrame(t *testing.T) {
 		t.Errorf("end = %+v, want 1 FOLLOWING", f.End)
 	}
 
-	// RANGE is rejected for now.
-	if _, err := Parse("SELECT SUM(v) OVER (ORDER BY t RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM x"); err == nil {
-		t.Error("expected an error for a RANGE frame")
+	// RANGE parses (Unit reflects it); GROUPS is rejected.
+	s = mustParseSelect(t, "SELECT SUM(v) OVER (ORDER BY t RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM x")
+	if rf := s.Items.Items[0].Expr.(*FuncCall).Over.Frame; rf == nil || rf.Unit != "RANGE" {
+		t.Errorf("RANGE frame = %+v, want Unit RANGE", rf)
+	}
+	if _, err := Parse("SELECT SUM(v) OVER (ORDER BY t GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM x"); err == nil {
+		t.Error("expected an error for a GROUPS frame")
 	}
 }
 

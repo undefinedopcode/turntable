@@ -88,11 +88,15 @@ A query moves through fixed stages, one package each:
    `rewriteFuncs`), and the projection/ORDER BY reference those columns. The
    `WindowIter` materializes, partitions, orders, and computes per spec
    (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD and aggregate windows). Aggregate windows
-   support an explicit `ROWS BETWEEN … AND …` frame (`WindowSpec.Frame`, parsed
-   into `sql.WindowFrame`/`FrameBound`; `frameBoundIndex` resolves bounds per
-   row) for moving averages / rolling sums; RANGE/GROUPS units error, and the
-   default frame (whole partition, or running when ORDER BY'd) applies when no
-   frame is given. Window + GROUP BY in one query is rejected for now.
+   support an explicit `ROWS`/`RANGE BETWEEN … AND …` frame (`WindowSpec.Frame`,
+   parsed into `sql.WindowFrame`/`FrameBound`): ROWS uses physical offsets
+   (`frameBoundIndex`) for moving averages; RANGE is value-based
+   (`computeWindowRange` — peers share a frame, offsets are value windows;
+   single ORDER BY, numeric for offsets). GROUPS errors; the default frame
+   (whole partition, or running when ORDER BY'd) applies when none is given.
+   Distribution window fns NTILE/PERCENT_RANK/CUME_DIST and the two-column stats
+   CORR/COVAR_*/REGR_* (paired via AggSpec.Arg2, `computeRegr`) also live here.
+   Window + GROUP BY in one query is rejected for now.
    A non-correlated `WHERE/HAVING x IN (SELECT ...)` is handled differently:
    `resolveInSubqueries` executes the subquery at build time and folds its one
    column into a literal `InExpr.List` (`valueToLiteral`), so the engine needs no

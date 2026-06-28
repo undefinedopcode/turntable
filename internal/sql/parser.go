@@ -1085,8 +1085,8 @@ func (p *Parser) parseWindowSpec() (*WindowSpec, error) {
 // frame start with an implicit CURRENT ROW end.
 func (p *Parser) parseWindowFrame() (*WindowFrame, error) {
 	unit := strings.ToUpper(p.advance().Value)
-	if unit != "ROWS" {
-		return nil, p.errf("only ROWS window frames are supported, got %s", unit)
+	if unit != "ROWS" && unit != "RANGE" {
+		return nil, p.errf("unsupported window frame unit %s (use ROWS or RANGE)", unit)
 	}
 	f := &WindowFrame{Unit: unit}
 	if p.word("BETWEEN") {

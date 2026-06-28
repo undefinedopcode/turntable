@@ -413,3 +413,37 @@ func TestWindowDistribution(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowRangeFrame(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "t", Type: TypeInt}, {Name: "v", Type: TypeInt}}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(tv, v int64) Row { return Row{Values: []Value{IntVal(tv), IntVal(v)}} }
+	order := []sql.OrderTerm{{Expr: &sql.ColRef{Name: "t"}}}
+	vcol := []sql.Expr{&sql.ColRef{Name: "v"}}
+	cur := sql.FrameBound{Kind: "CURRENT_ROW"}
+
+	// Peers share a RANGE CURRENT ROW frame: the two t=2 rows both sum to 25.
+	peers := []Row{mk(1, 10), mk(2, 20), mk(2, 5), mk(3, 30)}
+	got, err := computeWindow(WindowSpec{Func: "SUM", Args: vcol, OrderBy: order,
+		Frame: &sql.WindowFrame{Unit: "RANGE", Start: cur, End: cur}}, peers, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range []float64{10, 25, 25, 30} {
+		if f, _ := got[i].AsFloat(); f != w {
+			t.Errorf("RANGE peers row %d = %v, want %v", i, got[i], w)
+		}
+	}
+
+	// Value window 1 PRECEDING..CURRENT over t=1,3,4,5 respects the gap (t=1
+	// excluded for t=3 since 3-1 > 1).
+	gap := []Row{mk(1, 10), mk(3, 30), mk(4, 40), mk(5, 50)}
+	got, _ = computeWindow(WindowSpec{Func: "SUM", Args: vcol, OrderBy: order,
+		Frame: &sql.WindowFrame{Unit: "RANGE",
+			Start: sql.FrameBound{Kind: "PRECEDING", Offset: 1}, End: cur}}, gap, eval)
+	for i, w := range []float64{10, 30, 70, 90} {
+		if f, _ := got[i].AsFloat(); f != w {
+			t.Errorf("RANGE value-window row %d = %v, want %v", i, got[i], w)
+		}
+	}
+}

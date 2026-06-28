@@ -329,12 +329,17 @@ SELECT t, v,
 FROM series
 ```
 
+`RANGE` frames work on the `ORDER BY` **value** instead of row position: peers
+(equal values) share a frame, and `n PRECEDING`/`n FOLLOWING` select a value
+window (`v` within `cur ± n`, so gaps are skipped). RANGE needs exactly one
+`ORDER BY` column, and offset bounds need it to be numeric. `GROUPS` is not
+supported.
+
 Without a frame, a window aggregate covers the whole partition when there is no
 `ORDER BY`, or a running frame (cumulative through the current row, ties sharing
 one value) when there is. Window calls may be wrapped in scalar expressions and
-used in `ORDER BY`. Only the `ROWS` frame unit is supported (`RANGE`/`GROUPS`
-error); combining window functions with `GROUP BY` in one query is not yet
-supported.
+used in `ORDER BY`. Combining window functions with `GROUP BY` in one query is
+not yet supported.
 
 ---
 
