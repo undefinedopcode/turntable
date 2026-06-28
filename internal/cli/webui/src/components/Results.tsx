@@ -33,8 +33,14 @@ export function Results({ result }: { result: QueryResult | null }) {
   const [expand, setExpand] = useState<Cell | null>(null);
   const [copied, setCopied] = useState("");
 
+  // A row-less response (error / notice / explain) has no columns field, so
+  // guard the length access with optional chaining.
   const isTable =
-    !!result && !result.error && result.explain == null && result.columns.length > 0;
+    !!result &&
+    !result.error &&
+    result.explain == null &&
+    result.notice == null &&
+    (result.columns?.length ?? 0) > 0;
 
   // Derive the displayed rows: filter (substring over all cells), then sort.
   const rows = useMemo(() => {
