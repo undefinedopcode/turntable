@@ -595,6 +595,15 @@ td.json {
 .save-toggle input {
   width: auto;
 }
+.file-mode {
+  margin-bottom: 8px;
+}
+.file-meta {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: italic;
+  cursor: default !important;
+}
 
 /* Query tabs */
 .tabbar {

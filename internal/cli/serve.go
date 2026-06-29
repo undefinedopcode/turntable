@@ -414,7 +414,7 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, map[string]any{"error": verr.Error()})
 				return
 			}
-			a.writeSchemaJSON(w, name, schema)
+			a.writeSchemaJSON(w, name, schema, nil)
 			return
 		}
 		http.Error(w, "unknown source", http.StatusNotFound)
@@ -425,16 +425,40 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
-	a.writeSchemaJSON(w, name, schema)
+	a.writeSchemaJSON(w, name, schema, fileMeta(s))
 }
 
-// writeSchemaJSON writes a source/view schema as the columns response.
-func (a *App) writeSchemaJSON(w http.ResponseWriter, name string, schema engine.Schema) {
+// fileMeta returns the source file's last-modified time (RFC3339) and size when
+// the source is a local-file connector with a stat-able path — so the UI can
+// show how fresh a file source is (it is read live on every query). Empty for
+// non-file or unreachable sources.
+func fileMeta(s connector.Source) map[string]any {
+	if !isFileConnector(s.Conn.Name()) {
+		return nil
+	}
+	fi, err := os.Stat(s.Dataset.Source)
+	if err != nil || fi.IsDir() {
+		return nil
+	}
+	return map[string]any{
+		"path":     s.Dataset.Source,
+		"modified": fi.ModTime().UTC().Format(time.RFC3339),
+		"size":     fi.Size(),
+	}
+}
+
+// writeSchemaJSON writes a source/view schema as the columns response, merging
+// any extra fields (e.g. file modified-time/size).
+func (a *App) writeSchemaJSON(w http.ResponseWriter, name string, schema engine.Schema, extra map[string]any) {
 	cols := make([]apiColumn, len(schema.Columns))
 	for i, c := range schema.Columns {
 		cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
 	}
-	writeJSON(w, map[string]any{"source": name, "columns": cols})
+	resp := map[string]any{"source": name, "columns": cols}
+	for k, v := range extra {
+		resp[k] = v
+	}
+	writeJSON(w, resp)
 }
 
 // handleFunctions lists the SQL functions available in the dialect (the same

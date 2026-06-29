@@ -49,9 +49,14 @@ export async function listSources(): Promise<Source[]> {
   return (await res.json()) as Source[];
 }
 
-export async function getSchema(
-  source: string,
-): Promise<{ columns?: Column[]; error?: string }> {
+export async function getSchema(source: string): Promise<{
+  columns?: Column[];
+  error?: string;
+  // present for local-file sources: the file's last-modified time + size
+  modified?: string;
+  size?: number;
+  path?: string;
+}> {
   const res = await fetch("/api/schema?source=" + encodeURIComponent(source));
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();

@@ -68,6 +68,10 @@ export function AddSourceModal({
     seedValues(CONNECTOR_SPECS[0]),
   );
   const [file, setFile] = useState<File | null>(null);
+  // File connectors can either upload a copy or point at a path on the server's
+  // own filesystem (read live on each query — good for logs/CSVs being updated).
+  const [fileMode, setFileMode] = useState<"upload" | "path">("upload");
+  const [serverPath, setServerPath] = useState("");
   const [save, setSave] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: MsgKind; text: string }>({ kind: "", text: "" });
@@ -91,6 +95,7 @@ export function AddSourceModal({
   const reset = () => {
     setValues(seedValues(spec));
     setFile(null);
+    setServerPath("");
     setMsg({ kind: "", text: "" });
     resetInference();
   };
@@ -99,8 +104,19 @@ export function AddSourceModal({
     setConnector(c);
     setValues(seedValues(specFor(c)!));
     setFile(null);
+    setServerPath("");
     setMsg({ kind: "", text: "" });
     resetInference();
+  };
+
+  // setPath updates the server-path field and seeds the source name from the
+  // file's basename when the name is still empty.
+  const setPath = (p: string) => {
+    setServerPath(p);
+    if (!name) {
+      const base = p.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "";
+      if (base) setName(base);
+    }
   };
 
   const setField = (key: string, val: string) =>
@@ -168,9 +184,15 @@ export function AddSourceModal({
         return;
       }
     }
-    if (spec.file && !file) {
-      setMsg({ kind: "err", text: "choose a file to upload" });
-      return;
+    if (spec.file) {
+      if (fileMode === "upload" && !file) {
+        setMsg({ kind: "err", text: "choose a file to upload" });
+        return;
+      }
+      if (fileMode === "path" && !serverPath.trim()) {
+        setMsg({ kind: "err", text: "enter a path the server can read" });
+        return;
+      }
     }
 
     setBusy(true);
@@ -181,19 +203,23 @@ export function AddSourceModal({
         if (val) fields[f.key] = val;
       }
 
-      if (spec.file && file) {
-        let path = uploadedPath;
-        if (!path) {
-          setMsg({ kind: "", text: `uploading ${file.name}…` });
-          const up = await uploadFile(file);
-          if (up.error || !up.path) {
-            setMsg({ kind: "err", text: up.error || "upload failed" });
-            setBusy(false);
-            return;
+      if (spec.file) {
+        if (fileMode === "path") {
+          fields.path = serverPath.trim();
+        } else if (file) {
+          let path = uploadedPath;
+          if (!path) {
+            setMsg({ kind: "", text: `uploading ${file.name}…` });
+            const up = await uploadFile(file);
+            if (up.error || !up.path) {
+              setMsg({ kind: "err", text: up.error || "upload failed" });
+              setBusy(false);
+              return;
+            }
+            path = up.path;
           }
-          path = up.path;
+          fields.path = path;
         }
-        fields.path = path;
       }
 
       setMsg({ kind: "", text: "registering…" });
@@ -249,9 +275,45 @@ export function AddSourceModal({
           />
         </div>
 
-        {spec.file && <FileField spec={spec} file={file} onFile={onFile} />}
+        {spec.file && (
+          <div>
+            <div className="seg file-mode">
+              <button
+                type="button"
+                className={fileMode === "upload" ? "on" : ""}
+                onClick={() => setFileMode("upload")}
+              >
+                Upload a copy
+              </button>
+              <button
+                type="button"
+                className={fileMode === "path" ? "on" : ""}
+                onClick={() => setFileMode("path")}
+              >
+                Server path
+              </button>
+            </div>
+            {fileMode === "upload" ? (
+              <FileField spec={spec} file={file} onFile={onFile} />
+            ) : (
+              <div>
+                <label>Server file path</label>
+                <input
+                  placeholder={spec.fileExt ? `e.g. /var/log/app.log (${spec.fileExt})` : "/path/on/the/server"}
+                  spellCheck={false}
+                  value={serverPath}
+                  onChange={(e) => setPath(e.target.value)}
+                />
+                <div className="hint">
+                  a path the server can read — read live on every query (no copy), so
+                  an updated file refreshes on the next run.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
-        {isLog && (
+        {isLog && fileMode === "upload" && (
           <InferPanel
             analyzing={analyzing}
             analysis={analysis}

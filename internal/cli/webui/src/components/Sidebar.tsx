@@ -12,6 +12,15 @@ import {
   type SavedQuery,
 } from "../storage";
 
+const fmtSize = (n?: number): string =>
+  n == null
+    ? ""
+    : n < 1024
+      ? `${n} B`
+      : n < 1024 * 1024
+        ? `${(n / 1024).toFixed(1)} KB`
+        : `${(n / (1024 * 1024)).toFixed(1)} MB`;
+
 interface SidebarProps {
   onInsert: (text: string) => void;
   onSourceAdded: () => void;
@@ -106,16 +115,23 @@ function SourceItem({
 }) {
   const [open, setOpen] = useState(false);
   const [cols, setCols] = useState<Column[] | null>(null);
+  const [meta, setMeta] = useState<{ modified?: string; size?: number; path?: string }>({});
   const [colError, setColError] = useState<string>("");
 
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    if (next && cols === null && !colError) {
+    // Re-fetch each time it opens so a file source's modified-time stays current
+    // (file sources are read live on every query).
+    if (next) {
+      setColError("");
       getSchema(source.name)
         .then((sc) => {
           if (sc.error) setColError(sc.error);
-          else setCols(sc.columns ?? []);
+          else {
+            setCols(sc.columns ?? []);
+            setMeta({ modified: sc.modified, size: sc.size, path: sc.path });
+          }
         })
         .catch((e) => setColError(String(e)));
     }
@@ -148,6 +164,11 @@ function SourceItem({
       {open && (
         <ul className="cols">
           {colError && <li style={{ color: "var(--err)" }}>{colError}</li>}
+          {meta.modified && (
+            <li className="file-meta" title={meta.path}>
+              updated {relTime(Date.parse(meta.modified))} · {fmtSize(meta.size)}
+            </li>
+          )}
           {cols?.map((c) => (
             <li
               key={c.name}
