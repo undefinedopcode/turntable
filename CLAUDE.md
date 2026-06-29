@@ -183,7 +183,24 @@ interfaces:
   (`Put`/`Drop`/`Has`, `Populated` flag) that backs materialized views (see
   `internal/cli/matview.go`) rather than locating external data. It applies no
   pushdown.
-- `connectors/<name>/` are the implementations, in three families:
+- `connectors/<name>/` are the implementations, in four families:
+  - **Plugin** (`pluginc`): not a data source itself but a generic proxy that
+    runs an **external program** as a connector, forwarding each interface method
+    (Datasets/Resolve/Scan) over stdio JSON-RPC 2.0 (Content-Length framing,
+    method set initialize/datasets/resolve/scan/next/close/shutdown; `scan` opens
+    a cursor that `next` drains in batches). Rows are positional JSON arrays
+    decoded against the wire schema (`cell.go`); a `WHERE` is rendered to a narrow
+    JSON predicate subset (`predicate.go`, best-effort — the engine always
+    re-applies, so partial pushdown is safe). One `pluginc.Connector` owns one
+    long-lived subprocess; `cli.go` `registerPluginSource` starts it (handshake +
+    wildcard `dataset:"*"` expansion), registers the advertised name as a
+    qualified-ref prefix, and `App.Close` (deferred in `Run`) tears the processes
+    down. Config: `connector: plugin` + a `command:` list (`config.Source.Command`,
+    `${ENV}`-interpolated; arbitrary exec, so deliberately *not* exposed via the
+    web add-source UI). Protocol is specified in **PLUGINS.md**; the
+    dependency-free reference plugin is `examples/plugins/sysinfo`. Tests:
+    pipe-based codec/iterator (`client_test.go`) + an exec-self real-subprocess
+    e2e (`pluginc_test.go`, via `TestMain`).
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
     `logc` is a plain-text log reader that **auto-detects** the format by

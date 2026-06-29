@@ -28,15 +28,18 @@ type File struct {
 
 // Source declares one named queryable source.
 type Source struct {
-	Connector string         `yaml:"connector"`
-	Path      string         `yaml:"path,omitempty"`
-	URL       string         `yaml:"url,omitempty"`
-	DSN       string         `yaml:"dsn,omitempty"`
-	Driver    string         `yaml:"driver,omitempty"`
-	Table     string         `yaml:"table,omitempty"`
-	Sheet     string         `yaml:"sheet,omitempty"`
-	Delimiter string         `yaml:"delimiter,omitempty"`
-	Options   map[string]any `yaml:"options,omitempty"`
+	Connector string `yaml:"connector"`
+	Path      string `yaml:"path,omitempty"`
+	URL       string `yaml:"url,omitempty"`
+	DSN       string `yaml:"dsn,omitempty"`
+	Driver    string `yaml:"driver,omitempty"`
+	Table     string `yaml:"table,omitempty"`
+	Sheet     string `yaml:"sheet,omitempty"`
+	Delimiter string `yaml:"delimiter,omitempty"`
+	// Command is the executable + args for a `plugin` connector (an external
+	// program speaking the stdio JSON-RPC protocol; see PLUGINS.md).
+	Command []string       `yaml:"command,omitempty"`
+	Options map[string]any `yaml:"options,omitempty"`
 }
 
 // Defaults holds default CLI behavior overrides.
@@ -92,6 +95,13 @@ func InterpolateSource(src Source) Source {
 	src.Driver = interpolate(src.Driver)
 	src.Table = interpolate(src.Table)
 	src.Sheet = interpolate(src.Sheet)
+	if len(src.Command) > 0 {
+		cmd := make([]string, len(src.Command))
+		for i, a := range src.Command {
+			cmd[i] = interpolate(a)
+		}
+		src.Command = cmd
+	}
 	if src.Options != nil {
 		opts := make(map[string]any, len(src.Options))
 		for k, v := range src.Options {

@@ -27,6 +27,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/connector/connectors/memc"
 	"github.com/april/turntable/internal/connector/connectors/parquetc"
+	"github.com/april/turntable/internal/connector/connectors/pluginc"
 	"github.com/april/turntable/internal/connector/connectors/sqlc"
 	"github.com/april/turntable/internal/connector/connectors/trelloc"
 	"github.com/april/turntable/internal/connector/connectors/yamlc"
@@ -67,6 +68,10 @@ type App struct {
 	// defining query (by name) so REFRESH can re-run it. See matview.go.
 	mem      *memc.Connector
 	matViews map[string]*matView
+
+	// plugins holds the external plugin subprocesses started for `plugin`
+	// sources, so Close can tear them down at shutdown.
+	plugins []*pluginc.Connector
 }
 
 // NewApp builds an App with all built-in connectors registered.
@@ -183,6 +188,11 @@ func applySourceField(src *config.Source, key, val string) {
 	case "delimiter":
 		src.Delimiter = val
 		return
+	case "command":
+		// Whitespace-split into executable + args; config-file `command:` lists
+		// are the way to pass arguments that themselves contain spaces.
+		src.Command = strings.Fields(val)
+		return
 	}
 	if src.Options == nil {
 		src.Options = map[string]any{}
@@ -194,6 +204,11 @@ func applySourceField(src *config.Source, key, val string) {
 // names that were registered (one for a normal source, many for a wildcard
 // SQL source). Splitting it out makes the expansion result testable.
 func (a *App) registerSourceExpand(ctx context.Context, name string, src config.Source) ([]string, error) {
+	// A plugin source constructs its own connector instance (one per external
+	// command) rather than resolving a pre-registered global connector.
+	if src.Connector == "plugin" {
+		return a.registerPluginSource(ctx, name, src)
+	}
 	conn := a.Reg.Connector(src.Connector)
 	if conn == nil {
 		return nil, fmt.Errorf("source %q uses unknown connector %q", name, src.Connector)
@@ -284,6 +299,76 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 		return nil, err
 	}
 	return []string{name}, nil
+}
+
+// registerPluginSource starts an external plugin process and registers its
+// dataset(s). One process backs all of a plugin's datasets. The dataset name
+// comes from the `dataset` (or `table`) option, defaulting to the logical name;
+// "*" expands to every dataset the plugin advertises. The plugin's advertised
+// Name() is also registered as a qualified-ref prefix (e.g. `sysinfo:processes`)
+// when it does not collide with an existing connector.
+func (a *App) registerPluginSource(ctx context.Context, name string, src config.Source) ([]string, error) {
+	if len(src.Command) == 0 {
+		return nil, fmt.Errorf("plugin source %q requires a command", name)
+	}
+	opts := map[string]any{}
+	for k, v := range src.Options {
+		opts[k] = v
+	}
+	pc := pluginc.New(src.Command, opts)
+	// Start eagerly: the handshake validates the plugin, learns its advertised
+	// name, and is needed up front for wildcard dataset expansion.
+	if err := pc.Start(ctx); err != nil {
+		return nil, fmt.Errorf("plugin source %q: %w", name, err)
+	}
+	a.plugins = append(a.plugins, pc)
+
+	// Expose the advertised name as a qualified-ref prefix. A collision with a
+	// built-in connector is not fatal — the named source below still works.
+	_ = a.Reg.RegisterConnectorAs(pc.Name(), pc)
+
+	dataset, _ := opts["dataset"].(string)
+	if dataset == "" {
+		dataset, _ = opts["table"].(string)
+	}
+	if dataset == "*" {
+		datasets, err := pc.Datasets(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("plugin source %q: enumerate datasets: %w", name, err)
+		}
+		if len(datasets) == 0 {
+			return nil, fmt.Errorf("plugin source %q: plugin advertises no datasets", name)
+		}
+		var registered []string
+		for _, d := range datasets {
+			logical := d.Name
+			if _, ok := a.Reg.Resolve(logical); ok {
+				logical = name + "_" + d.Name
+			}
+			if err := a.Reg.RegisterSource(logical, pc, d); err != nil {
+				return registered, err
+			}
+			registered = append(registered, logical)
+		}
+		return registered, nil
+	}
+	if dataset == "" {
+		dataset = name
+	}
+	ds := connector.Dataset{Name: dataset, Source: dataset, Options: opts}
+	if err := a.Reg.RegisterSource(name, pc, ds); err != nil {
+		return nil, err
+	}
+	return []string{name}, nil
+}
+
+// Close releases session-scoped resources, notably the external plugin
+// subprocesses. It is safe to call more than once.
+func (a *App) Close() {
+	for _, pc := range a.plugins {
+		_ = pc.Close()
+	}
+	a.plugins = nil
 }
 
 // expandExcelSheets enumerates the worksheets in an Excel workbook and
@@ -471,6 +556,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		cfg = &config.File{Sources: map[string]config.Source{}}
 	}
 	a.registerSources(cfg)
+	defer a.Close() // tear down any plugin subprocesses on exit
 	if cfg.Defaults.Output != "" && output == "" {
 		a.Output = render.Format(cfg.Defaults.Output)
 	}
