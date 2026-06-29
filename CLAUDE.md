@@ -133,8 +133,13 @@ A query moves through fixed stages, one package each:
    row, re-executes each inner plan with the outer row bound on the context
    (`withOuter`/`outerFromCtx`); the engine's `Evaluator.Outer` resolves
    `OuterRef`. Non-correlated subqueries are memoized (run once). It is correct
-   but `O(outer rows)`; subqueries can't combine with GROUP BY/aggregates/window
-   in one query, and correlation is single-level. As an optimization,
+   but `O(outer rows)`. The `Apply` sits below the WHERE `Filter` (and so below
+   any later Aggregate/Window stage), so a subquery in **WHERE** composes with
+   `GROUP BY`/aggregates/window — the `$subN` columns are consumed by the filter
+   and ignored by the aggregate. Only subqueries in the **SELECT list / ORDER BY**
+   (post-aggregation) are rejected when grouping/windowing — `buildSelect`
+   distinguishes `whereHasSubquery` from `projHasSubquery`. Correlation is
+   single-level. As an optimization,
    `decorrelateExists` (run before subquery detection) turns a top-level
    correlated `[NOT] EXISTS` over a single table with one equality correlation
    into a semi/anti `HashJoinIter` (`sql.JoinSemi`/`JoinAnti` — planner-only join

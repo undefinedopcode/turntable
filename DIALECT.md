@@ -148,12 +148,22 @@ than streaming.) Recursive CTEs (`WITH RECURSIVE`) are not supported.
   rows → `NULL`; more than one → an error).
 
   A correlated `[NOT] EXISTS` over a single table with an equality correlation is
-  **decorrelated** into a semi-/anti-join (one hash pass) — fast, and it may then
-  be combined with `GROUP BY`. Other correlated subqueries (scalar, `IN`,
-  non-equality or multi-key `EXISTS`) are evaluated per outer row (`O(rows)`):
-  correct, but slower on large inputs, and not combinable with
-  `GROUP BY`/aggregates/window in the same query. Correlation more than one level
-  deep, and subqueries in `HAVING`/`GROUP BY`, are not supported.
+  **decorrelated** into a semi-/anti-join (one hash pass) — fast. Other correlated
+  subqueries (scalar, `IN`, non-equality or multi-key `EXISTS`) are evaluated per
+  outer row (`O(rows)`): correct, but slower on large inputs.
+
+  A subquery in **`WHERE`** may be combined with `GROUP BY`/aggregates/window
+  functions — it filters rows before grouping:
+  ```sql
+  SELECT region, SUM(amount) AS revenue
+  FROM orders
+  WHERE amount > (SELECT AVG(amount) FROM orders)
+  GROUP BY region
+  ```
+  A subquery in the **`SELECT` list or `ORDER BY`** of a grouped/windowed query
+  is post-aggregation and not yet supported (use a derived table / CTE). Subqueries
+  in `HAVING`/`GROUP BY`, and correlation more than one level deep, are also not
+  supported.
 
 ### Set operations
 
@@ -520,8 +530,8 @@ engine. Azure Tables translates predicates to an OData `$filter`. Run
 
 ## Not yet supported
 
-Subqueries together with `GROUP BY` / aggregates / window functions in one query
-(a decorrelated `EXISTS` is the exception — it composes with `GROUP BY`),
-recursive CTEs (`WITH RECURSIVE`), parenthesized set-op grouping, the `GROUPS`
-window-frame unit (`ROWS`/`RANGE` are supported), and DML/DDL. See `DESIGN.md`
-§11 for the roadmap.
+Subqueries in the `SELECT` list / `ORDER BY` / `HAVING` together with `GROUP BY`
+/ aggregates / window functions in one query (a subquery in `WHERE` *is*
+supported there — it filters before grouping), recursive CTEs (`WITH RECURSIVE`),
+parenthesized set-op grouping, the `GROUPS` window-frame unit (`ROWS`/`RANGE` are
+supported), and DML/DDL. See `DESIGN.md` §11 for the roadmap.

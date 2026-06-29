@@ -655,22 +655,34 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		return nil, engine.Schema{}, fmt.Errorf("window functions combined with GROUP BY/aggregates are not yet supported")
 	}
 
-	// Subquery expressions (EXISTS, scalar subqueries, correlated IN) in WHERE or
-	// the select list are lifted into an Apply node that computes a value column
-	// per outer row. This runs before IN-folding so non-correlated INs still fold.
-	hasSubquery := exprHasSubquery(stmt.Where)
-	if !hasSubquery {
-		for _, it := range stmt.Items.Items {
-			if !it.Star && exprHasSubquery(it.Expr) {
-				hasSubquery = true
+	// Subquery expressions (EXISTS, scalar subqueries, correlated IN) are lifted
+	// into an Apply node that computes a value column per outer row. The Apply
+	// sits below the WHERE Filter (and so below any GROUP BY/aggregate/window
+	// stage), so subqueries in WHERE compose with grouping/windows. Subqueries in
+	// the SELECT list or ORDER BY are evaluated post-aggregation, which the
+	// below-aggregate Apply can't express, so those stay unsupported when
+	// combined with grouping/windows. (Runs before IN-folding so non-correlated
+	// INs still fold to literals.)
+	whereHasSubquery := exprHasSubquery(stmt.Where)
+	projHasSubquery := false
+	for _, it := range stmt.Items.Items {
+		if !it.Star && exprHasSubquery(it.Expr) {
+			projHasSubquery = true
+			break
+		}
+	}
+	if !projHasSubquery {
+		for _, ot := range stmt.OrderBy {
+			if exprHasSubquery(ot.Expr) {
+				projHasSubquery = true
 				break
 			}
 		}
 	}
-	if hasSubquery {
-		if hasAgg || hasWindow {
-			return nil, engine.Schema{}, fmt.Errorf("subqueries combined with GROUP BY/aggregates/window functions are not yet supported")
-		}
+	if (hasAgg || hasWindow) && projHasSubquery {
+		return nil, engine.Schema{}, fmt.Errorf("subqueries in the SELECT list or ORDER BY combined with GROUP BY/aggregates/window functions are not yet supported (subqueries in WHERE are supported)")
+	}
+	if whereHasSubquery || projHasSubquery {
 		base, baseSchema, err = bc.buildSubqueries(stmt, base, baseSchema)
 		if err != nil {
 			return nil, engine.Schema{}, err

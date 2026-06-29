@@ -90,11 +90,55 @@ func TestScalarSubqueryTooManyRowsErrors(t *testing.T) {
 	}
 }
 
-func TestScalarSubqueryWithGroupByRejected(t *testing.T) {
+// TestScalarSubqueryInWhereWithGroupBy: a (correlated) scalar subquery in WHERE
+// composes with GROUP BY — the Apply sits below the Filter below the Aggregate.
+func TestScalarSubqueryInWhereWithGroupBy(t *testing.T) {
 	reg := rowsRegistry(t)
-	// A scalar subquery (not decorrelatable) combined with GROUP BY is rejected.
-	stmt, _ := sql.Parse("SELECT n, COUNT(*) FROM s1 AS a WHERE (SELECT MAX(b.n) FROM s2 AS b WHERE b.n = a.n) > 1 GROUP BY n")
+	rows := runQuery(t, reg, "SELECT n, COUNT(*) AS c FROM s1 AS a WHERE (SELECT MAX(b.n) FROM s2 AS b WHERE b.n = a.n) > 1 GROUP BY n")
+	// s1={1,2,2}, s2={2,3}: the correlated MAX is NULL for n=1 (filtered out) and
+	// 2 for n=2 (>1, kept) → one group n=2 with count 2.
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if v, _ := rows[0].Values[0].AsInt(); v != 2 {
+		t.Errorf("group n = %v, want 2", rows[0].Values[0])
+	}
+	if c, _ := rows[0].Values[1].AsInt(); c != 2 {
+		t.Errorf("count = %v, want 2", c)
+	}
+}
+
+// TestInSubqueryInWhereWithGroupBy: a non-correlated IN in WHERE folds to a
+// literal list and composes with GROUP BY.
+func TestInSubqueryInWhereWithGroupBy(t *testing.T) {
+	reg := rowsRegistry(t)
+	// s1={1,2,2}; IN (SELECT n FROM s2={2,3}) keeps the two 2s → group n=2 count 2.
+	rows := runQuery(t, reg, "SELECT n, COUNT(*) AS c FROM s1 WHERE n IN (SELECT n FROM s2) GROUP BY n")
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if c, _ := rows[0].Values[1].AsInt(); c != 2 {
+		t.Errorf("count = %v, want 2", c)
+	}
+}
+
+// TestSubqueryInWhereWithWindow: a WHERE subquery composes with a window function
+// (Apply below Filter below Window).
+func TestSubqueryInWhereWithWindow(t *testing.T) {
+	reg := rowsRegistry(t)
+	// s1={1,2,2} filtered by IN s2={2,3} → {2,2}; ROW_NUMBER over them → 2 rows.
+	rows := runQuery(t, reg, "SELECT n, ROW_NUMBER() OVER (ORDER BY n) AS rn FROM s1 WHERE n IN (SELECT n FROM s2)")
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+}
+
+// TestSubqueryInSelectListWithGroupByRejected: a subquery in the SELECT list is
+// post-aggregation and remains unsupported when combined with GROUP BY.
+func TestSubqueryInSelectListWithGroupByRejected(t *testing.T) {
+	reg := rowsRegistry(t)
+	stmt, _ := sql.Parse("SELECT n, (SELECT MAX(b.n) FROM s2 AS b) AS m FROM s1 GROUP BY n")
 	if _, err := Build(context.Background(), stmt, reg); err == nil {
-		t.Fatal("expected error: scalar subquery combined with GROUP BY")
+		t.Fatal("expected error: subquery in SELECT list combined with GROUP BY")
 	}
 }
