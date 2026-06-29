@@ -565,6 +565,46 @@ td.json {
   margin-left: auto;
   align-self: flex-end;
 }
+
+/* Pivot table view */
+.pivot {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.pivot .chart-controls {
+  padding: 4px 2px 12px;
+  flex: 0 0 auto;
+}
+.pivot-color {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-end;
+}
+.pivot-table {
+  font-size: 12.5px;
+}
+.pivot-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel2);
+  z-index: 1;
+}
+.pivot-corner,
+.pivot-rowhead {
+  position: sticky;
+  left: 0;
+  background: var(--panel2);
+  text-align: left;
+  font-weight: 600;
+  z-index: 2;
+}
+.pivot-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .chart-field {
   display: flex;
   flex-direction: column;

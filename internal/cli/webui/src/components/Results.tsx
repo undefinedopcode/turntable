@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { Cell, QueryResult } from "../api";
 import { Modal } from "./Modal";
 import { Chart } from "./Chart";
+import { PivotTable } from "./PivotTable";
 import {
   copyText,
   download,
@@ -29,7 +30,7 @@ export function Results({ result }: { result: QueryResult | null }) {
   const [filter, setFilter] = useState("");
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [view, setView] = useState<"table" | "chart">("table");
+  const [view, setView] = useState<"table" | "chart" | "pivot">("table");
   const [expand, setExpand] = useState<Cell | null>(null);
   const [copied, setCopied] = useState("");
 
@@ -155,6 +156,12 @@ export function Results({ result }: { result: QueryResult | null }) {
           >
             Chart
           </button>
+          <button
+            className={view === "pivot" ? "on" : ""}
+            onClick={() => setView("pivot")}
+          >
+            Pivot
+          </button>
         </div>
         <div className="exports">
           <button className="ghost sm" onClick={() => exportAs("csv")}>
@@ -179,6 +186,8 @@ export function Results({ result }: { result: QueryResult | null }) {
 
       {view === "chart" ? (
         <Chart columns={cols} rows={rows} />
+      ) : view === "pivot" ? (
+        <PivotTable columns={cols} rows={rows} />
       ) : (
         <div className="table-wrap">
           <table>
