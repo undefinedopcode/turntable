@@ -301,9 +301,11 @@ unrecognized file — inferred templates from `internal/loginfer`, a Drain-style
 miner, each carrying a ready-to-use `pattern` regex; the add-source modal
 auto-runs this when a log file is chosen and lets the user pick a template and
 rename its columns, which rewrites the pattern), and `POST /api/upload`
-(multipart file → streamed to a per-session temp dir `App.uploadDir`, created in
-`serve()` and `RemoveAll`'d on shutdown; the client then registers a file source
-at the returned path). The web add-source UI is a modal whose form adapts per
+(multipart file → streamed to the persistent, project-relative `App.uploadDir` =
+`.turntable/data` (gitignored), created in `serve()`; kept across restarts so a
+file source saved to the config keeps resolving. Stored under the original
+sanitized name, `-N`-suffixed on clash via `createUpload`; the client then
+registers a file source at the returned relative path). The web add-source UI is a modal whose form adapts per
 connector via `connectorSpecs.ts` (file connectors get an upload). Field routing
 for both `.use` and the web form is shared via `applySourceField` in `cli.go`.
 Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by

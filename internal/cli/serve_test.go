@@ -279,12 +279,13 @@ func TestUploadThenRegisterAndQuery(t *testing.T) {
 	if up.Error != "" {
 		t.Fatalf("upload error: %s", up.Error)
 	}
-	// The stored file lives inside the upload dir, preserving stem+ext.
-	if filepath.Dir(up.Path) != dir {
+	// The stored file lives inside the upload dir, keeping the original name
+	// (the first upload of this name is not suffixed).
+	if filepath.Dir(up.Path) != filepath.ToSlash(dir) {
 		t.Errorf("stored path %q not in upload dir %q", up.Path, dir)
 	}
-	if !strings.HasPrefix(filepath.Base(up.Path), "sales-") || !strings.HasSuffix(up.Path, ".csv") {
-		t.Errorf("stored name = %q, want sales-*.csv", filepath.Base(up.Path))
+	if filepath.Base(up.Path) != "sales.csv" {
+		t.Errorf("stored name = %q, want sales.csv", filepath.Base(up.Path))
 	}
 	if up.Size != 38 {
 		t.Errorf("size = %d, want 38", up.Size)
@@ -466,5 +467,21 @@ func TestHandleQueryMatView(t *testing.T) {
 	}
 	if after := postQuery(t, a, body("SELECT * FROM eng", false)); after.Error == "" {
 		t.Error("expected error querying a dropped view")
+	}
+}
+
+func TestCreateUploadCollision(t *testing.T) {
+	dir := t.TempDir()
+	// First upload keeps the original name; subsequent same-name uploads get -N.
+	want := []string{"data.csv", "data-1.csv", "data-2.csv"}
+	for _, w := range want {
+		f, err := createUpload(dir, "data.csv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := filepath.Base(f.Name()); got != w {
+			t.Errorf("name = %q, want %q", got, w)
+		}
+		f.Close()
 	}
 }

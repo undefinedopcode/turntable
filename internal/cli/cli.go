@@ -54,8 +54,9 @@ type App struct {
 	// strict makes type-coercion failures hard errors instead of NULL.
 	strict bool
 
-	// uploadDir is a per-serve temporary directory holding files uploaded
-	// through the web UI; it is created in serve() and removed on shutdown.
+	// uploadDir is the persistent directory (.turntable/data) holding files
+	// uploaded through the web UI; created in serve() and kept across restarts so
+	// a saved source can reference an uploaded file.
 	uploadDir string
 
 	// configPath is the turntable.yaml in use (from -c, or the autodetected

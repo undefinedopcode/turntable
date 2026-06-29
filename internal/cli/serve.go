@@ -48,19 +48,23 @@ func mustSubFS(f embed.FS, dir string) fs.FS {
 // --max-rows is set, so the browser never has to render an unbounded result.
 const defaultServeMaxRows = 5000
 
+// uploadDirPath is the project-relative directory where web uploads are stored.
+// It is persistent (kept across restarts) so a source saved to the config can
+// point at an uploaded file by this stable relative path.
+const uploadDirPath = ".turntable/data"
+
 // serve runs the web query UI on addr until the context is cancelled. It is a
 // browser-based complement to the REPL: the same parse/plan/exec path, exposed
 // over HTTP as a small JSON API plus a single-page UI.
 func (a *App) serve(ctx context.Context, addr string) int {
-	// A per-session scratch directory for files uploaded through the UI. It is
-	// removed when serve() returns (process shutdown).
-	dir, err := os.MkdirTemp("", "turntable-uploads-")
-	if err != nil {
-		fmt.Fprintf(a.Err, "serve: cannot create upload dir: %v\n", err)
+	// A persistent, project-relative directory for files uploaded through the UI.
+	// Unlike a temp dir it survives restarts, so a saved source pointing at an
+	// uploaded file keeps working. Files accumulate here until the user prunes it.
+	if err := os.MkdirAll(uploadDirPath, 0o755); err != nil {
+		fmt.Fprintf(a.Err, "serve: cannot create upload dir %q: %v\n", uploadDirPath, err)
 		return 1
 	}
-	a.uploadDir = dir
-	defer os.RemoveAll(dir)
+	a.uploadDir = uploadDirPath
 
 	mux := http.NewServeMux()
 	// Serve the embedded SPA (index.html + hashed assets) at the root; the API
@@ -542,10 +546,10 @@ func (a *App) logPreviewRows(ctx context.Context, path string, opts map[string]a
 // limit). Data is streamed to disk, not buffered in memory.
 const maxUploadBytes = 512 << 20 // 512 MiB
 
-// handleUpload accepts a multipart file upload, stores it in the per-session
-// upload directory, and returns the stored path. The client then registers a
-// file-connector source pointing at that path via POST /api/sources. The file
-// stays on disk only for the life of the server process.
+// handleUpload accepts a multipart file upload, stores it under the persistent
+// upload directory (.turntable/data), and returns the stored relative path. The
+// client then registers a file-connector source pointing at that path via POST
+// /api/sources — which can be saved to the config, since the path is durable.
 func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -563,16 +567,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Build a safe destination name from the original (path-stripped) filename,
-	// preserving the extension; CreateTemp injects randomness for uniqueness and
-	// confines the file to uploadDir.
+	// Keep the original (path-stripped, sanitized) name so the stored path is
+	// predictable; a name clash gets a "-N" suffix rather than clobbering.
 	base := sanitizeFilename(filepath.Base(header.Filename))
-	ext := filepath.Ext(base)
-	stem := strings.TrimSuffix(base, ext)
-	if stem == "" {
-		stem = "upload"
+	if strings.TrimSuffix(base, filepath.Ext(base)) == "" {
+		base = "upload" + filepath.Ext(base)
 	}
-	dst, err := os.CreateTemp(a.uploadDir, stem+"-*"+ext)
+	dst, err := createUpload(a.uploadDir, base)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": "cannot store upload: " + err.Error()})
 		return
@@ -586,10 +587,32 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{
-		"path":     dst.Name(),
-		"filename": base,
+		"path":     filepath.ToSlash(dst.Name()),
+		"filename": filepath.Base(dst.Name()),
 		"size":     n,
 	})
+}
+
+// createUpload atomically creates a new file in dir named base, appending "-N"
+// to the stem on a name clash (O_EXCL avoids races and never overwrites). It
+// gives up after a bounded number of attempts.
+func createUpload(dir, base string) (*os.File, error) {
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 0; i < 10000; i++ {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d%s", stem, i, ext)
+		}
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			return f, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("too many files named like %q", base)
 }
 
 // sanitizeFilename reduces a filename to a safe set of characters, preventing

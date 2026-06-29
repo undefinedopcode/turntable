@@ -5,6 +5,8 @@
 # local config / data
 turntable.local.yaml
 /data/
+# web-UI uploads (persistent upload dir created by --serve)
+.turntable/
 
 # generated SQLite demo database (run examples/init_sqlite.sql to recreate)
 examples/data/*.db
