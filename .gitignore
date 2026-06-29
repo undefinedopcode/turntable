@@ -4,6 +4,7 @@
 
 # local config / data
 turntable.local.yaml
+/turntable.yaml
 /data/
 # web-UI uploads (persistent upload dir created by --serve)
 .turntable/
