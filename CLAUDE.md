@@ -325,7 +325,26 @@ The frontend is a **React + Vite + TypeScript** app under
 needs no Node; after editing `webui/src/**` run `npm run build` (or `go generate
 ./internal/cli`) and commit the updated `dist/`. Dev: `npm run dev` (HMR on
 :5173, proxies `/api` to the Go server). See `webui/README.md`. **`internal/config`** loads
-`turntable.yaml` with `${ENV_VAR}` / `${VAR:-default}` interpolation.
+`turntable.yaml` with `${ENV_VAR}` / `${VAR:-default}` interpolation (`Parse` →
+`InterpolateSource`), and also reads a `.env` at startup (`LoadDotEnv`; real env
+wins) so those refs resolve without manual exports.
+
+**Secrets / runtime sources.** Sensitive connector fields (`config.IsSensitive`:
+sql `dsn` except sqlite; http `bearer`; linear `api_key`/`bearer`; trello
+`key`/`token`; azuredevops `pat`; azuretables `connection_string`) must be a sole
+`${ENV_VAR}` reference, not a literal — enforced by `ValidateSourceSecrets` so
+credentials never reach the config file. Runtime adds (`.use`, web
+`/api/sources`) go through `App.registerRuntimeSource`: validate the *declared*
+form, then `InterpolateSource` resolves the refs for the connector while the
+`${VAR}` form is what's validated/persisted (note: pre-existing config sources
+are interpolated at load and not re-validated). Optional persistence appends the
+declared (secret-free) source to the config via `config.AppendSource` (a
+`yaml.Node` round-trip preserving comments/formatting, block style, 2-space
+indent; creates the file / replaces a same-named entry) — opt in with `.use …
+save` or web `save:true`. `App.configPath` is the target (`-c`, else
+`./turntable.yaml`). The web add-source modal marks sensitive fields with an
+"env ref" badge + client-side `${VAR}` validation and a "Save to config file"
+checkbox.
 
 ## Pushdown contract (the core invariant)
 
