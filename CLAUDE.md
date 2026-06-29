@@ -307,13 +307,18 @@ at the returned path). The web add-source UI is a modal whose form adapts per
 connector via `connectorSpecs.ts` (file connectors get an upload). Field routing
 for both `.use` and the web form is shared via `applySourceField` in `cli.go`.
 Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by
-default. The UI has a CodeMirror editor (SQL highlighting + source/column/
-function autocomplete), query history + saved queries + last-query restore
-(localStorage, `storage.ts`), and a results pane with client-side sort/filter,
-cell copy/JSON-expand, CSV/JSON/NDJSON export (`export.ts`), and a Chart.js chart
-view (`Chart.tsx`: bar/line/area/scatter/pie, X column + multi-series Y toggles +
-a series-by breakdown that pivots one measure into a series per category value +
-client-side group-by-X aggregation count/sum/avg/min/max).
+default. The UI is **tabbed** (`TabBar.tsx` — each tab an independent query
+workspace with its own editor text + result, persisted to localStorage by
+`storage.ts`); each tab has a CodeMirror editor (SQL highlighting + source/
+column/function autocomplete), query history + saved queries (also localStorage),
+and a results pane with three views: a table (client-side sort/filter, cell
+copy/JSON-expand, CSV/JSON/NDJSON export via `export.ts`), a Chart.js chart
+(`Chart.tsx`: bar/line/area/scatter/bubble/heatmap/pie with PNG export, X column
++ multi-series Y toggles + a series-by breakdown + client-side group-by-X
+aggregation count/sum/avg/min/max), and a pivot table (`PivotTable.tsx` —
+row×column cross-tab of one measure, optional cell heatmap colouring). The chart
+heatmap uses the `chartjs-chart-matrix` plugin; the shared aggregation/pivot
+primitives live in `pivot.ts` (used by both the chart and the pivot table).
 The frontend is a **React + Vite + TypeScript** app under
 `internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via
 `//go:embed all:webui/dist` and served with `http.FileServerFS`. `go build`
