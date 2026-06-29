@@ -265,6 +265,9 @@ func AppendSource(path, name string, src Source) error {
 			{Kind: yaml.ScalarNode, Value: "sources"}, sources,
 		}, doc.Content...)
 	}
+	// Force block style: an empty `sources: {}` (or any flow mapping) would
+	// otherwise grow inline as `{a: {...}, b: {...}}`.
+	sources.Style = 0
 
 	var val yaml.Node
 	if err := val.Encode(src); err != nil {

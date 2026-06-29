@@ -16,6 +16,21 @@ import { Modal } from "./Modal";
 
 type MsgKind = "" | "err" | "ok";
 
+// A sensitive field must be exactly an ${ENV_VAR} / ${ENV_VAR:-default} reference.
+const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}$/;
+
+// fieldSensitive reports whether f holds a credential that must be an env-var
+// reference. The sql `dsn` is exempt for sqlite (a local file path).
+function fieldSensitive(
+  connector: string,
+  f: FieldSpec,
+  values: Record<string, string>,
+): boolean {
+  if (!f.sensitive) return false;
+  if (connector === "sql" && f.key === "dsn" && values.driver === "sqlite") return false;
+  return true;
+}
+
 function seedValues(spec: ConnectorSpec): Record<string, string> {
   const v: Record<string, string> = {};
   for (const f of spec.fields) {
@@ -53,6 +68,7 @@ export function AddSourceModal({
     seedValues(CONNECTOR_SPECS[0]),
   );
   const [file, setFile] = useState<File | null>(null);
+  const [save, setSave] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: MsgKind; text: string }>({ kind: "", text: "" });
 
@@ -143,6 +159,14 @@ export function AddSourceModal({
         setMsg({ kind: "err", text: `${f.label} is required` });
         return;
       }
+      const val = values[f.key]?.trim();
+      if (val && fieldSensitive(connector, f, values) && !ENV_REF.test(val)) {
+        setMsg({
+          kind: "err",
+          text: `${f.label} must reference an environment variable, e.g. \${MY_SECRET} — set it in your shell or a .env file.`,
+        });
+        return;
+      }
     }
     if (spec.file && !file) {
       setMsg({ kind: "err", text: "choose a file to upload" });
@@ -173,13 +197,21 @@ export function AddSourceModal({
       }
 
       setMsg({ kind: "", text: "registering…" });
-      const data = await addSource(name.trim(), connector, fields);
+      const data = await addSource(name.trim(), connector, fields, save);
       if (data.error) {
         setMsg({ kind: "err", text: data.error });
         setBusy(false);
         return;
       }
-      setMsg({ kind: "ok", text: "registered: " + (data.registered ?? []).join(", ") });
+      // A save error is non-fatal: the source registered, it just wasn't written.
+      if (data.saveError) {
+        setMsg({
+          kind: "err",
+          text: `registered, but not saved to config: ${data.saveError}`,
+        });
+        setBusy(false);
+        return;
+      }
       onAdded();
       setName("");
       reset();
@@ -242,17 +274,29 @@ export function AddSourceModal({
                   field={f}
                   value={values[f.key] ?? ""}
                   onChange={setField}
+                  sensitive={fieldSensitive(connector, f, values)}
                 />
               ))}
             </div>
           </details>
         ) : (
           spec.fields.map((f) => (
-            <Field key={f.key} field={f} value={values[f.key] ?? ""} onChange={setField} />
+            <Field
+              key={f.key}
+              field={f}
+              value={values[f.key] ?? ""}
+              onChange={setField}
+              sensitive={fieldSensitive(connector, f, values)}
+            />
           ))
         )}
 
         {spec.note && <div className="hint">{spec.note}</div>}
+
+        <label className="save-toggle" title="append this source to turntable.yaml (secrets stay as ${ENV_VAR} references)">
+          <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
+          Save to config file
+        </label>
 
         <div className="modal-actions">
           <button className="ghost" onClick={onClose} disabled={busy}>
@@ -399,16 +443,20 @@ function Field({
   field,
   value,
   onChange,
+  sensitive,
 }: {
   field: FieldSpec;
   value: string;
   onChange: (key: string, val: string) => void;
+  sensitive?: boolean;
 }) {
+  const bad = sensitive && !!value.trim() && !ENV_REF.test(value.trim());
   return (
     <div>
       <label>
         {field.label}
         {field.required ? " *" : ""}
+        {sensitive && <span className="env-badge" title="must be an ${ENV_VAR} reference">env ref</span>}
       </label>
       {field.type === "select" ? (
         <select value={value} onChange={(e) => onChange(field.key, e.target.value)}>
@@ -421,13 +469,21 @@ function Field({
       ) : (
         <input
           type={field.type === "password" ? "password" : "text"}
+          className={bad ? "field-bad" : ""}
           placeholder={field.placeholder}
           spellCheck={false}
           value={value}
           onChange={(e) => onChange(field.key, e.target.value)}
         />
       )}
-      {field.help && <div className="hint">{field.help}</div>}
+      {sensitive ? (
+        <div className={`hint ${bad ? "hint-bad" : ""}`}>
+          reference an env var like <code>${"{MY_SECRET}"}</code> — keeps the secret
+          out of the config{field.help ? ` (${field.help})` : ""}
+        </div>
+      ) : (
+        field.help && <div className="hint">{field.help}</div>
+      )}
     </div>
   );
 }

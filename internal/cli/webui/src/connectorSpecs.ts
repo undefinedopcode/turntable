@@ -13,6 +13,11 @@ export interface FieldSpec {
   required?: boolean;
   placeholder?: string;
   help?: string;
+  // sensitive fields hold credentials: the UI requires an ${ENV_VAR} reference
+  // (validated server-side too), so secrets never land in the config. For sql
+  // `dsn` this is waived when the driver is sqlite (a local path) — see the
+  // modal's fieldSensitive().
+  sensitive?: boolean;
 }
 
 export interface ConnectorSpec {
@@ -66,7 +71,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     label: "SQL database",
     fields: [
       { key: "driver", label: "Driver", type: "select", options: ["sqlite", "postgres", "mysql", "sqlserver"], required: true },
-      { key: "dsn", label: "DSN", required: true, placeholder: "./data.db  |  postgres://user:pass@host/db  |  sqlserver://user:pass@host?database=db" },
+      { key: "dsn", label: "DSN", required: true, sensitive: true, placeholder: "sqlite: ./data.db  |  others: ${DB_DSN}" },
       { key: "table", label: "Table", placeholder: "table name (or * for every table)" },
     ],
   },
@@ -76,7 +81,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     fields: [
       { key: "url", label: "URL", required: true, placeholder: "https://api.example.com/items" },
       { key: "path", label: "JSON path", placeholder: "data.items (dotted path to the array)" },
-      { key: "bearer", label: "Bearer token", type: "password" },
+      { key: "bearer", label: "Bearer token", sensitive: true, placeholder: "${API_TOKEN}" },
       { key: "method", label: "Method", placeholder: "GET" },
     ],
   },
@@ -85,8 +90,8 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     label: "Linear",
     fields: [
       { key: "dataset", label: "Dataset", type: "select", options: ["issues", "teams", "projects", "users"], required: true },
-      { key: "api_key", label: "API key", type: "password", help: "or use a Bearer token below" },
-      { key: "bearer", label: "OAuth token", type: "password" },
+      { key: "api_key", label: "API key", sensitive: true, placeholder: "${LINEAR_API_KEY}", help: "or use a Bearer token below" },
+      { key: "bearer", label: "OAuth token", sensitive: true, placeholder: "${LINEAR_TOKEN}" },
     ],
   },
   {
@@ -94,8 +99,8 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     label: "Trello",
     fields: [
       { key: "dataset", label: "Dataset", type: "select", options: ["boards", "lists", "cards", "members"], required: true },
-      { key: "key", label: "API key", type: "password", required: true },
-      { key: "token", label: "API token", type: "password", required: true },
+      { key: "key", label: "API key", sensitive: true, required: true, placeholder: "${TRELLO_KEY}" },
+      { key: "token", label: "API token", sensitive: true, required: true, placeholder: "${TRELLO_TOKEN}" },
       { key: "board", label: "Board id", help: "required for lists/cards/members" },
     ],
   },
@@ -105,7 +110,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     fields: [
       { key: "organization", label: "Organization", required: true, placeholder: "myorg (slug or full dev.azure.com URL)" },
       { key: "project", label: "Project", required: true, placeholder: "My Project" },
-      { key: "pat", label: "Personal access token", type: "password", required: true },
+      { key: "pat", label: "Personal access token", sensitive: true, required: true, placeholder: "${AZDO_PAT}" },
       { key: "type", label: "Work item type", placeholder: "Bug, User Story, … (optional filter)" },
       { key: "wiql", label: "WIQL override", placeholder: "SELECT [System.Id] FROM workitems WHERE …" },
     ],
@@ -136,7 +141,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     label: "Azure Table Storage",
     fields: [
       { key: "table", label: "Table", required: true, placeholder: "table name (or * for every table)" },
-      { key: "connection_string", label: "Connection string", type: "password", help: "or set account/endpoint for Azure AD auth" },
+      { key: "connection_string", label: "Connection string", sensitive: true, placeholder: "${AZURE_TABLES_CONN}", help: "or set account/endpoint for Azure AD auth" },
       { key: "account", label: "Account", placeholder: "storage account name (Azure AD)" },
       { key: "endpoint", label: "Endpoint", placeholder: "override / Azurite" },
     ],

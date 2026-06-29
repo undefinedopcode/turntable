@@ -73,8 +73,9 @@ export function addSource(
   name: string,
   connector: string,
   fields: Record<string, string>,
-): Promise<{ registered?: string[]; error?: string }> {
-  return postJSON("/api/sources", { name, connector, fields });
+  save = false,
+): Promise<{ registered?: string[]; error?: string; saved?: string; saveError?: string }> {
+  return postJSON("/api/sources", { name, connector, fields, save });
 }
 
 export interface UploadResult {
