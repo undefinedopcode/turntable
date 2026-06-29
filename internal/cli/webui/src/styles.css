@@ -566,6 +566,83 @@ td.json {
   align-self: flex-end;
 }
 
+/* Query tabs */
+.tabbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 4px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 5px 10px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.tab:hover {
+  color: var(--fg);
+}
+.tab.active {
+  background: var(--panel);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-rename {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  width: 110px;
+  padding: 1px 4px;
+}
+.tab-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+.tab-close:hover {
+  background: rgba(255, 107, 107, 0.18);
+  color: var(--err);
+}
+.tab-add {
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 14px;
+  line-height: 1;
+  align-self: flex-end;
+  margin-bottom: 1px;
+}
+.tab-add:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
 /* Pivot table view */
 .pivot {
   display: flex;

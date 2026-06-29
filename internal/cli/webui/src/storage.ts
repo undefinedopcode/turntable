@@ -81,6 +81,24 @@ export function saveLastQuery(q: string): void {
   write(LAST_KEY, q);
 }
 
+// Open query tabs: only the editable bits (id/name/query) are persisted, not the
+// transient result/status — those are re-run on demand after a reload.
+const TABS_KEY = "tt.tabs";
+
+export interface TabState {
+  id: string;
+  name: string;
+  query: string;
+}
+
+export function loadTabs(): TabState[] {
+  return read<TabState[]>(TABS_KEY, []);
+}
+
+export function saveTabs(tabs: TabState[]): void {
+  write(TABS_KEY, tabs);
+}
+
 // loadPaneSize / savePaneSize persist a resizable pane's pixel size (sidebar
 // width, query-pane height) so the layout survives a reload.
 export function loadPaneSize(key: string, fallback: number): number {

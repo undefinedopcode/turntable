@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Completion } from "@codemirror/autocomplete";
 import { runQuery, type QueryResult } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Editor, type EditorHandle } from "./components/Editor";
 import { Results } from "./components/Results";
+import { TabBar } from "./components/TabBar";
 import {
   loadLastQuery,
   loadPaneSize,
+  loadTabs,
   pushHistory,
   savePaneSize,
-  saveLastQuery,
+  saveTabs,
+  type TabState,
 } from "./storage";
 import { buildCompletions } from "./completions";
 import { Gutter } from "./components/Gutter";
@@ -17,28 +20,110 @@ import { Gutter } from "./components/Gutter";
 const clamp = (v: number, lo: number, hi: number) =>
   Math.max(lo, Math.min(hi, v));
 
+// Tab is one query workspace: its editable text plus the transient result/status
+// of its last run. Only id/name/query persist (see storage.saveTabs).
+interface Tab extends TabState {
+  result: QueryResult | null;
+  status: string;
+  running: boolean;
+}
+
+const newId = () => Math.random().toString(36).slice(2, 9);
+
+// nextName picks the lowest unused "Query N" so closing/reopening stays tidy.
+function nextName(tabs: { name: string }[]): string {
+  const used = new Set(tabs.map((t) => t.name));
+  for (let n = 1; ; n++) {
+    const name = `Query ${n}`;
+    if (!used.has(name)) return name;
+  }
+}
+
+function freshTab(name: string, query = ""): Tab {
+  return { id: newId(), name, query, result: null, status: "", running: false };
+}
+
+// initTabs restores persisted tabs, migrating the old single last-query if there
+// are none. Always returns at least one tab.
+function initTabs(): Tab[] {
+  const saved = loadTabs();
+  if (saved.length > 0) {
+    return saved.map((t) => ({ ...t, result: null, status: "", running: false }));
+  }
+  return [freshTab("Query 1", loadLastQuery())];
+}
+
 export function App() {
-  const [query, setQuery] = useState(() => loadLastQuery());
-  const [result, setResult] = useState<QueryResult | null>(null);
-  const [status, setStatus] = useState("");
-  const [running, setRunning] = useState(false);
+  const [tabs, setTabs] = useState<Tab[]>(initTabs);
+  const [activeId, setActiveId] = useState<string>(() => tabs[0].id);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [sourcesVersion, setSourcesVersion] = useState(0);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [completions, setCompletions] = useState<Completion[]>([]);
   const editorRef = useRef<EditorHandle>(null);
+
+  const active = useMemo(
+    () => tabs.find((t) => t.id === activeId) ?? tabs[0],
+    [tabs, activeId],
+  );
 
   // Resizable layout: sidebar width + query-pane height (persisted).
   const [sidebarW, setSidebarW] = useState(() => loadPaneSize("sidebar", 240));
   const [queryH, setQueryH] = useState(() => loadPaneSize("query", 160));
   const workRef = useRef<HTMLElement>(null);
 
-  // Persist the editor content and (re)load autocompletion when sources change.
-  useEffect(() => saveLastQuery(query), [query]);
+  // Persist tab text (not results) and (re)load autocompletion when sources change.
+  useEffect(() => {
+    saveTabs(tabs.map(({ id, name, query }) => ({ id, name, query })));
+  }, [tabs]);
   useEffect(() => {
     buildCompletions().then(setCompletions);
   }, [sourcesVersion]);
   useEffect(() => savePaneSize("sidebar", sidebarW), [sidebarW]);
   useEffect(() => savePaneSize("query", queryH), [queryH]);
+
+  const patchTab = useCallback(
+    (id: string, patch: Partial<Tab>) =>
+      setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t))),
+    [],
+  );
+  const setActiveQuery = useCallback(
+    (q: string) => patchTab(activeId, { query: q }),
+    [activeId, patchTab],
+  );
+
+  const addTab = useCallback(() => {
+    setTabs((ts) => {
+      const t = freshTab(nextName(ts));
+      setActiveId(t.id);
+      return [...ts, t];
+    });
+  }, []);
+
+  const closeTab = useCallback(
+    (id: string) =>
+      setTabs((ts) => {
+        const i = ts.findIndex((t) => t.id === id);
+        const next = ts.filter((t) => t.id !== id);
+        if (next.length === 0) {
+          const t = freshTab("Query 1");
+          setActiveId(t.id);
+          return [t];
+        }
+        setActiveId((cur) => (cur === id ? (next[i] ?? next[i - 1]).id : cur));
+        return next;
+      }),
+    [],
+  );
+
+  const renameTab = useCallback(
+    (id: string, name: string) => {
+      const trimmed = name.trim();
+      if (trimmed) patchTab(id, { name: trimmed });
+      setRenamingId(null);
+    },
+    [patchTab],
+  );
 
   // Drag a gutter: `axis` picks the pointer coordinate; `apply` maps the live
   // value to the clamped pane size. A body cursor/select lock keeps the drag
@@ -65,7 +150,6 @@ export function App() {
     [],
   );
 
-  // delta is measured from the size at drag start, so each apply is absolute.
   const dragSidebar = startDrag(
     "x",
     (d) => setSidebarW(clamp(sidebarW + d, 160, 520)),
@@ -82,51 +166,46 @@ export function App() {
 
   const run = useCallback(
     async (explain: boolean, override?: string) => {
-      const q = (override ?? query).trim();
+      const id = activeId;
+      const q = (override ?? active.query).trim();
       if (!q) return;
-      setRunning(true);
-      setStatus("running…");
+      patchTab(id, { running: true, status: "running…" });
       try {
         const data = await runQuery(q, explain);
-        setResult(data);
+        let status: string;
         if (data.error) {
-          setStatus(data.elapsed_ms != null ? `${data.elapsed_ms} ms` : "");
+          status = data.elapsed_ms != null ? `${data.elapsed_ms} ms` : "";
         } else if (data.notice != null) {
-          // A session statement (e.g. CREATE/DROP MATERIALIZED VIEW) — refresh
-          // the source list/autocompletion since the available views changed.
-          setStatus(`${data.elapsed_ms} ms`);
+          // A session statement (e.g. CREATE/DROP VIEW) — refresh the source
+          // list/autocompletion since the available sources changed.
+          status = `${data.elapsed_ms} ms`;
           setSourcesVersion((v) => v + 1);
         } else if (data.explain != null) {
-          setStatus(`${data.elapsed_ms} ms`);
+          status = `${data.elapsed_ms} ms`;
         } else {
-          setStatus(
-            `${data.count} row${data.count === 1 ? "" : "s"} · ${data.elapsed_ms} ms`,
-          );
+          status = `${data.count} row${data.count === 1 ? "" : "s"} · ${data.elapsed_ms} ms`;
           pushHistory(q);
           setHistoryVersion((v) => v + 1);
         }
+        patchTab(id, { result: data, status });
       } catch (e) {
-        setResult({
-          columns: [],
-          rows: [],
-          count: 0,
-          elapsed_ms: 0,
-          error: String(e),
+        patchTab(id, {
+          result: { columns: [], rows: [], count: 0, elapsed_ms: 0, error: String(e) },
+          status: "",
         });
-        setStatus("");
       } finally {
-        setRunning(false);
+        patchTab(id, { running: false });
       }
     },
-    [query],
+    [activeId, active.query, patchTab],
   );
 
   const runNow = useCallback(
     (q: string) => {
-      setQuery(q);
+      patchTab(activeId, { query: q });
       run(false, q);
     },
-    [run],
+    [activeId, patchTab, run],
   );
 
   return (
@@ -139,9 +218,9 @@ export function App() {
         <Sidebar
           onInsert={(t) => editorRef.current?.insert(t)}
           onSourceAdded={() => setSourcesVersion((v) => v + 1)}
-          onLoadQuery={setQuery}
+          onLoadQuery={setActiveQuery}
           onRunQuery={runNow}
-          currentQuery={query}
+          currentQuery={active.query}
           historyVersion={historyVersion}
           sourcesVersion={sourcesVersion}
         />
@@ -149,22 +228,33 @@ export function App() {
         <section
           className="work"
           ref={workRef}
-          style={{ gridTemplateRows: `${queryH}px 6px 1fr` }}
+          style={{ gridTemplateRows: `auto ${queryH}px 6px 1fr` }}
         >
+          <TabBar
+            tabs={tabs}
+            activeId={activeId}
+            renamingId={renamingId}
+            onSelect={setActiveId}
+            onAdd={addTab}
+            onClose={closeTab}
+            onStartRename={setRenamingId}
+            onRename={renameTab}
+          />
           <div className="query-pane">
             <Editor
+              key={activeId}
               ref={editorRef}
-              value={query}
-              onChange={setQuery}
+              value={active.query}
+              onChange={setActiveQuery}
               onRun={() => run(false)}
               onExplain={() => run(true)}
-              running={running}
-              status={status}
+              running={active.running}
+              status={active.status}
               completions={completions}
             />
           </div>
           <Gutter dir="row" onPointerDown={dragQuery} />
-          <Results result={result} />
+          <Results key={activeId} result={active.result} />
         </section>
       </main>
     </div>
