@@ -561,6 +561,10 @@ td.json {
   align-items: flex-end;
   gap: 16px;
 }
+.chart-png {
+  margin-left: auto;
+  align-self: flex-end;
+}
 .chart-field {
   display: flex;
   flex-direction: column;

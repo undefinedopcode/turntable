@@ -56,6 +56,33 @@ export function download(
   URL.revokeObjectURL(url);
 }
 
+// downloadCanvasPNG saves a canvas as a PNG. The chart canvas is transparent, so
+// it is first composited onto an opaque background (matching the UI) — otherwise
+// the export looks broken on a light viewer.
+export function downloadCanvasPNG(
+  canvas: HTMLCanvasElement,
+  filename: string,
+  background = "#171a21",
+): void {
+  const out = document.createElement("canvas");
+  out.width = canvas.width;
+  out.height = canvas.height;
+  const ctx = out.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(canvas, 0, 0);
+  out.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+}
+
 export async function copyText(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
