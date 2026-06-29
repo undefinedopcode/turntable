@@ -386,7 +386,12 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 		src.Connector = first
 		rest = rest[1:]
 	}
+	save := false
 	for _, kv := range rest {
+		if kv == "save" || kv == "--save" {
+			save = true
+			continue
+		}
 		eq := strings.Index(kv, "=")
 		if eq <= 0 {
 			return nil, fmt.Errorf("bad option %q (expected key=value)", kv)
@@ -406,9 +411,16 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 	} else if isFileConnector(src.Connector) && src.Path == "" {
 		return nil, fmt.Errorf("%s source needs path=...", src.Connector)
 	}
-	names, err := a.registerSourceExpand(context.Background(), name, src)
+	names, err := a.registerRuntimeSource(context.Background(), name, src)
 	if err != nil {
 		return nil, err
+	}
+	if save {
+		if err := config.AppendSource(a.configPath, name, src); err != nil {
+			fmt.Fprintf(a.Err, "warning: source registered but not saved: %v\n", err)
+		} else {
+			fmt.Fprintf(a.Err, "saved source %q to %s\n", name, a.configPath)
+		}
 	}
 	return names, nil
 }

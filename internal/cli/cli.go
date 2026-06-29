@@ -58,6 +58,10 @@ type App struct {
 	// through the web UI; it is created in serve() and removed on shutdown.
 	uploadDir string
 
+	// configPath is the turntable.yaml in use (from -c, or the autodetected
+	// default), or "" when none. Used to persist runtime-added sources.
+	configPath string
+
 	// mem backs session-scoped materialized views; matViews keeps each view's
 	// defining query (by name) so REFRESH can re-run it. See matview.go.
 	mem      *memc.Connector
@@ -125,6 +129,27 @@ func (a *App) registerSource(name string, src config.Source) error {
 		fmt.Fprintf(a.Err, "source %q expanded to %d tables: %s\n", name, len(names), strings.Join(names, ", "))
 	}
 	return nil
+}
+
+// resolveConfigPath returns the config file to use/save to: the explicit -c
+// path, or the conventional ./turntable.yaml default (which saving creates).
+func resolveConfigPath(p string) string {
+	if p != "" {
+		return p
+	}
+	return "turntable.yaml"
+}
+
+// registerRuntimeSource validates and registers a source added at runtime (the
+// REPL .use command or the web add-source dialog). It rejects literal secrets in
+// sensitive fields, then interpolates ${ENV_VAR} references before registering —
+// so the connector receives resolved values while the declared form (with the
+// ${VAR} references) is what was validated and can be persisted.
+func (a *App) registerRuntimeSource(ctx context.Context, name string, src config.Source) ([]string, error) {
+	if err := config.ValidateSourceSecrets(src); err != nil {
+		return nil, err
+	}
+	return a.registerSourceExpand(ctx, name, config.InterpolateSource(src))
 }
 
 // applySourceField routes one key=value pair onto a config.Source, mapping the
@@ -430,7 +455,15 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	a.maxRows = maxRows
 	a.strict = strict
 
+	// Load a .env file (if present) so ${ENV_VAR} references in config and
+	// runtime-added sources resolve without manual exports. The real environment
+	// still wins over .env.
+	if err := config.LoadDotEnv(""); err != nil {
+		fmt.Fprintf(a.Err, "warning: reading .env: %v\n", err)
+	}
+
 	// Load config and register named sources.
+	a.configPath = resolveConfigPath(configPath)
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(a.Err, "config error: %v\n", err)

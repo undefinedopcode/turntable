@@ -359,12 +359,14 @@ type addSourceRequest struct {
 	Name      string            `json:"name"`
 	Connector string            `json:"connector"`
 	Fields    map[string]string `json:"fields"`
+	Save      bool              `json:"save"` // also persist to the config file
 }
 
 // addSource registers a source at runtime — the web equivalent of the REPL's
-// .use — through the same registerSourceExpand path used by config loading, so
-// behavior (wildcards, validation, option routing) is identical. Registration
-// errors are returned in the JSON body so the UI can show them inline.
+// .use — through registerRuntimeSource, so behavior (sensitive-field validation,
+// ${ENV_VAR} interpolation, wildcards, option routing) is identical. Registration
+// errors are returned in the JSON body so the UI can show them inline. With
+// save=true the (declared, secret-free) source is also appended to the config.
 func (a *App) addSource(w http.ResponseWriter, r *http.Request) {
 	var req addSourceRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
@@ -379,12 +381,20 @@ func (a *App) addSource(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Fields {
 		applySourceField(&src, k, v)
 	}
-	names, err := a.registerSourceExpand(r.Context(), req.Name, src)
+	names, err := a.registerRuntimeSource(r.Context(), req.Name, src)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]any{"registered": names})
+	resp := map[string]any{"registered": names}
+	if req.Save {
+		if err := config.AppendSource(a.configPath, req.Name, src); err != nil {
+			resp["saveError"] = err.Error()
+		} else {
+			resp["saved"] = a.configPath
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // handleSchema returns the columns of a named source (introspection, like the
