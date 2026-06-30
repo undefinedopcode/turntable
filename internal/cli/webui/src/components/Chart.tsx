@@ -210,13 +210,20 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     [rows, x, yMeasure, seriesBy, agg, heatActive],
   );
 
-  // Graph/tree need a node + a link column, not a numeric measure, so they are
-  // built and returned before the numeric-only guard below.
-  if (isGraph) {
+  // Build the graph/tree data+options once per input change and memoize them.
+  // react-chartjs-2's update effects depend on the options / data.labels /
+  // data.datasets *references*, so stable references mean an unrelated re-render
+  // (e.g. typing in the query editor) does not trigger an in-place chart update —
+  // which for the graph controller would blank the canvas. Real input changes
+  // also bump the chart key below, remounting cleanly.
+  const graphView = useMemo(() => {
+    if (!isGraph) return null;
+    const numIdx = numeric.map((n) => n.i);
     const nodeCol = nodeIdx < columns.length ? nodeIdx : 0;
     const linkCol = linkIdx < columns.length ? linkIdx : Math.min(1, columns.length - 1);
     const labelCol = labelIdx < columns.length ? labelIdx : -1;
-    const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, type, NODE_CAP);
+    const sizeC = numIdx.includes(sizeIdx) ? sizeIdx : -1;
+    const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeC, type, NODE_CAP);
     const radii = bubbleRadii(g.nodes.map((n) => n.size));
     const showLabels = g.nodes.length <= LABEL_CAP;
 
@@ -245,8 +252,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
       plugins: {
         legend: { display: false },
         datalabels: {
-          display: (c: { dataIndex: number }) =>
-            showLabels && c.dataIndex !== g.rootIndex,
+          display: (c: { dataIndex: number }) => showLabels && c.dataIndex !== g.rootIndex,
           formatter: (_v: unknown, c: { dataIndex: number }) => g.nodes[c.dataIndex]?.label,
           color: "#c8cdd8",
           font: { size: 10 },
@@ -268,6 +274,29 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
       ...(type === "tree" ? { tree: { orientation: "horizontal" } } : {}),
       scales: { x: { display: false }, y: { display: false } },
     };
+    return { g, graphData, opts, nodeCol, linkCol, labelCol, sizeCol: sizeC, showLabels };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGraph, type, nodeIdx, linkIdx, labelIdx, sizeIdx, columns, rows, numeric]);
+
+  // Remount the chart exactly when the graph's inputs change. graphView is a new
+  // object only when an input (type/columns/rows/selections) changed, so bumping
+  // a counter on that identity change gives a key that: remounts on any real
+  // change (avoiding the graph controller's broken in-place update — including a
+  // re-run that returns the same row count), and stays stable on unrelated
+  // re-renders (typing in the editor), where the memoized data/options refs mean
+  // react-chartjs-2 does nothing.
+  const graphKeyRef = useRef(0);
+  const prevGraphViewRef = useRef(graphView);
+  if (prevGraphViewRef.current !== graphView) {
+    prevGraphViewRef.current = graphView;
+    graphKeyRef.current += 1;
+  }
+
+  // Graph/tree need a node + a link column, not a numeric measure, so they are
+  // built and returned before the numeric-only guard below.
+  if (isGraph && graphView) {
+    const { g, graphData, opts, nodeCol, linkCol, labelCol, sizeCol: gSizeCol, showLabels } =
+      graphView;
 
     return (
       <div className="chart">
@@ -312,7 +341,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           </label>
           <label className="chart-field">
             size
-            <select value={sizeCol} onChange={(e) => setSizeIdx(Number(e.target.value))}>
+            <select value={gSizeCol} onChange={(e) => setSizeIdx(Number(e.target.value))}>
               <option value={-1}>(constant)</option>
               {numeric.map(({ c, i }) => (
                 <option key={i} value={i}>
@@ -326,13 +355,9 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           </button>
         </div>
         <div className="chart-canvas" ref={canvasRef}>
-          {/* key forces a fresh chart whenever the layout OR its inputs change:
-              react-chartjs-2 otherwise updates the instance in place, and the
-              graph controller's in-place update leaves edge elements without
-              resolved options (the chart goes blank). Recreating on any change
-              that alters the nodes/edges/labels/sizes avoids that path. */}
+          {/* see graphKeyRef above: remount on input change, stable otherwise. */}
           <ReactChart
-            key={`${type}:${nodeCol}:${linkCol}:${labelCol}:${sizeCol}:${rows.length}`}
+            key={graphKeyRef.current}
             type={type === "tree" ? "tree" : "forceDirectedGraph"}
             data={graphData}
             options={opts}
