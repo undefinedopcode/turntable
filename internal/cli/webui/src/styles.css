@@ -565,6 +565,13 @@ td.json {
   margin-left: auto;
   align-self: flex-end;
 }
+/* Graph/tree toolbar: focus breadcrumb + reset-view, above the canvas. */
+.graph-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 6px;
+}
 
 /* Add-source: sensitive-field affordances + save toggle */
 .env-badge {

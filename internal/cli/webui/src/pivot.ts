@@ -103,6 +103,7 @@ export function pivot(
 }
 
 export interface GraphNode {
+  key: string; // canonical node identity (the node column value), for focus
   label: string;
   size: number | null; // optional measure for node sizing
   color: Cell; // optional raw value for node colouring (null when unset/absent)
@@ -111,8 +112,9 @@ export interface GraphNode {
 export interface Graph {
   nodes: GraphNode[];
   edges: { source: number; target: number }[];
-  total: number; // pre-cap node count, for "showing first N of M" hints
+  total: number; // node count for the "showing first N of M" hint
   rootIndex: number; // index of the synthetic root (tree mode), else -1
+  focusMissing: boolean; // true when a focus key was given but not found
 }
 
 // nodesEdges turns an edge-list / parent-pointer result into a node+edge graph.
@@ -124,6 +126,11 @@ export interface Graph {
 // In tree mode a synthetic root is added and every node that has no parent in
 // the set is attached to it, so a forest (e.g. the process table's many roots)
 // renders as one tree. Nodes are capped to keep force layouts legible.
+//
+// focus (a node key) drills into a subtree: only that node and its descendants
+// (forward-reachable along edges) are kept, the focus node becomes the root, and
+// the cap is lifted (a subtree is small) so descendants outside the cap still
+// appear. An unknown focus key falls back to the full graph (focusMissing=true).
 export function nodesEdges(
   rows: Cell[][],
   nodeIdx: number,
@@ -132,16 +139,18 @@ export function nodesEdges(
   sizeIdx: number, // -1 = no sizing
   colorIdx: number, // -1 = no colouring
   mode: "graph" | "tree",
+  focus: string | null = null,
   cap = 300,
 ): Graph {
+  const focused = focus != null;
   const index = new Map<string, number>();
   const nodes: GraphNode[] = [];
-  const ensure = (label: string): number => {
-    let i = index.get(label);
+  const ensure = (key: string): number => {
+    let i = index.get(key);
     if (i === undefined) {
       i = nodes.length;
-      index.set(label, i);
-      nodes.push({ label, size: null, color: null });
+      index.set(key, i);
+      nodes.push({ key, label: key, size: null, color: null });
     }
     return i;
   };
@@ -151,7 +160,9 @@ export function nodesEdges(
   const hasParent = new Set<number>();
 
   for (const r of rows) {
-    if (index.size >= cap && index.get(labelOf(r[nodeIdx])) === undefined) continue;
+    // The cap bounds an unfocused graph; when focusing we build everything and
+    // then extract the (small) subtree below.
+    if (!focused && index.size >= cap && index.get(labelOf(r[nodeIdx])) === undefined) continue;
     const nodeKey = labelOf(r[nodeIdx]);
     const ni = ensure(nodeKey);
     if (labelIdx >= 0) nodes[ni].label = labelOf(r[labelIdx]);
@@ -170,15 +181,49 @@ export function nodesEdges(
     }
   }
 
+  if (focused) {
+    const start = index.get(focus!);
+    if (start !== undefined) {
+      const adj = new Map<number, number[]>();
+      for (const e of edges) {
+        const a = adj.get(e.source);
+        if (a) a.push(e.target);
+        else adj.set(e.source, [e.target]);
+      }
+      const keep = new Set<number>([start]); // Set keeps insertion (BFS) order
+      const queue = [start];
+      while (queue.length) {
+        const u = queue.shift()!;
+        for (const v of adj.get(u) ?? []) {
+          if (!keep.has(v)) {
+            keep.add(v);
+            queue.push(v);
+          }
+        }
+      }
+      const remap = new Map<number, number>();
+      const fnodes: GraphNode[] = [];
+      for (const oi of keep) {
+        remap.set(oi, fnodes.length);
+        fnodes.push(nodes[oi]);
+      }
+      const fedges = edges
+        .filter((e) => keep.has(e.source) && keep.has(e.target))
+        .map((e) => ({ source: remap.get(e.source)!, target: remap.get(e.target)! }));
+      return { nodes: fnodes, edges: fedges, total: fnodes.length, rootIndex: -1, focusMissing: false };
+    }
+    // Focus key not in this data — show the full graph and flag it.
+  }
+
   let rootIndex = -1;
   if (mode === "tree") {
     rootIndex = nodes.length;
-    nodes.push({ label: "", size: null, color: null });
+    nodes.push({ key: "", label: "", size: null, color: null });
     for (let i = 0; i < rootIndex; i++) {
       if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
     }
   }
-  return { nodes, edges, total: index.size, rootIndex };
+  return { nodes, edges, total: index.size, rootIndex, focusMissing: focused };
 }
 
 // heatColor maps a value in [lo,hi] to a blue→accent→amber gradient (null →

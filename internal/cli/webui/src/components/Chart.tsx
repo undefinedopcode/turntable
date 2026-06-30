@@ -24,6 +24,7 @@ import {
   EdgeLine,
 } from "chartjs-chart-graph";
 import ChartDataLabels from "chartjs-plugin-datalabels";
+import zoomPlugin from "chartjs-plugin-zoom";
 import { Bar, Line, Scatter, Pie, Bubble, Chart as ReactChart } from "react-chartjs-2";
 import type { Cell, Column } from "../api";
 import { downloadCanvasPNG } from "../export";
@@ -55,6 +56,7 @@ ChartJS.register(
   TreeController,
   EdgeLine,
   ChartDataLabels,
+  zoomPlugin,
 );
 
 // datalabels is registered globally for the graph/tree node labels, but it must
@@ -167,7 +169,17 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   const [linkIdx, setLinkIdx] = useState(1); // graph: the parent / links-to column
   const [labelIdx, setLabelIdx] = useState(-1); // graph: node label (-1 = node value)
   const [colorIdx, setColorIdx] = useState(-1); // graph: node colour column (-1 = constant)
+  const [focusNode, setFocusNode] = useState<string | null>(null); // graph: drilled-in subtree
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // A focus key belongs to a specific dataset/structure; drop it when the data
+  // or the node/parent columns change so it can't point at a stale node.
+  const focusResetKey = `${rows.length}:${nodeIdx}:${linkIdx}`;
+  const prevFocusResetKey = useRef(focusResetKey);
+  if (prevFocusResetKey.current !== focusResetKey) {
+    prevFocusResetKey.current = focusResetKey;
+    if (focusNode !== null) setFocusNode(null);
+  }
 
   const isGraph = type === "graph" || type === "tree";
 
@@ -310,6 +322,8 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           labelCol={labelCol}
           sizeCol={gSizeCol}
           colorCol={colorCol}
+          focusNode={focusNode}
+          onFocus={setFocusNode}
         />
       </div>
     );
@@ -695,6 +709,8 @@ const GraphChart = memo(function GraphChart({
   labelCol,
   sizeCol,
   colorCol,
+  focusNode,
+  onFocus,
 }: {
   canvasRef: React.RefObject<HTMLDivElement>;
   rows: Cell[][];
@@ -706,12 +722,16 @@ const GraphChart = memo(function GraphChart({
   labelCol: number;
   sizeCol: number;
   colorCol: number;
+  focusNode: string | null;
+  onFocus: (key: string | null) => void;
 }) {
   const renderCount = useRef(0);
   renderCount.current += 1;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const chartRef = useRef<any>(null);
 
   const numIdx = numeric.map((n) => n.i);
-  const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, colorCol, type, NODE_CAP);
+  const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, colorCol, type, focusNode, NODE_CAP);
   const radii = bubbleRadii(g.nodes.map((n) => n.size));
   const showLabels = g.nodes.length <= LABEL_CAP;
 
@@ -771,12 +791,29 @@ const GraphChart = memo(function GraphChart({
     ],
   };
   const colorName = colorCol >= 0 ? columns[colorCol]?.name : "";
+  // Click a node to drill into its subtree; the synthetic root is not focusable.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const onClick = (_evt: any, els: { index: number }[]) => {
+    if (!els.length) return;
+    const idx = els[0].index;
+    if (idx === g.rootIndex) return;
+    const key = g.nodes[idx]?.key;
+    if (key) onFocus(key);
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const onHover = (evt: any, els: unknown[]) => {
+    const t = evt?.native?.target;
+    if (t) t.style.cursor = els.length ? "pointer" : "default";
+  };
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const opts: any = {
     responsive: true,
     maintainAspectRatio: false,
     animation: { duration: 0 },
     layout: { padding: 24 },
+    onClick,
+    onHover,
     plugins: {
       legend: { display: false },
       datalabels: {
@@ -801,6 +838,12 @@ const GraphChart = memo(function GraphChart({
           },
         },
       },
+      // Scroll/pinch to zoom, drag to pan, into a region of the layout. The
+      // zoomed scale range persists across the force layout's own updates.
+      zoom: {
+        pan: { enabled: true, mode: "xy" },
+        zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: "xy" },
+      },
     },
     ...(type === "tree" ? { tree: { orientation: "horizontal" } } : {}),
     scales: { x: { display: false }, y: { display: false } },
@@ -808,10 +851,31 @@ const GraphChart = memo(function GraphChart({
 
   return (
     <>
+      <div className="graph-bar">
+        <span className="hint" style={{ padding: 0 }}>
+          {focusNode != null && !g.focusMissing
+            ? "click a node to drill deeper · scroll to zoom · drag to pan"
+            : "click a node to focus its subtree · scroll to zoom · drag to pan"}
+        </span>
+        <span style={{ flex: 1 }} />
+        {focusNode != null && (
+          <button className="ghost sm" onClick={() => onFocus(null)} title="show the whole graph">
+            {g.focusMissing ? `focus ${focusNode} (not here) ✕` : `▸ ${focusNode} ✕`}
+          </button>
+        )}
+        <button
+          className="ghost sm"
+          title="reset zoom / pan"
+          onClick={() => chartRef.current?.resetZoom?.()}
+        >
+          reset view
+        </button>
+      </div>
       <div className="chart-canvas" ref={canvasRef}>
         {/* keyed by a per-render counter so each real change remounts a fresh
             chart (never an in-place update, which the graph controller mishandles). */}
         <ReactChart
+          ref={chartRef}
           key={renderCount.current}
           type={type === "tree" ? "tree" : "forceDirectedGraph"}
           data={graphData}

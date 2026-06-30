@@ -352,7 +352,18 @@ plugin; the **graph/tree** types use `chartjs-chart-graph` (force-directed +
 hierarchical layouts) + `chartjs-plugin-datalabels` for node labels — they map an
 edge-list/parent-pointer result (a *node* column + a *parent/links-to* column,
 e.g. `pid`/`ppid`) to nodes+edges via `nodesEdges` in `pivot.ts`, with a
-synthetic root joining a forest into one tree and a node cap. NB:
+synthetic root joining a forest into one tree and a node cap. Nodes can be
+coloured by a column (categorical palette / numeric gradient, with a legend) and
+sized by a measure. The graph is interactive: scroll/drag to zoom+pan
+(`chartjs-plugin-zoom`, + a "reset view" button) and **click a node to drill
+into its subtree** (`nodesEdges`' `focus` arg keeps only the focus node and its
+forward-reachable descendants, lifting the cap; a breadcrumb clears it; the
+focus auto-resets when the data or node/parent columns change). The whole graph
+chart lives in a `React.memo` child (`GraphChart`) keyed by a per-render counter:
+it builds chart data/options *fresh* each render (the force layout needs
+react-chartjs-2's per-render update to run, and reused option objects corrupt the
+controller) yet only re-renders on real input changes, so unrelated re-renders
+(typing in the editor) never disturb or blank it. NB:
 `chartjs-chart-graph` 4.3.5 needs chart.js pinned to ~4.4 (it breaks on 4.5's
 option-sharing — see the note in `Chart.tsx`). The shared aggregation/pivot
 primitives live in `pivot.ts` (used by both the chart and the pivot table).
