@@ -326,11 +326,13 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           </button>
         </div>
         <div className="chart-canvas" ref={canvasRef}>
-          {/* key forces a fresh chart per layout: react-chartjs-2 otherwise
-              morphs the existing instance, and chart.js cannot swap to a graph
-              controller in place (edge elements end up without options). */}
+          {/* key forces a fresh chart whenever the layout OR its inputs change:
+              react-chartjs-2 otherwise updates the instance in place, and the
+              graph controller's in-place update leaves edge elements without
+              resolved options (the chart goes blank). Recreating on any change
+              that alters the nodes/edges/labels/sizes avoids that path. */}
           <ReactChart
-            key={type}
+            key={`${type}:${nodeCol}:${linkCol}:${labelCol}:${sizeCol}:${rows.length}`}
             type={type === "tree" ? "tree" : "forceDirectedGraph"}
             data={graphData}
             options={opts}
