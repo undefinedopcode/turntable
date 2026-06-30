@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -105,6 +105,12 @@ const TYPES: ChartType[] = [
 const NODE_CAP = 300; // nodes plotted in a graph/tree before capping
 const LABEL_CAP = 60; // above this many nodes, hide on-node labels (tooltip only)
 
+// GraphLegend describes the node colouring for the swatch legend below a graph.
+type GraphLegend =
+  | null
+  | { kind: "cat"; name: string; items: { label: string; color: string }[]; total: number }
+  | { kind: "numeric"; name: string; lo: number; hi: number };
+
 // Map a measure's values to a pixel bubble radius. Equal/blank ranges collapse to
 // a mid radius so a bubble chart with a constant size column still renders.
 function bubbleRadii(values: (number | null)[]): number[] {
@@ -160,6 +166,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   const [nodeIdx, setNodeIdx] = useState(0); // graph: the node column
   const [linkIdx, setLinkIdx] = useState(1); // graph: the parent / links-to column
   const [labelIdx, setLabelIdx] = useState(-1); // graph: node label (-1 = node value)
+  const [colorIdx, setColorIdx] = useState(-1); // graph: node colour column (-1 = constant)
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const isGraph = type === "graph" || type === "tree";
@@ -210,93 +217,20 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     [rows, x, yMeasure, seriesBy, agg, heatActive],
   );
 
-  // Build the graph/tree data+options once per input change and memoize them.
-  // react-chartjs-2's update effects depend on the options / data.labels /
-  // data.datasets *references*, so stable references mean an unrelated re-render
-  // (e.g. typing in the query editor) does not trigger an in-place chart update —
-  // which for the graph controller would blank the canvas. Real input changes
-  // also bump the chart key below, remounting cleanly.
-  const graphView = useMemo(() => {
-    if (!isGraph) return null;
+  // Graph/tree need a node + a link column, not a numeric measure, so they are
+  // built and returned before the numeric-only guard below. The chart itself is
+  // rendered by GraphChart, a memoized child: it builds the chart data/options
+  // *fresh* (the force layout needs the per-render updates that react-chartjs-2
+  // runs) but only re-renders when the inputs below actually change — so an
+  // unrelated re-render (typing in the query editor) never touches the chart and
+  // cannot blank it.
+  if (isGraph) {
     const numIdx = numeric.map((n) => n.i);
     const nodeCol = nodeIdx < columns.length ? nodeIdx : 0;
     const linkCol = linkIdx < columns.length ? linkIdx : Math.min(1, columns.length - 1);
     const labelCol = labelIdx < columns.length ? labelIdx : -1;
-    const sizeC = numIdx.includes(sizeIdx) ? sizeIdx : -1;
-    const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeC, type, NODE_CAP);
-    const radii = bubbleRadii(g.nodes.map((n) => n.size));
-    const showLabels = g.nodes.length <= LABEL_CAP;
-
-    const graphData = {
-      labels: g.nodes.map((n) => n.label),
-      datasets: [
-        {
-          data: g.nodes.map(() => ({})),
-          edges: g.edges,
-          pointBackgroundColor: g.nodes.map((_, i) =>
-            i === g.rootIndex ? "rgba(138,147,167,0.35)" : alpha(PALETTE[0], "cc"),
-          ),
-          pointRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i])),
-          pointHoverRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i] + 2)),
-          borderColor: "rgba(138,147,167,0.35)",
-          borderWidth: 1,
-        },
-      ],
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const opts: any = {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 0 },
-      layout: { padding: 24 },
-      plugins: {
-        legend: { display: false },
-        datalabels: {
-          display: (c: { dataIndex: number }) => showLabels && c.dataIndex !== g.rootIndex,
-          formatter: (_v: unknown, c: { dataIndex: number }) => g.nodes[c.dataIndex]?.label,
-          color: "#c8cdd8",
-          font: { size: 10 },
-          anchor: "end",
-          align: "top",
-          offset: 2,
-          clip: true,
-        },
-        tooltip: {
-          callbacks: {
-            title: () => "",
-            label: (c: { dataIndex: number }) => {
-              const n = g.nodes[c.dataIndex];
-              return n.size !== null ? `${n.label} (${n.size})` : n.label;
-            },
-          },
-        },
-      },
-      ...(type === "tree" ? { tree: { orientation: "horizontal" } } : {}),
-      scales: { x: { display: false }, y: { display: false } },
-    };
-    return { g, graphData, opts, nodeCol, linkCol, labelCol, sizeCol: sizeC, showLabels };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isGraph, type, nodeIdx, linkIdx, labelIdx, sizeIdx, columns, rows, numeric]);
-
-  // Remount the chart exactly when the graph's inputs change. graphView is a new
-  // object only when an input (type/columns/rows/selections) changed, so bumping
-  // a counter on that identity change gives a key that: remounts on any real
-  // change (avoiding the graph controller's broken in-place update — including a
-  // re-run that returns the same row count), and stays stable on unrelated
-  // re-renders (typing in the editor), where the memoized data/options refs mean
-  // react-chartjs-2 does nothing.
-  const graphKeyRef = useRef(0);
-  const prevGraphViewRef = useRef(graphView);
-  if (prevGraphViewRef.current !== graphView) {
-    prevGraphViewRef.current = graphView;
-    graphKeyRef.current += 1;
-  }
-
-  // Graph/tree need a node + a link column, not a numeric measure, so they are
-  // built and returned before the numeric-only guard below.
-  if (isGraph && graphView) {
-    const { g, graphData, opts, nodeCol, linkCol, labelCol, sizeCol: gSizeCol, showLabels } =
-      graphView;
+    const gSizeCol = numIdx.includes(sizeIdx) ? sizeIdx : -1;
+    const colorCol = colorIdx >= 0 && colorIdx < columns.length ? colorIdx : -1;
 
     return (
       <div className="chart">
@@ -350,26 +284,33 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
               ))}
             </select>
           </label>
+          <label className="chart-field">
+            color
+            <select value={colorCol} onChange={(e) => setColorIdx(Number(e.target.value))}>
+              <option value={-1}>(constant)</option>
+              {columns.map((c, i) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button className="ghost sm chart-png" title="download chart as PNG" onClick={exportPNG}>
             PNG
           </button>
         </div>
-        <div className="chart-canvas" ref={canvasRef}>
-          {/* see graphKeyRef above: remount on input change, stable otherwise. */}
-          <ReactChart
-            key={graphKeyRef.current}
-            type={type === "tree" ? "tree" : "forceDirectedGraph"}
-            data={graphData}
-            options={opts}
-          />
-        </div>
-        {g.total > NODE_CAP && (
-          <div className="hint" style={{ padding: "4px 2px" }}>
-            showing first {NODE_CAP} of {g.total} nodes — add a tighter{" "}
-            <code>WHERE</code>/<code>LIMIT</code>.
-            {!showLabels && " labels hidden (too many nodes); hover for detail."}
-          </div>
-        )}
+        <GraphChart
+          canvasRef={canvasRef}
+          rows={rows}
+          columns={columns}
+          numeric={numeric}
+          type={type}
+          nodeCol={nodeCol}
+          linkCol={linkCol}
+          labelCol={labelCol}
+          sizeCol={gSizeCol}
+          colorCol={colorCol}
+        />
       </div>
     );
   }
@@ -731,6 +672,214 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
             `showing first ${RAW_CAP} of ${rows.length} rows — aggregate or add a tighter LIMIT. `}
           {type === "pie" && ys.length > 1 && "pie shows a single series."}
         </div>
+      )}
+    </div>
+  );
+}
+
+// GraphChart renders a node-link graph/tree. It is memoized so it only re-renders
+// when its inputs actually change — an unrelated parent re-render (e.g. typing in
+// the query editor) is a no-op and cannot disturb the chart. On each real render
+// it builds fresh data/options (the force layout relies on react-chartjs-2's
+// per-render updates to run) and bumps a remount counter, so the chart is created
+// anew rather than updated in place — the graph controller's in-place update is
+// the path that blanks the canvas.
+const GraphChart = memo(function GraphChart({
+  canvasRef,
+  rows,
+  columns,
+  numeric,
+  type,
+  nodeCol,
+  linkCol,
+  labelCol,
+  sizeCol,
+  colorCol,
+}: {
+  canvasRef: React.RefObject<HTMLDivElement>;
+  rows: Cell[][];
+  columns: Column[];
+  numeric: { c: Column; i: number }[];
+  type: "graph" | "tree";
+  nodeCol: number;
+  linkCol: number;
+  labelCol: number;
+  sizeCol: number;
+  colorCol: number;
+}) {
+  const renderCount = useRef(0);
+  renderCount.current += 1;
+
+  const numIdx = numeric.map((n) => n.i);
+  const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, colorCol, type, NODE_CAP);
+  const radii = bubbleRadii(g.nodes.map((n) => n.size));
+  const showLabels = g.nodes.length <= LABEL_CAP;
+
+  // Per-node colours + a legend describing them. A numeric colour column is a
+  // value gradient (heatColor); any other column is categorical (a palette colour
+  // per distinct value). Nodes with no value, and the synthetic root, get grey.
+  const ROOT_COLOR = "rgba(138,147,167,0.35)";
+  const NULL_COLOR = "rgba(138,147,167,0.45)";
+  const colorNumeric = numIdx.includes(colorCol);
+  let nodeColors: string[];
+  let legend: GraphLegend = null;
+  if (colorCol < 0) {
+    nodeColors = g.nodes.map((_, i) => (i === g.rootIndex ? ROOT_COLOR : alpha(PALETTE[0], "cc")));
+  } else if (colorNumeric) {
+    const vals = g.nodes.map((n) => (n.color == null ? null : numOrNull(n.color)));
+    const present = vals.filter((v): v is number => v !== null);
+    const lo = present.length ? Math.min(...present) : 0;
+    const hi = present.length ? Math.max(...present) : 0;
+    nodeColors = g.nodes.map((_, i) =>
+      i === g.rootIndex ? ROOT_COLOR : vals[i] === null ? NULL_COLOR : heatColor(vals[i], lo, hi),
+    );
+    legend = present.length ? { kind: "numeric", lo, hi, name: columns[colorCol]?.name ?? "" } : null;
+  } else {
+    const palette = new Map<string, string>();
+    const order: string[] = [];
+    for (const n of g.nodes) {
+      if (n.color == null) continue;
+      const k = labelOf(n.color);
+      if (!palette.has(k)) {
+        palette.set(k, PALETTE[palette.size % PALETTE.length]);
+        order.push(k);
+      }
+    }
+    nodeColors = g.nodes.map((n, i) =>
+      i === g.rootIndex ? ROOT_COLOR : n.color == null ? NULL_COLOR : palette.get(labelOf(n.color))!,
+    );
+    legend = {
+      kind: "cat",
+      name: columns[colorCol]?.name ?? "",
+      items: order.slice(0, 16).map((k) => ({ label: k, color: palette.get(k)! })),
+      total: order.length,
+    };
+  }
+
+  const graphData = {
+    labels: g.nodes.map((n) => n.label),
+    datasets: [
+      {
+        data: g.nodes.map(() => ({})),
+        edges: g.edges,
+        pointBackgroundColor: nodeColors,
+        pointRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i])),
+        pointHoverRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i] + 2)),
+        borderColor: "rgba(138,147,167,0.35)",
+        borderWidth: 1,
+      },
+    ],
+  };
+  const colorName = colorCol >= 0 ? columns[colorCol]?.name : "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const opts: any = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 0 },
+    layout: { padding: 24 },
+    plugins: {
+      legend: { display: false },
+      datalabels: {
+        display: (c: { dataIndex: number }) => showLabels && c.dataIndex !== g.rootIndex,
+        formatter: (_v: unknown, c: { dataIndex: number }) => g.nodes[c.dataIndex]?.label,
+        color: "#c8cdd8",
+        font: { size: 10 },
+        anchor: "end",
+        align: "top",
+        offset: 2,
+        clip: true,
+      },
+      tooltip: {
+        callbacks: {
+          title: () => "",
+          label: (c: { dataIndex: number }) => {
+            const n = g.nodes[c.dataIndex];
+            let s = n.label;
+            if (colorCol >= 0 && n.color != null) s += ` · ${colorName}=${n.color}`;
+            if (n.size !== null) s += ` (${n.size})`;
+            return s;
+          },
+        },
+      },
+    },
+    ...(type === "tree" ? { tree: { orientation: "horizontal" } } : {}),
+    scales: { x: { display: false }, y: { display: false } },
+  };
+
+  return (
+    <>
+      <div className="chart-canvas" ref={canvasRef}>
+        {/* keyed by a per-render counter so each real change remounts a fresh
+            chart (never an in-place update, which the graph controller mishandles). */}
+        <ReactChart
+          key={renderCount.current}
+          type={type === "tree" ? "tree" : "forceDirectedGraph"}
+          data={graphData}
+          options={opts}
+        />
+      </div>
+      {legend && <GraphColorLegend legend={legend} />}
+      {g.total > NODE_CAP && (
+        <div className="hint" style={{ padding: "4px 2px" }}>
+          showing first {NODE_CAP} of {g.total} nodes — add a tighter <code>WHERE</code>/
+          <code>LIMIT</code>.
+          {!showLabels && " labels hidden (too many nodes); hover for detail."}
+        </div>
+      )}
+    </>
+  );
+});
+
+// GraphColorLegend renders the node-colour key below a graph/tree: palette
+// swatches for a categorical colour column, or a gradient bar for a numeric one.
+function GraphColorLegend({ legend }: { legend: Exclude<GraphLegend, null> }) {
+  const swatch = (bg: string, w = 10) => ({
+    width: w,
+    height: 10,
+    borderRadius: 2,
+    background: bg,
+    display: "inline-block",
+  });
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: "4px 14px",
+        padding: "4px 2px",
+        fontSize: 12,
+        color: "var(--muted, #8b93a7)",
+      }}
+    >
+      <span style={{ opacity: 0.8 }}>{legend.name}:</span>
+      {legend.kind === "cat" ? (
+        <>
+          {legend.items.map((it) => (
+            <span key={it.label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span style={swatch(it.color)} />
+              {it.label}
+            </span>
+          ))}
+          {legend.total > legend.items.length && (
+            <span>+{legend.total - legend.items.length} more</span>
+          )}
+        </>
+      ) : (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          {legend.lo}
+          <span
+            style={swatch(
+              `linear-gradient(to right, ${heatColor(legend.lo, legend.lo, legend.hi)}, ${heatColor(
+                (legend.lo + legend.hi) / 2,
+                legend.lo,
+                legend.hi,
+              )}, ${heatColor(legend.hi, legend.lo, legend.hi)})`,
+              64,
+            )}
+          />
+          {legend.hi}
+        </span>
       )}
     </div>
   );

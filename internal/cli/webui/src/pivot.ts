@@ -105,6 +105,7 @@ export function pivot(
 export interface GraphNode {
   label: string;
   size: number | null; // optional measure for node sizing
+  color: Cell; // optional raw value for node colouring (null when unset/absent)
 }
 
 export interface Graph {
@@ -129,6 +130,7 @@ export function nodesEdges(
   linkIdx: number,
   labelIdx: number, // -1 = use the node value as the label
   sizeIdx: number, // -1 = no sizing
+  colorIdx: number, // -1 = no colouring
   mode: "graph" | "tree",
   cap = 300,
 ): Graph {
@@ -139,7 +141,7 @@ export function nodesEdges(
     if (i === undefined) {
       i = nodes.length;
       index.set(label, i);
-      nodes.push({ label, size: null });
+      nodes.push({ label, size: null, color: null });
     }
     return i;
   };
@@ -154,6 +156,7 @@ export function nodesEdges(
     const ni = ensure(nodeKey);
     if (labelIdx >= 0) nodes[ni].label = labelOf(r[labelIdx]);
     if (sizeIdx >= 0) nodes[ni].size = numOrNull(r[sizeIdx]);
+    if (colorIdx >= 0) nodes[ni].color = r[colorIdx] ?? null;
 
     const linkCell = r[linkIdx];
     if (linkCell !== null && linkCell !== undefined && linkCell !== "") {
@@ -170,7 +173,7 @@ export function nodesEdges(
   let rootIndex = -1;
   if (mode === "tree") {
     rootIndex = nodes.length;
-    nodes.push({ label: "", size: null });
+    nodes.push({ label: "", size: null, color: null });
     for (let i = 0; i < rootIndex; i++) {
       if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
     }
