@@ -197,10 +197,21 @@ interfaces:
     qualified-ref prefix, and `App.Close` (deferred in `Run`) tears the processes
     down. Config: `connector: plugin` + a `command:` list (`config.Source.Command`,
     `${ENV}`-interpolated; arbitrary exec, so deliberately *not* exposed via the
-    web add-source UI). Protocol is specified in **PLUGINS.md**; the
-    dependency-free reference plugin is `examples/plugins/sysinfo`. Tests:
+    web add-source UI). Protocol is specified in **PLUGINS.md**. Tests:
     pipe-based codec/iterator (`client_test.go`) + an exec-self real-subprocess
-    e2e (`pluginc_test.go`, via `TestMain`).
+    e2e (`pluginc_test.go`, via `TestMain`). A **Go SDK** for plugin *authors*
+    lives in a separate, dependency-free module `sdk/go` (package `ttplugin`,
+    import `github.com/april/turntable/sdk/go/ttplugin`) — it mirrors this
+    connector across the wire, implementing framing/dispatch/cursor/predicate-eval/
+    cell-encoding so an author writes only `Plugin{Name, Datasets}` (each
+    `Dataset` = a `Schema` + a `Rows` func); it auto-applies the pushed
+    `WHERE`/`LIMIT` unless `ManualPushdown`. The two reference plugins under
+    `examples/plugins/` (`sysinfo` = env + Go-runtime stats, dependency-free;
+    `procinfo` = the live process table via gopsutil) are each their **own
+    module** using the SDK (kept separate so gopsutil never enters turntable's or
+    the SDK's dep graph; they `replace`→`../../../sdk/go` locally). Build them
+    with `examples/plugins/build.sh` — being separate modules, they are **not**
+    compiled by `go build ./...` from the repo root.
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
     `logc` is a plain-text log reader that **auto-detects** the format by

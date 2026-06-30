@@ -10,9 +10,15 @@ A plugin implements the same contract as a built-in connector
 (`Datasets`/`Resolve`/`Scan`), just across a process boundary. Everything
 downstream — the planner, the engine, pushdown — is identical to a built-in.
 
-A complete, dependency-free reference implementation lives in
-[`examples/plugins/sysinfo`](examples/plugins/sysinfo/main.go); read it alongside
-this spec.
+**Writing one in Go? Use the SDK** (`github.com/april/turntable/sdk/go/ttplugin`)
+— it implements everything in this document, so you only declare datasets and a
+row function. See [Go SDK](#go-sdk) below. The protocol spec here remains the
+source of truth, and is what you implement directly in any other language.
+
+Two reference plugins, both built on the SDK, live under `examples/plugins/`:
+[`sysinfo`](examples/plugins/sysinfo/main.go) (live env + Go-runtime stats,
+dependency-free) and [`procinfo`](examples/plugins/procinfo/main.go) (the live
+process table, via gopsutil). Build them with `./examples/plugins/build.sh`.
 
 ## Registering a plugin
 
@@ -45,6 +51,64 @@ you trust, from a config file you control. Plugin commands are deliberately *not
 accepted through the web add-source UI, which can register data sources but must
 never launch processes. Treat a `command:` entry with the same care as a shell
 command in your shell profile.
+
+## Go SDK
+
+The SDK module `github.com/april/turntable/sdk/go/ttplugin` is dependency-free
+(standard library only), so importing it does not pull in turntable's own
+dependency graph. It implements the entire protocol below — framing, dispatch,
+scan cursors, predicate **evaluation**, limit, and cell encoding — leaving you to
+declare datasets and a function that returns rows:
+
+```go
+package main
+
+import (
+	"os"
+	"strings"
+
+	"github.com/april/turntable/sdk/go/ttplugin"
+)
+
+func main() {
+	ttplugin.Serve(ttplugin.Plugin{
+		Name: "sysinfo",
+		Datasets: map[string]ttplugin.Dataset{
+			"env": {
+				Schema: ttplugin.Schema{Columns: []ttplugin.Column{
+					{Name: "name", Type: "string"},
+					{Name: "value", Type: "string", Nullable: true},
+				}},
+				Rows: func(ttplugin.Request) (ttplugin.Rows, error) {
+					var rows ttplugin.Rows
+					for _, kv := range os.Environ() {
+						k, v, _ := strings.Cut(kv, "=")
+						rows = append(rows, ttplugin.Row{k, v})
+					}
+					return rows, nil
+				},
+			},
+		},
+	})
+}
+```
+
+- Return cells as plain Go values (`int`/`int64`, `float64`, `string`, `bool`,
+  `time.Time`, `time.Duration`, `[]byte`, `nil`, or any JSON value for an `any`
+  column); the SDK encodes them to the wire form below.
+- By default the SDK **applies the pushed-down `WHERE` and `LIMIT`** to the rows
+  you return, so you get predicate/limit pushdown for free. Set
+  `Plugin.ManualPushdown` to handle them yourself (e.g. to push filters into a
+  remote backend); the `Request` still carries the decoded `Predicate`/`Limit`,
+  and `Predicate.Eval` is exported so you can reuse the evaluator.
+
+A plugin needs nothing from turntable itself — the SDK is the only import. Each
+example under `examples/plugins/` is its own module (like a real external plugin)
+depending only on the SDK (and, for `procinfo`, gopsutil); they resolve the SDK
+locally via a `replace` directive while in this repo.
+
+Authors in other languages implement the wire protocol directly; the rest of this
+document is that protocol.
 
 ## Transport
 
