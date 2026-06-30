@@ -102,6 +102,82 @@ export function pivot(
   return { labels, seriesKeys, data, xTotal: xOrder.length, sTotal: sOrder.length };
 }
 
+export interface GraphNode {
+  label: string;
+  size: number | null; // optional measure for node sizing
+}
+
+export interface Graph {
+  nodes: GraphNode[];
+  edges: { source: number; target: number }[];
+  total: number; // pre-cap node count, for "showing first N of M" hints
+  rootIndex: number; // index of the synthetic root (tree mode), else -1
+}
+
+// nodesEdges turns an edge-list / parent-pointer result into a node+edge graph.
+// Each row contributes a node (its nodeIdx value) and, when the linkIdx cell is
+// non-null, an edge between the two. A value appearing only as a link target
+// (e.g. a parent pid outside the filtered set) still becomes a node. Edges are
+// oriented link→node (parent→child) so the tree layout roots correctly.
+//
+// In tree mode a synthetic root is added and every node that has no parent in
+// the set is attached to it, so a forest (e.g. the process table's many roots)
+// renders as one tree. Nodes are capped to keep force layouts legible.
+export function nodesEdges(
+  rows: Cell[][],
+  nodeIdx: number,
+  linkIdx: number,
+  labelIdx: number, // -1 = use the node value as the label
+  sizeIdx: number, // -1 = no sizing
+  mode: "graph" | "tree",
+  cap = 300,
+): Graph {
+  const index = new Map<string, number>();
+  const nodes: GraphNode[] = [];
+  const ensure = (label: string): number => {
+    let i = index.get(label);
+    if (i === undefined) {
+      i = nodes.length;
+      index.set(label, i);
+      nodes.push({ label, size: null });
+    }
+    return i;
+  };
+
+  const edgeSet = new Set<string>();
+  const edges: { source: number; target: number }[] = [];
+  const hasParent = new Set<number>();
+
+  for (const r of rows) {
+    if (index.size >= cap && index.get(labelOf(r[nodeIdx])) === undefined) continue;
+    const nodeKey = labelOf(r[nodeIdx]);
+    const ni = ensure(nodeKey);
+    if (labelIdx >= 0) nodes[ni].label = labelOf(r[labelIdx]);
+    if (sizeIdx >= 0) nodes[ni].size = numOrNull(r[sizeIdx]);
+
+    const linkCell = r[linkIdx];
+    if (linkCell !== null && linkCell !== undefined && linkCell !== "") {
+      const pi = ensure(labelOf(linkCell));
+      const key = pi + ">" + ni;
+      if (pi !== ni && !edgeSet.has(key)) {
+        edgeSet.add(key);
+        edges.push({ source: pi, target: ni });
+        hasParent.add(ni);
+      }
+    }
+  }
+
+  let rootIndex = -1;
+  if (mode === "tree") {
+    rootIndex = nodes.length;
+    nodes.push({ label: "", size: null });
+    for (let i = 0; i < rootIndex; i++) {
+      if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
+    }
+  }
+  return { nodes, edges, total: index.size, rootIndex };
+}
+
 // heatColor maps a value in [lo,hi] to a blue→accent→amber gradient (null →
 // faint). Three stops keep low/mid/high visually distinct on the dark UI. alpha
 // < 1 lets a colored cell sit over the dark table while keeping its text legible.

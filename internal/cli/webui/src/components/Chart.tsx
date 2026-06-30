@@ -13,6 +13,17 @@ import {
   type ChartOptions,
 } from "chart.js";
 import { MatrixController, MatrixElement } from "chartjs-chart-matrix";
+// NOTE: chart.js is pinned to ~4.4 (see package.json). chartjs-chart-graph 4.3.5
+// (latest) is incompatible with chart.js 4.5's option-sharing internals — under
+// 4.5 the graph controller never assigns options to edge elements and
+// EdgeLine.draw throws "Cannot read properties of undefined (reading
+// 'borderCapStyle')". Do not bump chart.js to 4.5 until the graph plugin fixes it.
+import {
+  ForceDirectedGraphController,
+  TreeController,
+  EdgeLine,
+} from "chartjs-chart-graph";
+import ChartDataLabels from "chartjs-plugin-datalabels";
 import { Bar, Line, Scatter, Pie, Bubble, Chart as ReactChart } from "react-chartjs-2";
 import type { Cell, Column } from "../api";
 import { downloadCanvasPNG } from "../export";
@@ -22,6 +33,7 @@ import {
   applyAgg,
   heatColor,
   labelOf,
+  nodesEdges,
   numOrNull,
   numericColumns,
   pivot,
@@ -39,7 +51,15 @@ ChartJS.register(
   Filler,
   MatrixController,
   MatrixElement,
+  ForceDirectedGraphController,
+  TreeController,
+  EdgeLine,
+  ChartDataLabels,
 );
+
+// datalabels is registered globally for the graph/tree node labels, but it must
+// stay off for every other chart type — enable it per-chart in the graph branch.
+ChartJS.defaults.plugins.datalabels = { display: false };
 
 // Match the dark UI (values mirror the CSS custom properties in styles.css).
 ChartJS.defaults.color = "#8b93a7";
@@ -61,8 +81,29 @@ const RAW_CAP = 500; // points plotted when not aggregating
 const GROUP_CAP = 100; // groups (bars/slices / x labels) kept
 const SERIES_CAP = 12; // distinct "series by" values kept
 
-type ChartType = "bar" | "line" | "area" | "scatter" | "bubble" | "heatmap" | "pie";
-const TYPES: ChartType[] = ["bar", "line", "area", "scatter", "bubble", "heatmap", "pie"];
+type ChartType =
+  | "bar"
+  | "line"
+  | "area"
+  | "scatter"
+  | "bubble"
+  | "heatmap"
+  | "pie"
+  | "graph"
+  | "tree";
+const TYPES: ChartType[] = [
+  "bar",
+  "line",
+  "area",
+  "scatter",
+  "bubble",
+  "heatmap",
+  "pie",
+  "graph",
+  "tree",
+];
+const NODE_CAP = 300; // nodes plotted in a graph/tree before capping
+const LABEL_CAP = 60; // above this many nodes, hide on-node labels (tooltip only)
 
 // Map a measure's values to a pixel bubble radius. Equal/blank ranges collapse to
 // a mid radius so a bubble chart with a constant size column still renders.
@@ -115,8 +156,13 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   const [xIdx, setXIdx] = useState(0);
   const [ySel, setYSel] = useState<number[]>([]);
   const [seriesBy, setSeriesBy] = useState(-1); // -1 = none (no breakdown)
-  const [sizeIdx, setSizeIdx] = useState(-1); // bubble size measure (-1 = constant)
+  const [sizeIdx, setSizeIdx] = useState(-1); // bubble/node size measure (-1 = constant)
+  const [nodeIdx, setNodeIdx] = useState(0); // graph: the node column
+  const [linkIdx, setLinkIdx] = useState(1); // graph: the parent / links-to column
+  const [labelIdx, setLabelIdx] = useState(-1); // graph: node label (-1 = node value)
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  const isGraph = type === "graph" || type === "tree";
 
   // Resolve selections defensively against the current columns, so switching
   // queries never references a stale index.
@@ -163,6 +209,143 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     () => (heatActive ? pivot(rows, x, yMeasure, seriesBy, agg) : null),
     [rows, x, yMeasure, seriesBy, agg, heatActive],
   );
+
+  // Graph/tree need a node + a link column, not a numeric measure, so they are
+  // built and returned before the numeric-only guard below.
+  if (isGraph) {
+    const nodeCol = nodeIdx < columns.length ? nodeIdx : 0;
+    const linkCol = linkIdx < columns.length ? linkIdx : Math.min(1, columns.length - 1);
+    const labelCol = labelIdx < columns.length ? labelIdx : -1;
+    const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, type, NODE_CAP);
+    const radii = bubbleRadii(g.nodes.map((n) => n.size));
+    const showLabels = g.nodes.length <= LABEL_CAP;
+
+    const graphData = {
+      labels: g.nodes.map((n) => n.label),
+      datasets: [
+        {
+          data: g.nodes.map(() => ({})),
+          edges: g.edges,
+          pointBackgroundColor: g.nodes.map((_, i) =>
+            i === g.rootIndex ? "rgba(138,147,167,0.35)" : alpha(PALETTE[0], "cc"),
+          ),
+          pointRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i])),
+          pointHoverRadius: g.nodes.map((_, i) => (i === g.rootIndex ? 0 : radii[i] + 2)),
+          borderColor: "rgba(138,147,167,0.35)",
+          borderWidth: 1,
+        },
+      ],
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts: any = {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 0 },
+      layout: { padding: 24 },
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          display: (c: { dataIndex: number }) =>
+            showLabels && c.dataIndex !== g.rootIndex,
+          formatter: (_v: unknown, c: { dataIndex: number }) => g.nodes[c.dataIndex]?.label,
+          color: "#c8cdd8",
+          font: { size: 10 },
+          anchor: "end",
+          align: "top",
+          offset: 2,
+          clip: true,
+        },
+        tooltip: {
+          callbacks: {
+            title: () => "",
+            label: (c: { dataIndex: number }) => {
+              const n = g.nodes[c.dataIndex];
+              return n.size !== null ? `${n.label} (${n.size})` : n.label;
+            },
+          },
+        },
+      },
+      ...(type === "tree" ? { tree: { orientation: "horizontal" } } : {}),
+      scales: { x: { display: false }, y: { display: false } },
+    };
+
+    return (
+      <div className="chart">
+        <div className="chart-controls">
+          <div className="seg">
+            {TYPES.map((t) => (
+              <button key={t} className={type === t ? "on" : ""} onClick={() => setType(t)}>
+                {t}
+              </button>
+            ))}
+          </div>
+          <label className="chart-field">
+            node
+            <select value={nodeCol} onChange={(e) => setNodeIdx(Number(e.target.value))}>
+              {columns.map((c, i) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chart-field">
+            {type === "tree" ? "parent" : "links to"}
+            <select value={linkCol} onChange={(e) => setLinkIdx(Number(e.target.value))}>
+              {columns.map((c, i) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chart-field">
+            label
+            <select value={labelCol} onChange={(e) => setLabelIdx(Number(e.target.value))}>
+              <option value={-1}>(node)</option>
+              {columns.map((c, i) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chart-field">
+            size
+            <select value={sizeCol} onChange={(e) => setSizeIdx(Number(e.target.value))}>
+              <option value={-1}>(constant)</option>
+              {numeric.map(({ c, i }) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="ghost sm chart-png" title="download chart as PNG" onClick={exportPNG}>
+            PNG
+          </button>
+        </div>
+        <div className="chart-canvas" ref={canvasRef}>
+          {/* key forces a fresh chart per layout: react-chartjs-2 otherwise
+              morphs the existing instance, and chart.js cannot swap to a graph
+              controller in place (edge elements end up without options). */}
+          <ReactChart
+            key={type}
+            type={type === "tree" ? "tree" : "forceDirectedGraph"}
+            data={graphData}
+            options={opts}
+          />
+        </div>
+        {g.total > NODE_CAP && (
+          <div className="hint" style={{ padding: "4px 2px" }}>
+            showing first {NODE_CAP} of {g.total} nodes — add a tighter{" "}
+            <code>WHERE</code>/<code>LIMIT</code>.
+            {!showLabels && " labels hidden (too many nodes); hover for detail."}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (numeric.length === 0) {
     return (

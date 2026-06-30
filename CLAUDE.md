@@ -343,11 +343,18 @@ workspace with its own editor text + result, persisted to localStorage by
 column/function autocomplete), query history + saved queries (also localStorage),
 and a results pane with three views: a table (client-side sort/filter, cell
 copy/JSON-expand, CSV/JSON/NDJSON export via `export.ts`), a Chart.js chart
-(`Chart.tsx`: bar/line/area/scatter/bubble/heatmap/pie with PNG export, X column
-+ multi-series Y toggles + a series-by breakdown + client-side group-by-X
-aggregation count/sum/avg/min/max), and a pivot table (`PivotTable.tsx` —
-row×column cross-tab of one measure, optional cell heatmap colouring). The chart
-heatmap uses the `chartjs-chart-matrix` plugin; the shared aggregation/pivot
+(`Chart.tsx`: bar/line/area/scatter/bubble/heatmap/pie plus node-link
+graph/tree with PNG export, X column + multi-series Y toggles + a series-by
+breakdown + client-side group-by-X aggregation count/sum/avg/min/max), and a
+pivot table (`PivotTable.tsx` — row×column cross-tab of one measure, optional
+cell heatmap colouring). The chart heatmap uses the `chartjs-chart-matrix`
+plugin; the **graph/tree** types use `chartjs-chart-graph` (force-directed +
+hierarchical layouts) + `chartjs-plugin-datalabels` for node labels — they map an
+edge-list/parent-pointer result (a *node* column + a *parent/links-to* column,
+e.g. `pid`/`ppid`) to nodes+edges via `nodesEdges` in `pivot.ts`, with a
+synthetic root joining a forest into one tree and a node cap. NB:
+`chartjs-chart-graph` 4.3.5 needs chart.js pinned to ~4.4 (it breaks on 4.5's
+option-sharing — see the note in `Chart.tsx`). The shared aggregation/pivot
 primitives live in `pivot.ts` (used by both the chart and the pivot table).
 The frontend is a **React + Vite + TypeScript** app under
 `internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via
