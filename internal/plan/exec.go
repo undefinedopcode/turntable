@@ -443,7 +443,11 @@ func (it *cteReplayIter) Close() error {
 func projectOutputSchema(outs []engine.ProjectedExpr) engine.Schema {
 	cols := make([]engine.Column, len(outs))
 	for i, o := range outs {
-		cols[i] = engine.Column{Name: o.Name, Type: engine.TypeAny, Nullable: true}
+		typ := o.Type
+		if typ == engine.TypeInvalid {
+			typ = engine.TypeAny
+		}
+		cols[i] = engine.Column{Name: o.Name, Type: typ, Nullable: true}
 	}
 	return engine.Schema{Columns: cols}
 }

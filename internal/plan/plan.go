@@ -744,7 +744,7 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		// Aggregate, then (optionally) Sort over its output, then Project. The
 		// aggregate builder rewrites ORDER BY/HAVING to reference aggregate output
 		// columns, so a Sort by an aggregate or a scalar-of-aggregate works.
-		aggNode, outs, projSchema, orderTerms, err := bc.buildAggregate(stmt, base)
+		aggNode, outs, projSchema, orderTerms, err := bc.buildAggregate(stmt, base, baseSchema)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
@@ -1165,6 +1165,7 @@ func resolveOrdinals(stmt *sql.SelectStmt) error {
 type aggExtractor struct {
 	specs []engine.AggSpec
 	cols  []engine.Column
+	in    engine.Schema // input schema, for inferring aggregate argument types
 	n     int
 }
 
@@ -1177,7 +1178,7 @@ func (x *aggExtractor) register(fc *sql.FuncCall, name string) sql.Expr {
 		arg2 = fc.Args[1] // e.g. the STRING_AGG delimiter
 	}
 	x.specs = append(x.specs, engine.AggSpec{Func: fc.Name, Arg: arg, Arg2: arg2, Name: name, Distinct: fc.Distinct})
-	x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+	x.cols = append(x.cols, engine.Column{Name: name, Type: aggregateType(fc, x.in), Nullable: true})
 	return &sql.ColRef{Name: name}
 }
 
@@ -1246,12 +1247,11 @@ func (x *aggExtractor) rewrite(e sql.Expr) sql.Expr {
 // order and evaluates any scalar wrappers around aggregates. The returned order
 // terms are rewritten to reference the aggregate output and are applied (as a
 // Sort) between the Aggregate and the projection by the caller.
-func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
-	ext := &aggExtractor{}
+func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
+	ext := &aggExtractor{in: baseSchema}
 	var keys []sql.Expr
 	var keyCols []engine.Column
 	var outs []engine.ProjectedExpr
-	var outCols []engine.Column
 
 	for _, it := range stmt.Items.Items {
 		if it.Star {
@@ -1273,10 +1273,9 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node) (Node, []eng
 		default:
 			// No aggregate: a group key. The projection reads the key column back.
 			keys = append(keys, it.Expr)
-			keyCols = append(keyCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+			keyCols = append(keyCols, engine.Column{Name: name, Type: exprType(it.Expr, baseSchema), Nullable: true})
 			outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: name}, Name: name})
 		}
-		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
 
 	having := stmt.Having
@@ -1292,6 +1291,15 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node) (Node, []eng
 	// schema must follow that layout (not SELECT-list order) so name-based reads
 	// land on the right columns.
 	interSchema := engine.Schema{Columns: append(append([]engine.Column{}, keyCols...), ext.cols...)}
+	// The projection runs over the aggregate output; with keys and aggregates now
+	// typed, infer each output column's type over that intermediate schema (a
+	// plain key/aggregate reference passes through, scalar wrappers like
+	// ROUND(STDDEV(x), 2) resolve via the function library).
+	outCols := make([]engine.Column, len(outs))
+	for i := range outs {
+		outs[i].Type = exprType(outs[i].Expr, interSchema)
+		outCols[i] = engine.Column{Name: outs[i].Name, Type: outs[i].Type, Nullable: true}
+	}
 	node := &Aggregate{Child: base, Keys: keys, Aggs: ext.specs, Having: having, Schema: interSchema}
 	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
 }
@@ -1309,16 +1317,14 @@ func isTopLevelAgg(e sql.Expr) bool {
 // them. A plain (non-window) select item is projected as its own expression
 // over the window output, which still carries every base column.
 func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
-	win := &winExtractor{}
+	win := &winExtractor{in: baseSchema}
 	var outs []engine.ProjectedExpr
-	var outCols []engine.Column
 	for _, it := range stmt.Items.Items {
 		if it.Star {
 			// Expand to the base relation's columns (window outputs are named
 			// select items, not part of *).
 			for _, c := range baseSchema.Columns {
 				outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: c.Name}, Name: c.Name})
-				outCols = append(outCols, c)
 			}
 			continue
 		}
@@ -1327,13 +1333,19 @@ func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engi
 			name = inferExprName(it.Expr)
 		}
 		outs = append(outs, engine.ProjectedExpr{Expr: win.rewrite(it.Expr), Name: name})
-		outCols = append(outCols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
 	}
 	var orderTerms []sql.OrderTerm
 	for _, ot := range stmt.OrderBy {
 		orderTerms = append(orderTerms, sql.OrderTerm{Expr: win.rewrite(ot.Expr), Desc: ot.Desc})
 	}
 	winSchema := engine.Schema{Columns: append(append([]engine.Column{}, baseSchema.Columns...), win.cols...)}
+	// The projection runs over the window output (base columns + $winN); with the
+	// window columns now typed, infer each output column's type over that schema.
+	outCols := make([]engine.Column, len(outs))
+	for i := range outs {
+		outs[i].Type = exprType(outs[i].Expr, winSchema)
+		outCols[i] = engine.Column{Name: outs[i].Name, Type: outs[i].Type, Nullable: true}
+	}
 	node := &Window{Child: base, Specs: win.specs, Schema: winSchema}
 	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
 }
@@ -1876,6 +1888,7 @@ func rewriteFuncs(e sql.Expr, sub func(*sql.FuncCall) sql.Expr) sql.Expr {
 type winExtractor struct {
 	specs []engine.WindowSpec
 	cols  []engine.Column
+	in    engine.Schema // input schema, for inferring window argument types
 	n     int
 }
 
@@ -1894,7 +1907,7 @@ func (x *winExtractor) rewrite(e sql.Expr) sql.Expr {
 			OrderBy:     fc.Over.OrderBy,
 			Frame:       fc.Over.Frame,
 		})
-		x.cols = append(x.cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+		x.cols = append(x.cols, engine.Column{Name: name, Type: windowType(fc, x.in), Nullable: true})
 		return &sql.ColRef{Name: name}
 	})
 }
@@ -1913,6 +1926,7 @@ func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema
 			outs = append(outs, engine.ProjectedExpr{
 				Expr: &sql.ColRef{Name: c.Name},
 				Name: c.Name,
+				Type: c.Type,
 			})
 			cols = append(cols, c)
 		}
@@ -1928,6 +1942,7 @@ func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema
 				outs = append(outs, engine.ProjectedExpr{
 					Expr: &sql.ColRef{Name: c.Name},
 					Name: c.Name,
+					Type: c.Type,
 				})
 				cols = append(cols, c)
 			}
@@ -1937,11 +1952,273 @@ func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema
 		if name == "" {
 			name = inferExprName(it.Expr)
 		}
-		outs = append(outs, engine.ProjectedExpr{Expr: it.Expr, Name: name})
-		cols = append(cols, engine.Column{Name: name, Type: engine.TypeAny, Nullable: true})
+		typ := exprType(it.Expr, inSchema)
+		outs = append(outs, engine.ProjectedExpr{Expr: it.Expr, Name: name, Type: typ})
+		cols = append(cols, engine.Column{Name: name, Type: typ, Nullable: true})
 	}
 	return outs, engine.Schema{Columns: cols}, nil
 }
+
+// exprType infers the result type of a projection expression against the input
+// schema. It is best-effort and conservative: anything it cannot pin down with
+// confidence yields TypeAny (the old blanket behaviour), so it only ever
+// sharpens a column's type. It mirrors the engine's actual runtime evaluation
+// (Arith, Cast, the function library, the aggregate/window operators) so the
+// declared type matches the values produced.
+func exprType(e sql.Expr, in engine.Schema) engine.Type {
+	switch ex := e.(type) {
+	case *sql.CastExpr:
+		return castType(ex.Type)
+	case *sql.ColRef:
+		if i := in.Index(ex.Name); i >= 0 {
+			return in.Columns[i].Type
+		}
+	case *sql.LitInt:
+		return engine.TypeInt
+	case *sql.LitFloat:
+		return engine.TypeFloat
+	case *sql.LitString:
+		return engine.TypeString
+	case *sql.LitBool:
+		return engine.TypeBool
+	case *sql.IntervalLit:
+		return engine.TypeDuration
+	case *sql.UnaryOp:
+		return unaryType(ex, in)
+	case *sql.BinaryOp:
+		return binaryType(ex, in)
+	case *sql.IsNullExpr, *sql.LikeExpr, *sql.InExpr, *sql.BetweenExpr:
+		// Predicates evaluate to a boolean.
+		return engine.TypeBool
+	case *sql.ExtractExpr, *sql.PositionExpr:
+		// EXTRACT(field FROM ts) and POSITION(a IN b) return integers.
+		return engine.TypeInt
+	case *sql.CaseExpr:
+		return caseType(ex, in)
+	case *sql.FuncCall:
+		return funcCallType(ex, in)
+	}
+	return engine.TypeAny
+}
+
+// castType maps a CAST target type name to its engine.Type, mirroring the type
+// names accepted by engine.Cast. Unknown names yield TypeAny.
+func castType(typ string) engine.Type {
+	switch strings.ToLower(typ) {
+	case "int", "integer", "bigint":
+		return engine.TypeInt
+	case "float", "real", "double":
+		return engine.TypeFloat
+	case "string", "text", "varchar":
+		return engine.TypeString
+	case "bool", "boolean":
+		return engine.TypeBool
+	case "time", "timestamp", "datetime":
+		return engine.TypeTime
+	}
+	return engine.TypeAny
+}
+
+// binaryType infers the type of a binary expression. Comparisons and logical
+// connectives are boolean; arithmetic follows arithType.
+func binaryType(ex *sql.BinaryOp, in engine.Schema) engine.Type {
+	switch ex.Op {
+	case "AND", "OR", "=", "<>", "<", "<=", ">", ">=":
+		return engine.TypeBool
+	case "+", "-", "*", "/":
+		return arithType(ex.Op, exprType(ex.Left, in), exprType(ex.Right, in))
+	}
+	return engine.TypeAny
+}
+
+// arithType mirrors engine.Arith/temporalArith at the type level. int op int is
+// int (except division, which may widen to float at runtime, so it is reported
+// as float); any float operand yields float; temporal combinations follow the
+// time/duration algebra. Unknown operands yield TypeAny.
+func arithType(op string, l, r engine.Type) engine.Type {
+	if isTemporal(l) || isTemporal(r) {
+		switch {
+		case op == "+" && l == engine.TypeTime && r == engine.TypeDuration,
+			op == "+" && l == engine.TypeDuration && r == engine.TypeTime,
+			op == "-" && l == engine.TypeTime && r == engine.TypeDuration:
+			return engine.TypeTime
+		case op == "-" && l == engine.TypeTime && r == engine.TypeTime:
+			return engine.TypeDuration
+		case (op == "+" || op == "-") && l == engine.TypeDuration && r == engine.TypeDuration:
+			return engine.TypeDuration
+		}
+		return engine.TypeAny
+	}
+	if isNumeric(l) && isNumeric(r) {
+		if op == "/" {
+			// int/int is int only when it divides evenly (data-dependent); report
+			// the widening type so the column type covers every row.
+			return engine.TypeFloat
+		}
+		if l == engine.TypeInt && r == engine.TypeInt {
+			return engine.TypeInt
+		}
+		return engine.TypeFloat
+	}
+	return engine.TypeAny
+}
+
+// unaryType infers the type of a unary expression: NOT is boolean; numeric
+// negation preserves int/float (per engine.Negate).
+func unaryType(ex *sql.UnaryOp, in engine.Schema) engine.Type {
+	switch ex.Op {
+	case "NOT":
+		return engine.TypeBool
+	case "-", "+":
+		if t := exprType(ex.Expr, in); t == engine.TypeInt || t == engine.TypeFloat {
+			return t
+		}
+	}
+	return engine.TypeAny
+}
+
+// caseType infers a CASE's type by unifying every result branch (THENs + ELSE).
+// A missing ELSE contributes NULL, which does not constrain the type.
+func caseType(ex *sql.CaseExpr, in engine.Schema) engine.Type {
+	branches := make([]sql.Expr, 0, len(ex.Whens)+1)
+	for _, w := range ex.Whens {
+		branches = append(branches, w.Then)
+	}
+	if ex.Else != nil {
+		branches = append(branches, ex.Else)
+	}
+	return unifyExprs(branches, in)
+}
+
+// funcCallType infers the result type of a function call: a window function
+// (Over set), an aggregate, or a scalar function.
+func funcCallType(fc *sql.FuncCall, in engine.Schema) engine.Type {
+	if fc.Over != nil {
+		return windowType(fc, in)
+	}
+	if engine.IsAggregate(fc.Name) {
+		return aggregateType(fc, in)
+	}
+	return scalarFuncType(fc, in)
+}
+
+// aggregateType infers an aggregate's result type, matching the engine's
+// aggregate operator: COUNT/REGR_COUNT are integers, MIN/MAX preserve their
+// argument's type, STRING_AGG is a string, and every other aggregate computes a
+// float.
+func aggregateType(fc *sql.FuncCall, in engine.Schema) engine.Type {
+	switch strings.ToUpper(fc.Name) {
+	case "COUNT", "REGR_COUNT":
+		return engine.TypeInt
+	case "MIN", "MAX":
+		return firstArgType(fc, in)
+	case "STRING_AGG":
+		return engine.TypeString
+	}
+	return engine.TypeFloat
+}
+
+// windowType infers a window function's result type. The ranking/numbering
+// functions are integers, the distribution functions are floats, and the value
+// functions (LAG/LEAD/FIRST_VALUE/…) preserve their argument's type. An
+// aggregate used as a window function follows aggregateType.
+func windowType(fc *sql.FuncCall, in engine.Schema) engine.Type {
+	switch strings.ToUpper(fc.Name) {
+	case "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE":
+		return engine.TypeInt
+	case "PERCENT_RANK", "CUME_DIST":
+		return engine.TypeFloat
+	case "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE":
+		return firstArgType(fc, in)
+	}
+	if engine.IsAggregate(fc.Name) {
+		return aggregateType(fc, in)
+	}
+	return engine.TypeAny
+}
+
+// scalarFuncTypes maps scalar functions with a fixed result type to that type.
+// Functions whose result type depends on their arguments (ABS, COALESCE,
+// GREATEST, LEAST, NULLIF) are resolved in scalarFuncType instead.
+var scalarFuncTypes = map[string]engine.Type{
+	// String-returning.
+	"LOWER": engine.TypeString, "UPPER": engine.TypeString, "SUBSTR": engine.TypeString,
+	"SUBSTRING": engine.TypeString, "TRIM": engine.TypeString, "LTRIM": engine.TypeString,
+	"RTRIM": engine.TypeString, "CONCAT": engine.TypeString, "REPLACE": engine.TypeString,
+	"LEFT": engine.TypeString, "RIGHT": engine.TypeString, "SPLIT_PART": engine.TypeString,
+	"REGEXP_REPLACE": engine.TypeString, "REGEXP_EXTRACT": engine.TypeString,
+	"REGEXP_MATCHES": engine.TypeString, "EXTRACT_VALUE": engine.TypeString,
+	"REPEAT": engine.TypeString, "REVERSE": engine.TypeString, "INITCAP": engine.TypeString,
+	"LPAD": engine.TypeString, "RPAD": engine.TypeString, "STRFTIME": engine.TypeString,
+	// Integer-returning.
+	"LENGTH": engine.TypeInt, "LEN": engine.TypeInt, "STRPOS": engine.TypeInt,
+	"INSTR": engine.TypeInt, "SIGN": engine.TypeInt, "WIDTH_BUCKET": engine.TypeInt,
+	// Float-returning.
+	"SQRT": engine.TypeFloat, "EXP": engine.TypeFloat, "LN": engine.TypeFloat,
+	"LOG10": engine.TypeFloat, "LOG": engine.TypeFloat, "POWER": engine.TypeFloat,
+	"POW": engine.TypeFloat, "MOD": engine.TypeFloat, "TRUNC": engine.TypeFloat,
+	"ROUND": engine.TypeFloat, "FLOOR": engine.TypeFloat, "CEIL": engine.TypeFloat,
+	"CEILING": engine.TypeFloat,
+	// Time-returning.
+	"NOW": engine.TypeTime, "CURRENT_TIMESTAMP": engine.TypeTime, "CURRENT_DATE": engine.TypeTime,
+	"DATE_TRUNC": engine.TypeTime, "DATE_ADD": engine.TypeTime, "TO_TIMESTAMP": engine.TypeTime,
+	"DATE": engine.TypeTime, "CONVERT_TZ": engine.TypeTime, "FROM_TZ": engine.TypeTime,
+	"DATE_BIN": engine.TypeTime,
+}
+
+// scalarFuncType infers a scalar function's result type from scalarFuncTypes, or
+// from its arguments for the type-preserving functions. Unknown functions (and
+// AGE, whose result is a time or a duration depending on arity) yield TypeAny.
+func scalarFuncType(fc *sql.FuncCall, in engine.Schema) engine.Type {
+	if t, ok := scalarFuncTypes[strings.ToUpper(fc.Name)]; ok {
+		return t
+	}
+	switch strings.ToUpper(fc.Name) {
+	case "ABS", "NULLIF":
+		if t := firstArgType(fc, in); t == engine.TypeInt || t == engine.TypeFloat || fc.Name == "NULLIF" {
+			return t
+		}
+	case "COALESCE", "GREATEST", "LEAST":
+		return unifyExprs(fc.Args, in)
+	}
+	return engine.TypeAny
+}
+
+// firstArgType returns the inferred type of a call's first argument, or TypeAny
+// when it has none.
+func firstArgType(fc *sql.FuncCall, in engine.Schema) engine.Type {
+	if len(fc.Args) > 0 {
+		return exprType(fc.Args[0], in)
+	}
+	return engine.TypeAny
+}
+
+// unifyExprs returns the common type of a set of expressions: their shared type
+// if every expression resolves to the same concrete type, otherwise TypeAny.
+func unifyExprs(exprs []sql.Expr, in engine.Schema) engine.Type {
+	out := engine.TypeInvalid
+	for _, e := range exprs {
+		t := exprType(e, in)
+		if t == engine.TypeAny || t == engine.TypeInvalid {
+			return engine.TypeAny
+		}
+		if out == engine.TypeInvalid {
+			out = t
+		} else if out != t {
+			return engine.TypeAny
+		}
+	}
+	if out == engine.TypeInvalid {
+		return engine.TypeAny
+	}
+	return out
+}
+
+// isNumeric reports whether t is an int or float.
+func isNumeric(t engine.Type) bool { return t == engine.TypeInt || t == engine.TypeFloat }
+
+// isTemporal reports whether t is a time or a duration.
+func isTemporal(t engine.Type) bool { return t == engine.TypeTime || t == engine.TypeDuration }
 
 // inferExprName derives a default column name for an expression.
 func inferExprName(e sql.Expr) string {

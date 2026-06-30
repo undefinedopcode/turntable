@@ -54,11 +54,13 @@ func (f *FilterIter) Close() error {
 
 // ---- Project ----------------------------------------------------------------
 
-// ProjectedExpr is one output column of a Project: the expression plus the
-// output column name (alias or inferred).
+// ProjectedExpr is one output column of a Project: the expression, the output
+// column name (alias or inferred), and the inferred result type. A zero Type
+// (TypeInvalid) means "unknown" and is rendered as TypeAny.
 type ProjectedExpr struct {
 	Expr sql.Expr
 	Name string
+	Type Type
 }
 
 // ProjectIter evaluates the select list against child rows, producing rows

@@ -194,7 +194,12 @@ export function Results({ result }: { result: QueryResult | null }) {
             <thead>
               <tr>
                 {cols.map((c, i) => (
-                  <th key={c.name} onClick={() => onSort(i)} title="click to sort">
+                  <th
+                    key={c.name}
+                    className={c.type === "int" || c.type === "float" ? "num" : ""}
+                    onClick={() => onSort(i)}
+                    title="click to sort"
+                  >
                     {c.name}
                     <span className="ty">{c.type}</span>
                     {sortCol === i && (

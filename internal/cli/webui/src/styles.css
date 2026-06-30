@@ -320,7 +320,8 @@ td.null {
   color: var(--null);
   font-style: italic;
 }
-td.num {
+td.num,
+th.num {
   text-align: right;
 }
 pre.plan {
