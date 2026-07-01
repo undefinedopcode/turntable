@@ -48,10 +48,49 @@ type Dataset struct {
 // natively. Fields left at zero value mean "connector need not bother".
 type ScanRequest struct {
 	Dataset   Dataset
-	Columns   []string       // projection pushdown; nil = all columns
-	Predicate Expr           // filter pushdown; nil = none (see Expr below)
-	Limit     *int           // optional row limit
-	OrderBy   []OrderTerm    // optional ordering hints
+	Columns   []string    // projection pushdown; nil = all columns
+	Predicate Expr        // filter pushdown; nil = none (see Expr below)
+	Limit     *int        // optional row limit
+	OrderBy   []OrderTerm // optional ordering hints
+
+	// Aggregate, when non-nil, asks the connector to compute a grouped
+	// aggregation natively and return the already-aggregated rows. The planner
+	// only sets it after AggregatePusher.PushAggregate accepted the request, so
+	// a connector that receives it has already agreed to FULLY apply the
+	// grouping, the aggregates, and Aggregate.Predicate — the engine runs no
+	// Aggregate or WHERE-Filter of its own above such a scan. See AggregateRequest.
+	Aggregate *AggregateRequest
+}
+
+// AggregateRequest describes a grouped aggregation to compute at the source.
+// It is produced by the planner from a `GROUP BY`/aggregate query over a single
+// scan and handed to an AggregatePusher. Accepting it is an all-or-nothing
+// contract: the connector must apply GroupBy, every Aggregate, and Predicate
+// exactly, because the engine drops its own Aggregate and WHERE-Filter nodes for
+// that scan (there are no raw rows left to re-aggregate or re-filter).
+type AggregateRequest struct {
+	GroupBy    []string      // group-by (breakdown) column names; all plain columns
+	Aggregates []AggregateOp // the aggregate calculations to compute
+	Predicate  Expr          // the WHERE to apply natively (nil = none)
+}
+
+// AggregateOp is one aggregate calculation in an AggregateRequest.
+type AggregateOp struct {
+	Func     string // aggregate name, upper-case (COUNT, SUM, AVG, MIN, MAX, …)
+	Column   string // argument column; "" for COUNT(*)
+	Distinct bool   // COUNT(DISTINCT col)
+	Alias    string // output column name (the aggregate's SELECT alias or a synthetic name)
+}
+
+// AggregatePusher is an optional Connector capability. Given a proposed grouped
+// aggregation, PushAggregate reports whether the connector can compute it
+// natively and, if so, the schema of the aggregated rows Scan will then return
+// (group-by columns followed by one column per AggregateOp, in request order).
+// Returning ok=false declines the pushdown, leaving the aggregation to the
+// engine over the connector's raw rows; sources that cannot produce raw rows
+// (e.g. Honeycomb) should instead return an error explaining what is unsupported.
+type AggregatePusher interface {
+	PushAggregate(ctx context.Context, ds Dataset, agg AggregateRequest) (schema engine.Schema, ok bool, err error)
 }
 
 // OrderTerm describes a pushed-down ordering term.

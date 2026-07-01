@@ -265,6 +265,28 @@ interfaces:
     (Azure Table Storage) supports two auth paths — `connection_string`, or
     `account`/`endpoint` for Azure AD via `DefaultAzureCredential` — and
     translates predicates to an OData `$filter` (`translateOData`).
+    `honeycombc` (Honeycomb.io observability) exposes four datasets selected by a
+    `kind` option (falling back to the ref Source, else `events`): three metadata
+    tables flattened into rows like `trelloc` — `datasets` (v1 `/1/datasets`),
+    `columns` (`/1/columns/{slug}`, needs `dataset=<slug>`), and `environments`
+    (v2 Management API, JSON:API-shaped, needs `management_key`+`team`) — plus a
+    per-dataset **`events`** table that is the connector's reason for the
+    aggregate-pushdown machinery below. Honeycomb has **no raw-event read API**
+    (every query is an aggregation over a time window), so `events` cannot return
+    raw rows: it implements `connector.AggregatePusher` and a plain (non-aggregate)
+    scan is an error. `PushAggregate` maps the planner's group-by→`breakdowns`,
+    aggregates→`calculations` (COUNT/COUNT_DISTINCT/SUM/AVG/MIN/MAX/MEDIAN→P50),
+    and WHERE→`filters` (`translateFilters`), returning the aggregated schema;
+    `Scan` runs the async Query Data API (create query → create query_result →
+    poll `complete`) and maps `data.results[].data` (keyed by breakdown name +
+    `OP(column)`) back to rows. Auth: `api_key`→`X-Honeycomb-Team` (v1),
+    `management_key`→Bearer (v2); both are `config.IsSensitive` (must be `${ENV}`)
+    and fall back to `HONEYCOMB_API_KEY`/`HONEYCOMB_MANAGEMENT_KEY`. Dotted
+    attribute names (`service.name`) — which SQL lexes as qualifier+name — resolve
+    via a fallback in `engine.SchemaResolver`/`exprType` that matches a column
+    literally named `<qualifier>.<name>`. `dataset="*"` expands to one events
+    source per Honeycomb dataset via `DatasetsFor`+`expandHoneycombDatasets`.
+    Time window from `time_range` (default 7200s) or `start_time`/`end_time`.
     `athenac` is the odd one in this family: Athena *is* a SQL engine
     (Presto/Trino over S3, Glue catalog), so it pushes projection/predicate
     (`translateExpr`, Presto-flavored — double-quote idents, no ILIKE)/ORDER BY/
@@ -292,6 +314,23 @@ interfaces:
     also truncate). `--explain` annotates pushed scans, e.g.
     `Scan inv [pushdown: predicate, limit=3, order]`. There is no `ScanResponse`,
     so the engine cannot drop the redundant re-filter/re-sort — a future refinement.
+    **Aggregate pushdown** (opt-in, for sources that cannot return raw rows —
+    currently `honeycombc`): a connector implementing `connector.AggregatePusher`
+    can compute a whole `GROUP BY`/aggregate query at the source. When a
+    single-scan aggregate query's connector is a pusher, `buildSelect` calls
+    `buildPushedAggregate`, which extracts group-by→`AggregateRequest.GroupBy`,
+    aggregates→`AggregateOp`s (via `pushAggExtractor`, the pushdown analogue of
+    `aggExtractor` — plain-column args only, `COUNT(*)`/`COUNT(DISTINCT)`
+    supported, scalar wrappers like `ROUND(AVG(x),2)` left for the engine's
+    projection), and the WHERE→`AggregateRequest.Predicate`, then calls
+    `PushAggregate(ctx, ds, req)`. On `ok=true` the `Scan` gains `.Aggregate` (its
+    schema becomes the aggregated rows), and the engine emits **no** `Aggregate`
+    and **no** WHERE-`Filter` for that scan — HAVING (`Filter`), ORDER BY (`Sort`)
+    and the projection run above it over the aggregated rows. This is
+    all-or-nothing: accepting the request means the connector fully applies
+    grouping + aggregates + predicate. `ok=false` declines (the engine aggregates
+    the connector's raw rows as usual); a non-nil error aborts planning (Honeycomb
+    returns one for an unsupported op/filter since it has no raw-row fallback).
 
 **`internal/cli`** wires it together. `cli.go` `NewApp()` registers all built-in
 connectors and owns flag/config handling; `repl.go` is the interactive loop

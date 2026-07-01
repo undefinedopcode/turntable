@@ -21,6 +21,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/cwmetricsc"
 	"github.com/april/turntable/internal/connector/connectors/dynamodbc"
 	"github.com/april/turntable/internal/connector/connectors/excelc"
+	"github.com/april/turntable/internal/connector/connectors/honeycombc"
 	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
 	"github.com/april/turntable/internal/connector/connectors/linearc"
@@ -96,6 +97,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(trelloc.New())
 	_ = reg.RegisterConnector(azdevopsc.New())
 	_ = reg.RegisterConnector(claudelogsc.New())
+	_ = reg.RegisterConnector(honeycombc.New())
 	mem := memc.New()
 	_ = reg.RegisterConnector(mem) // also serves "mem:<view>" qualified refs
 	return &App{
@@ -286,6 +288,13 @@ func (a *App) registerSourceExpand(ctx context.Context, name string, src config.
 		}
 		return []string{name}, nil
 	}
+	// Honeycomb: dataset="*" (an option) expands to one events source per
+	// Honeycomb dataset in the environment, each registered under its slug.
+	if src.Connector == "honeycomb" {
+		if slug, _ := opts["dataset"].(string); slug == "*" {
+			return a.expandHoneycombDatasets(ctx, name, opts)
+		}
+	}
 	// File connectors locate data by Path; URL/API connectors (http, linear,
 	// cloudwatch*) locate it by URL or rely purely on options. Source carries
 	// whichever locator is present so the connector can read it from
@@ -422,6 +431,31 @@ func (a *App) expandDynamoTables(ctx context.Context, name string, opts map[stri
 	}
 	if len(registered) == 0 {
 		return nil, fmt.Errorf("source %q: account has no DynamoDB tables", name)
+	}
+	return registered, nil
+}
+
+// expandHoneycombDatasets enumerates the datasets in a Honeycomb environment and
+// registers each as its own events source (named by slug, prefixed with the
+// source name on collision), mirroring expandDynamoTables.
+func (a *App) expandHoneycombDatasets(ctx context.Context, name string, opts map[string]any) ([]string, error) {
+	datasets, err := honeycombc.New().DatasetsFor(ctx, connector.Dataset{Options: opts})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %q: %w", name, err)
+	}
+	var registered []string
+	for _, d := range datasets {
+		logical := d.Name
+		if _, ok := a.Reg.Resolve(logical); ok {
+			logical = name + "_" + d.Name
+		}
+		if err := a.Reg.RegisterSource(logical, honeycombc.New(), d); err != nil {
+			return registered, err
+		}
+		registered = append(registered, logical)
+	}
+	if len(registered) == 0 {
+		return nil, fmt.Errorf("source %q: environment has no Honeycomb datasets", name)
 	}
 	return registered, nil
 }

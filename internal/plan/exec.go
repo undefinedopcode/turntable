@@ -249,6 +249,7 @@ func execScan(ctx context.Context, node *Scan) (engine.RowIterator, engine.Schem
 		Predicate: node.Predicate,
 		Limit:     node.Limit,
 		OrderBy:   node.OrderBy,
+		Aggregate: node.Aggregate,
 	})
 	if err != nil {
 		return nil, engine.Schema{}, err

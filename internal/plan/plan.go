@@ -10,6 +10,7 @@ package plan
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,12 @@ type Scan struct {
 	Predicate sql.Expr              // WHERE predicate to offer the connector (may be nil)
 	Limit     *int                  // row limit to offer the connector (may be nil)
 	OrderBy   []connector.OrderTerm // ordering hint (set only when every ORDER BY term is a plain column)
+
+	// Aggregate is set when the connector (an AggregatePusher) accepted a grouped
+	// aggregation: the Scan then returns already-aggregated rows conforming to
+	// Schema, and the planner emits no Aggregate/WHERE-Filter above it. See
+	// buildPushedAggregate.
+	Aggregate *connector.AggregateRequest
 }
 
 // NoFrom is a synthetic single-row, zero-column relation for "SELECT <expr>"
@@ -175,8 +182,8 @@ type Filter struct {
 
 // Project computes the select list.
 type Project struct {
-	Child   Node
-	Outputs []engine.ProjectedExpr
+	Child    Node
+	Outputs  []engine.ProjectedExpr
 	Distinct bool
 }
 
@@ -197,11 +204,11 @@ type Join struct {
 
 // Aggregate groups rows.
 type Aggregate struct {
-	Child    Node
-	Keys     []sql.Expr
-	Aggs     []engine.AggSpec
-	Having   sql.Expr
-	Schema   engine.Schema
+	Child  Node
+	Keys   []sql.Expr
+	Aggs   []engine.AggSpec
+	Having sql.Expr
+	Schema engine.Schema
 }
 
 // Sort orders rows.
@@ -705,6 +712,26 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 	// term sorts/groups by that output column instead of being a silent no-op.
 	if err := resolveOrdinals(stmt); err != nil {
 		return nil, engine.Schema{}, err
+	}
+
+	// Aggregate pushdown: a single-scan GROUP BY/aggregate query whose connector
+	// is an AggregatePusher may compute the whole aggregation — group-by,
+	// aggregates and WHERE — at the source. On success the Scan emits aggregated
+	// rows and the engine adds no Aggregate or WHERE-Filter; HAVING/ORDER BY/LIMIT
+	// and the projection run above it as usual.
+	if hasAgg && !hasWindow {
+		if scan, ok := base.(*Scan); ok {
+			root, sch, pushed, err := bc.buildPushedAggregate(stmt, scan)
+			if err != nil {
+				return nil, engine.Schema{}, err
+			}
+			if pushed {
+				if stmt.Limit != nil || stmt.Offset != nil {
+					root = &Limit{Child: root, Limit: stmt.Limit, Offset: stmt.Offset}
+				}
+				return root, sch, nil
+			}
+		}
 	}
 
 	// 2. Pushdown hints: for a single-table scan (no joins) hand the WHERE
@@ -1302,6 +1329,179 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 	}
 	node := &Aggregate{Child: base, Keys: keys, Aggs: ext.specs, Having: having, Schema: interSchema}
 	return node, outs, engine.Schema{Columns: outCols}, orderTerms, nil
+}
+
+// buildPushedAggregate attempts to push a single-scan GROUP BY/aggregate query
+// into the connector when it implements connector.AggregatePusher. On success it
+// returns the plan rooted at the aggregating Scan — the connector returns
+// already-aggregated rows, and HAVING (Filter), ORDER BY (Sort) and the SELECT
+// projection are layered above it over those rows, with no engine Aggregate and
+// no WHERE-Filter (the connector consumed the predicate). ok=false means "not
+// pushable" and the caller falls back to the engine's own aggregation over raw
+// rows. A non-nil error is a hard planning failure.
+//
+// It is structural-only: it pushes plain-column group-by/aggregate-args and lets
+// PushAggregate decide whether the specific operations are supported. Scalar
+// wrappers around aggregates (e.g. ROUND(AVG(x), 2)) still work — the wrapper is
+// evaluated by the engine's projection over the aggregated rows.
+func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node, engine.Schema, bool, error) {
+	pusher, ok := scan.Source.Conn.(connector.AggregatePusher)
+	if !ok {
+		return nil, engine.Schema{}, false, nil
+	}
+	// Breakdowns: every GROUP BY term must be a plain column.
+	var groupBy []string
+	for _, g := range stmt.GroupBy {
+		col, ok := pushColumnName(g, scan.Alias)
+		if !ok {
+			return nil, engine.Schema{}, false, nil
+		}
+		groupBy = append(groupBy, col)
+	}
+	// Extract aggregates from SELECT / HAVING / ORDER BY into calculations,
+	// rewriting each aggregate call to a reference to its output column. Compute
+	// into locals: rewriteFuncs is pure, so stmt is untouched until we commit —
+	// leaving the fallback path an unmodified statement if we decline.
+	ext := newPushAggExtractor(scan.Alias)
+	newItems := make([]sql.SelectItem, len(stmt.Items.Items))
+	for i, it := range stmt.Items.Items {
+		if it.Star {
+			return nil, engine.Schema{}, false, nil
+		}
+		// A top-level aggregate select item names its output column by the item's
+		// alias, so HAVING/ORDER BY can reference that alias (as buildAggregate
+		// does). Other aggregates (nested, or in HAVING/ORDER BY) get synthetic
+		// $aggN names, de-duplicated across clauses.
+		if fc, ok := it.Expr.(*sql.FuncCall); ok && isTopLevelAgg(it.Expr) && it.As != "" {
+			it.Expr = ext.register(fc, it.As)
+		} else {
+			it.Expr = ext.rewrite(it.Expr)
+		}
+		newItems[i] = it
+	}
+	newHaving := stmt.Having
+	if newHaving != nil {
+		newHaving = ext.rewrite(newHaving)
+	}
+	newOrder := make([]sql.OrderTerm, len(stmt.OrderBy))
+	for i, ot := range stmt.OrderBy {
+		ot.Expr = ext.rewrite(ot.Expr)
+		newOrder[i] = ot
+	}
+	if !ext.ok {
+		return nil, engine.Schema{}, false, nil
+	}
+
+	req := connector.AggregateRequest{GroupBy: groupBy, Aggregates: ext.ops, Predicate: stmt.Where}
+	schema, ok, err := pusher.PushAggregate(bc.ctx, scan.Source.Dataset, req)
+	if err != nil {
+		return nil, engine.Schema{}, false, err
+	}
+	if !ok {
+		return nil, engine.Schema{}, false, nil
+	}
+
+	// Commit: the Scan now emits aggregated rows and owns the predicate.
+	stmt.Items.Items = newItems
+	stmt.Having = newHaving
+	stmt.OrderBy = newOrder
+	scan.Aggregate = &req
+	scan.Schema = schema
+	scan.Predicate = nil
+
+	var node Node = scan
+	if stmt.Having != nil {
+		node = &Filter{Child: node, Predicate: stmt.Having}
+	}
+	if len(stmt.OrderBy) > 0 {
+		node = &Sort{Child: node, Terms: stmt.OrderBy}
+	}
+	outs, projSchema, err := bc.buildProjection(stmt, schema)
+	if err != nil {
+		return nil, engine.Schema{}, false, err
+	}
+	root := &Project{Child: node, Outputs: outs, Distinct: stmt.Distinct}
+	return root, projSchema, true, nil
+}
+
+// pushColumnName renders a column reference as the source column name for
+// aggregate pushdown, reconstructing a dotted attribute name ("service.name")
+// when the qualifier is not the scan's own alias. ok=false for non-columns.
+func pushColumnName(e sql.Expr, alias string) (string, bool) {
+	cr, ok := e.(*sql.ColRef)
+	if !ok {
+		return "", false
+	}
+	if cr.Qualifier == "" || strings.EqualFold(cr.Qualifier, alias) {
+		return cr.Name, true
+	}
+	return cr.Qualifier + "." + cr.Name, true
+}
+
+// pushAggExtractor decomposes aggregate calls into connector.AggregateOp entries,
+// rewriting each call to a ColRef on its ($aggN) output column — the pushdown
+// analogue of aggExtractor. It sets ok=false on an aggregate it cannot express
+// as a plain-column calculation (an expression argument or more than one
+// positional argument). Identical aggregates are de-duplicated to one column.
+type pushAggExtractor struct {
+	alias string
+	ops   []connector.AggregateOp
+	seen  map[string]string // op key -> output column name
+	n     int
+	ok    bool
+}
+
+func newPushAggExtractor(alias string) *pushAggExtractor {
+	return &pushAggExtractor{alias: alias, seen: map[string]string{}, ok: true}
+}
+
+// register turns one aggregate call into an AggregateOp (de-duplicated by
+// op+distinct+column) and returns a reference to its output column. wantAlias, if
+// non-empty, names a fresh op's output column (a top-level select item's alias);
+// otherwise a synthetic $aggN name is used. Sets ok=false for an aggregate whose
+// argument is not a plain column.
+func (x *pushAggExtractor) register(fc *sql.FuncCall, wantAlias string) sql.Expr {
+	var col string
+	switch len(fc.Args) {
+	case 0: // COUNT() — no column
+	case 1:
+		// COUNT(*) parses as a single "*" column ref: treat as no column.
+		if cr, ok := fc.Args[0].(*sql.ColRef); ok && cr.Name == "*" && cr.Qualifier == "" {
+			break
+		}
+		c, ok := pushColumnName(fc.Args[0], x.alias)
+		if !ok {
+			x.ok = false
+			return fc
+		}
+		col = c
+	default:
+		x.ok = false
+		return fc
+	}
+	key := strings.ToUpper(fc.Name) + "|" + strconv.FormatBool(fc.Distinct) + "|" + col
+	if name, dup := x.seen[key]; dup {
+		return &sql.ColRef{Name: name}
+	}
+	name := wantAlias
+	if name == "" {
+		name = fmt.Sprintf("$agg%d", x.n)
+		x.n++
+	}
+	x.seen[key] = name
+	x.ops = append(x.ops, connector.AggregateOp{
+		Func: strings.ToUpper(fc.Name), Column: col, Distinct: fc.Distinct, Alias: name,
+	})
+	return &sql.ColRef{Name: name}
+}
+
+func (x *pushAggExtractor) rewrite(e sql.Expr) sql.Expr {
+	return rewriteFuncs(e, func(fc *sql.FuncCall) sql.Expr {
+		if !engine.IsAggregate(fc.Name) || fc.Over != nil {
+			return nil
+		}
+		return x.register(fc, "")
+	})
 }
 
 // isTopLevelAgg reports whether e is itself an aggregate call (vs. a scalar
@@ -1972,6 +2172,13 @@ func exprType(e sql.Expr, in engine.Schema) engine.Type {
 	case *sql.ColRef:
 		if i := in.Index(ex.Name); i >= 0 {
 			return in.Columns[i].Type
+		}
+		// Dotted source attribute (service.name) lexed as qualifier+name: fall back
+		// to a column literally named "<qualifier>.<name>", mirroring SchemaResolver.
+		if ex.Qualifier != "" {
+			if i := in.Index(ex.Qualifier + "." + ex.Name); i >= 0 {
+				return in.Columns[i].Type
+			}
 		}
 	case *sql.LitInt:
 		return engine.TypeInt

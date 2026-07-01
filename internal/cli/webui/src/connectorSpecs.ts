@@ -116,6 +116,20 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     ],
   },
   {
+    name: "honeycomb",
+    label: "Honeycomb",
+    fields: [
+      { key: "kind", label: "Dataset", type: "select", options: ["events", "datasets", "columns", "environments"], required: true, help: "events = query one dataset; datasets/columns/environments = metadata" },
+      { key: "dataset", label: "Honeycomb dataset slug", placeholder: "my-service (or * for every dataset)", help: "required for events and columns" },
+      { key: "api_key", label: "API key", sensitive: true, placeholder: "${HONEYCOMB_API_KEY}", help: "Configuration key (datasets/columns/events)" },
+      { key: "management_key", label: "Management key", sensitive: true, placeholder: "${HONEYCOMB_MGMT_KEY}", help: "keyID:secret, for environments" },
+      { key: "team", label: "Team slug", help: "required for environments" },
+      { key: "region", label: "Region", type: "select", options: ["us", "eu"] },
+      { key: "time_range", label: "Time range (s)", placeholder: "7200", help: "events query window; default 2h" },
+    ],
+    note: "events supports only aggregate queries (GROUP BY / COUNT / SUM / …) — Honeycomb has no raw-event read API.",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [

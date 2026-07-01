@@ -154,6 +154,7 @@ var sensitiveOptionFields = map[string][]string{
 	"trello":      {"key", "token"},
 	"azuredevops": {"pat"},
 	"azuretables": {"connection_string"},
+	"honeycomb":   {"api_key", "management_key"},
 }
 
 // IsSensitive reports whether a field of src (by its form/option key) holds a

@@ -54,6 +54,19 @@ func SchemaResolver(schema Schema, alias string) Resolver {
 				return i
 			}
 		}
+		// Fallback for source columns whose own name contains a dot (e.g.
+		// Honeycomb attributes like "service.name"): SQL lexes such a reference as
+		// qualifier="service", name="name", but no table alias matches. Match it
+		// against a column literally named "<qualifier>.<name>". Harmless for
+		// ordinary sources, whose column names never contain a dot.
+		if qualifier != "" {
+			dotted := qualifier + "." + name
+			for i, c := range schema.Columns {
+				if equalFold(c.Name, dotted) {
+					return i
+				}
+			}
+		}
 		return -1
 	}
 }
