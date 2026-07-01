@@ -1,8 +1,9 @@
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
+  TimeScale,
   BarElement,
   PointElement,
   LineElement,
@@ -10,8 +11,12 @@ import {
   Tooltip,
   Legend,
   Filler,
+  Decimation,
   type ChartOptions,
 } from "chart.js";
+// Date adapter for the time scale (time-typed X columns arrive as RFC3339
+// strings; the scale needs an adapter to compute/format time ticks).
+import "chartjs-adapter-date-fns";
 import { MatrixController, MatrixElement } from "chartjs-chart-matrix";
 // NOTE: chart.js is pinned to ~4.4 (see package.json). chartjs-chart-graph 4.3.5
 // (latest) is incompatible with chart.js 4.5's option-sharing internals — under
@@ -27,6 +32,7 @@ import ChartDataLabels from "chartjs-plugin-datalabels";
 import zoomPlugin from "chartjs-plugin-zoom";
 import { Bar, Line, Scatter, Pie, Bubble, Chart as ReactChart } from "react-chartjs-2";
 import type { Cell, Column } from "../api";
+import type { ChartType, ChartViewConfig } from "../view";
 import { downloadCanvasPNG } from "../export";
 import {
   type Agg,
@@ -44,6 +50,7 @@ import {
 ChartJS.register(
   CategoryScale,
   LinearScale,
+  TimeScale,
   BarElement,
   PointElement,
   LineElement,
@@ -58,6 +65,7 @@ ChartJS.register(
   EdgeLine,
   ChartDataLabels,
   zoomPlugin,
+  Decimation,
 );
 
 // datalabels is registered globally for the graph/tree node labels, but it must
@@ -84,16 +92,6 @@ const RAW_CAP = 500; // points plotted when not aggregating
 const GROUP_CAP = 100; // groups (bars/slices / x labels) kept
 const SERIES_CAP = 12; // distinct "series by" values kept
 
-type ChartType =
-  | "bar"
-  | "line"
-  | "area"
-  | "scatter"
-  | "bubble"
-  | "heatmap"
-  | "pie"
-  | "graph"
-  | "tree";
 const TYPES: ChartType[] = [
   "bar",
   "line",
@@ -131,6 +129,14 @@ function bubbleRadii(values: (number | null)[]): number[] {
 
 const alpha = (hex: string, a: string) => hex + a;
 
+// timeMs parses a time cell (the API serializes TypeTime as an RFC3339 string)
+// to epoch milliseconds, or null when it isn't a parseable time.
+function timeMs(v: Cell): number | null {
+  if (typeof v !== "string") return null;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+}
+
 // aggregate groups rows by the X column (first-seen order) and reduces each Y
 // series within a group. Counts non-null numeric values; sum/avg/min/max ignore
 // non-numeric cells. Reports the total group count so the UI can flag capping.
@@ -157,24 +163,53 @@ function aggregate(rows: Cell[][], xIdx: number, series: number[], fn: Agg) {
   return { labels, values, total: order.length };
 }
 
-export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) {
+// Chart renders one result as a configurable chart. `config` seeds the controls
+// at mount (column refs by name — see view.ts); every change is reported back
+// through `onConfig` so the tab can persist it.
+export function Chart({
+  columns,
+  rows,
+  config,
+  onConfig,
+}: {
+  columns: Column[];
+  rows: Cell[][];
+  config?: ChartViewConfig;
+  onConfig?: (c: ChartViewConfig) => void;
+}) {
   const numeric = useMemo(() => numericColumns(columns, rows), [columns, rows]);
 
-  const [type, setType] = useState<ChartType>("bar");
-  const [agg, setAgg] = useState<Agg>("none");
-  const [xIdx, setXIdx] = useState(0);
-  const [ySel, setYSel] = useState<number[]>([]);
-  const [seriesBy, setSeriesBy] = useState(-1); // -1 = none (no breakdown)
-  const [sizeIdx, setSizeIdx] = useState(-1); // bubble/node size measure (-1 = constant)
-  const [nodeIdx, setNodeIdx] = useState(0); // graph: the node column
-  const [linkIdx, setLinkIdx] = useState(1); // graph: the parent / links-to column
-  const [labelIdx, setLabelIdx] = useState(-1); // graph: node label (-1 = node value)
-  const [colorIdx, setColorIdx] = useState(-1); // graph: node colour column (-1 = constant)
+  // Resolve a persisted column name to its current index (fallback when absent).
+  const byName = (name: string | undefined, fallback: number) => {
+    const i = name == null ? -1 : columns.findIndex((c) => c.name === name);
+    return i >= 0 ? i : fallback;
+  };
+  const [type, setType] = useState<ChartType>(() =>
+    config?.type && TYPES.includes(config.type) ? config.type : "bar",
+  );
+  const [agg, setAgg] = useState<Agg>(() =>
+    config?.agg && AGGS.includes(config.agg) ? config.agg : "none",
+  );
+  const [xIdx, setXIdx] = useState(() => byName(config?.x, 0));
+  const [ySel, setYSel] = useState<number[]>(() =>
+    (config?.y ?? []).map((n) => byName(n, -1)).filter((i) => i >= 0),
+  );
+  const [seriesBy, setSeriesBy] = useState(() => byName(config?.seriesBy, -1)); // -1 = none (no breakdown)
+  const [sizeIdx, setSizeIdx] = useState(() => byName(config?.size, -1)); // bubble/node size measure (-1 = constant)
+  const [nodeIdx, setNodeIdx] = useState(() => byName(config?.node, 0)); // graph: the node column
+  const [linkIdx, setLinkIdx] = useState(() => byName(config?.link, 1)); // graph: the parent / links-to column
+  const [labelIdx, setLabelIdx] = useState(() => byName(config?.label, -1)); // graph: node label (-1 = node value)
+  const [colorIdx, setColorIdx] = useState(() => byName(config?.color, -1)); // graph: node colour column (-1 = constant)
   const [focusNode, setFocusNode] = useState<string | null>(null); // graph: drilled-in subtree
   // graph input model: "edges" = node + links-to (self-referential parent
   // pointer); "path" = a hierarchy synthesized from an ordered list of columns.
-  const [graphSource, setGraphSource] = useState<"edges" | "path">("edges");
-  const [levelIdxs, setLevelIdxs] = useState<number[]>([0, 1]); // path mode: the ordered levels
+  const [graphSource, setGraphSource] = useState<"edges" | "path">(() =>
+    config?.graphSource === "path" ? "path" : "edges",
+  );
+  const [levelIdxs, setLevelIdxs] = useState<number[]>(() => {
+    const l = (config?.levels ?? []).map((n) => byName(n, -1)).filter((i) => i >= 0);
+    return l.length ? l : [0, 1]; // path mode: the ordered levels
+  });
   // The ordered levels, clamped to the current columns (at least one). Memoized so
   // its array reference is stable across unrelated re-renders — GraphChart is
   // memoized and a fresh array each render would defeat that (and blank the graph).
@@ -183,6 +218,46 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     return l.length ? l : [0];
   }, [levelIdxs, columns.length]);
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // Report the current settings upward, by column name, whenever they change.
+  // onConfig goes through a ref so an unstable callback prop doesn't re-fire
+  // the effect (and can't loop: the effect depends only on local state).
+  const onConfigRef = useRef(onConfig);
+  onConfigRef.current = onConfig;
+  useEffect(() => {
+    const colName = (i: number) =>
+      i >= 0 && i < columns.length ? columns[i].name : undefined;
+    const names = (idxs: number[]) =>
+      idxs.map(colName).filter((n): n is string => n != null);
+    onConfigRef.current?.({
+      type,
+      agg,
+      x: colName(xIdx),
+      y: names(ySel),
+      seriesBy: colName(seriesBy),
+      size: colName(sizeIdx),
+      node: colName(nodeIdx),
+      link: colName(linkIdx),
+      label: colName(labelIdx),
+      color: colName(colorIdx),
+      graphSource,
+      levels: names(levelIdxs),
+    });
+  }, [
+    type,
+    agg,
+    xIdx,
+    ySel,
+    seriesBy,
+    sizeIdx,
+    nodeIdx,
+    linkIdx,
+    labelIdx,
+    colorIdx,
+    graphSource,
+    levelIdxs,
+    columns,
+  ]);
 
   // A focus key belongs to a specific dataset/structure; drop it when the data
   // or the node/parent columns (or the hierarchy levels) change so it can't point
@@ -199,11 +274,16 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   // Resolve selections defensively against the current columns, so switching
   // queries never references a stale index.
   const numericIdx = numeric.map((n) => n.i);
+  const timeIdx = columns.map((c, i) => (c.type === "time" ? i : -1)).filter((i) => i >= 0);
   const isScatter = type === "scatter";
   const isBubble = type === "bubble";
-  const isPoint = isScatter || isBubble; // x must be numeric for point charts
-  const xChoices = isPoint ? numericIdx : columns.map((_, i) => i);
+  const isPoint = isScatter || isBubble; // x must be numeric (or a time) for point charts
+  const xChoices = isPoint
+    ? columns.map((_, i) => i).filter((i) => numericIdx.includes(i) || timeIdx.includes(i))
+    : columns.map((_, i) => i);
   const x = xChoices.includes(xIdx) ? xIdx : (xChoices[0] ?? 0);
+  // A time-typed X gets a real time axis (see the line/point branches below).
+  const xIsTime = columns[x]?.type === "time";
   let ys = ySel.filter((i) => numericIdx.includes(i) && i !== (isPoint ? x : -1));
   if (ys.length === 0) ys = numericIdx.filter((i) => i !== x).slice(0, 1);
   // Pie and bubble show a single Y series.
@@ -434,6 +514,40 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     }));
   }
 
+  // A time-typed X on a line/area chart gets a real time axis: points become
+  // (epoch ms, y), so uneven sampling and time gaps render truthfully, and the
+  // decimation plugin (LTTB) thins dense series for display — so ALL rows are
+  // plotted, not just the first RAW_CAP. Bails to categorical labels when a
+  // value doesn't parse as a time.
+  let timeSers: { label: string; data: { x: number; y: number }[] }[] | null = null;
+  if (xIsTime && (type === "line" || type === "area")) {
+    if (grouped || pivoted) {
+      // Grouped/pivoted labels are the time cells' label strings — parse back.
+      const ms = chartLabels.map(timeMs);
+      if (ms.every((m): m is number => m !== null)) {
+        timeSers = sers.map((s) => ({
+          label: s.label,
+          data: ms
+            .map((m, i) => ({ x: m, y: s.data[i] }))
+            .filter((p): p is { x: number; y: number } => p.y !== null)
+            .sort((a, b) => a.x - b.x),
+        }));
+      }
+    } else {
+      timeSers = series.map((idx) => {
+        const pts: { x: number; y: number }[] = [];
+        for (const r of rows) {
+          const m = timeMs(r[x]);
+          const yv = numOrNull(r[idx]);
+          if (m !== null && yv !== null) pts.push({ x: m, y: yv });
+        }
+        pts.sort((a, b) => a.x - b.x);
+        return { label: seriesName(idx), data: pts };
+      });
+      if (!timeSers.some((s) => s.data.length > 0)) timeSers = null;
+    }
+  }
+
   const showLegend = sers.length > 1 || type === "pie";
   const baseOptions: ChartOptions<"bar"> = {
     responsive: true,
@@ -474,32 +588,38 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     };
     chart = <Pie data={pieData} options={pieOptions} />;
   } else if (isScatter) {
+    // A time X plots at epoch ms on a time scale; a numeric X stays linear.
+    const px = (r: Cell[]) => (xIsTime ? timeMs(r[x]) : numOrNull(r[x]));
     const scatterData = {
       datasets: series.map((idx, k) => ({
         label: `${columns[idx]?.name} × ${columns[x]?.name}`,
         data: rawRows
-          .map((r) => ({ x: numOrNull(r[x]), y: numOrNull(r[idx]) }))
+          .map((r) => ({ x: px(r), y: numOrNull(r[idx]) }))
           .filter((p): p is { x: number; y: number } => p.x !== null && p.y !== null),
         backgroundColor: PALETTE[k % PALETTE.length],
       })),
     };
-    const opts: ChartOptions<"scatter"> = {
+    const opts = {
       ...(baseOptions as ChartOptions<"scatter">),
       scales: {
         x: {
-          type: "linear",
+          type: xIsTime ? "time" : "linear",
           grid: { color: GRID },
           title: { display: true, text: columns[x]?.name },
         },
         y: { grid: { color: GRID } },
       },
-    };
+    } as ChartOptions<"scatter">;
     chart = <Scatter data={scatterData} options={opts} />;
   } else if (isBubble) {
     const yIdx = series[0];
     const sizes = bubbleRadii(rawRows.map((r) => (sizeCol >= 0 ? numOrNull(r[sizeCol]) : null)));
     const points = rawRows
-      .map((r, i) => ({ x: numOrNull(r[x]), y: numOrNull(r[yIdx]), r: sizes[i] }))
+      .map((r, i) => ({
+        x: xIsTime ? timeMs(r[x]) : numOrNull(r[x]),
+        y: numOrNull(r[yIdx]),
+        r: sizes[i],
+      }))
       .filter((p): p is { x: number; y: number; r: number } => p.x !== null && p.y !== null);
     const bubbleData = {
       datasets: [
@@ -514,11 +634,11 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
         },
       ],
     };
-    const opts: ChartOptions<"bubble"> = {
+    const opts = {
       ...(baseOptions as ChartOptions<"bubble">),
       scales: {
         x: {
-          type: "linear",
+          type: xIsTime ? "time" : "linear",
           grid: { color: GRID },
           title: { display: true, text: columns[x]?.name },
         },
@@ -527,7 +647,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           title: { display: true, text: columns[yIdx]?.name },
         },
       },
-    };
+    } as ChartOptions<"bubble">;
     chart = <Bubble data={bubbleData} options={opts} />;
   } else if (isHeatmap) {
     if (!heat) {
@@ -606,6 +726,44 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
       };
       chart = <ReactChart type="matrix" data={matrixData} options={opts} />;
     }
+  } else if (timeSers) {
+    const filled = type === "area";
+    const timeData = {
+      datasets: timeSers.map((s, k) => {
+        const color = PALETTE[k % PALETTE.length];
+        return {
+          label: s.label,
+          data: s.data,
+          parsing: false as const, // pre-parsed {x: ms, y} points (decimation needs this)
+          borderColor: color,
+          backgroundColor: filled ? alpha(color, "33") : color,
+          borderWidth: 2,
+          fill: filled,
+          tension: 0.3,
+          spanGaps: true,
+          pointRadius: 0, // dense series; hover still snaps to points
+          pointHoverRadius: 4,
+        };
+      }),
+    };
+    const opts = {
+      ...(baseOptions as ChartOptions<"line">),
+      // Chart-LEVEL parsing:false is what arms the decimation plugin (a
+      // dataset-level flag is not enough — the plugin checks chart.options).
+      parsing: false as const,
+      scales: {
+        x: { type: "time", grid: { color: GRID }, ticks: { maxRotation: 0, autoSkip: true } },
+        y: { grid: { color: GRID }, beginAtZero: true },
+      },
+      plugins: {
+        ...baseOptions.plugins,
+        // Above `threshold` points per series, LTTB thins to ~1 point/pixel
+        // (default sample count) while preserving the visual shape — so
+        // plotting every row stays cheap even for very large results.
+        decimation: { enabled: true, algorithm: "lttb", threshold: 1000 },
+      },
+    } as ChartOptions<"line">;
+    chart = <Line data={timeData} options={opts} />;
   } else {
     const filled = type === "area";
     const isLine = type === "line" || filled;
@@ -645,7 +803,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           ))}
         </div>
         <label className="chart-field">
-          {isPoint ? "x (numeric)" : "x axis"}
+          {isPoint ? "x (numeric/time)" : "x axis"}
           <select value={x} onChange={(e) => setXIdx(Number(e.target.value))}>
             {xChoices.map((i) => (
               <option key={i} value={i}>
@@ -741,7 +899,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
 
       {(pivoted ||
         (grouped && grouped.total > GROUP_CAP) ||
-        (!grouping && !splitting && rows.length > RAW_CAP) ||
+        (!grouping && !splitting && !timeSers && rows.length > RAW_CAP) ||
         (type === "pie" && ys.length > 1)) && (
         <div className="hint" style={{ padding: "4px 2px" }}>
           {pivoted &&
@@ -755,6 +913,7 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
             `showing first ${GROUP_CAP} of ${grouped.total} groups. `}
           {!grouping &&
             !splitting &&
+            !timeSers &&
             rows.length > RAW_CAP &&
             `showing first ${RAW_CAP} of ${rows.length} rows — aggregate or add a tighter LIMIT. `}
           {type === "pie" && ys.length > 1 && "pie shows a single series."}

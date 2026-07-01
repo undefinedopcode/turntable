@@ -1,6 +1,8 @@
 // Local persistence for the editor: recent query history, named saved queries,
 // and the last-edited query. All best-effort (localStorage may be unavailable).
 
+import type { ViewConfig } from "./view";
+
 const HISTORY_KEY = "tt.history";
 const SAVED_KEY = "tt.saved";
 const LAST_KEY = "tt.lastQuery";
@@ -81,14 +83,16 @@ export function saveLastQuery(q: string): void {
   write(LAST_KEY, q);
 }
 
-// Open query tabs: only the editable bits (id/name/query) are persisted, not the
-// transient result/status — those are re-run on demand after a reload.
+// Open query tabs: only the editable bits (id/name/query + the results-pane
+// view config) are persisted, not the transient result/status — those are
+// re-run on demand after a reload.
 const TABS_KEY = "tt.tabs";
 
 export interface TabState {
   id: string;
   name: string;
   query: string;
+  view?: ViewConfig;
 }
 
 export function loadTabs(): TabState[] {

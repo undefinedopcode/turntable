@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Cell, Column } from "../api";
 import { type Agg, AGGS, heatColor, numericColumns, pivot } from "../pivot";
+import type { PivotViewConfig } from "../view";
 
 const ROW_CAP = 300;
 const COL_CAP = 60;
@@ -15,16 +16,34 @@ function fmtNum(v: number | null): string {
 // PivotTable cross-tabulates the result: a row dimension × a column dimension,
 // each cell an aggregate of one measure. It reuses the chart's pivot() so the
 // "series by" chart and this table agree. Cells can be colour-scaled (a
-// heatmap-in-a-table).
-export function PivotTable({ columns, rows }: { columns: Column[]; rows: Cell[][] }) {
+// heatmap-in-a-table). `config` seeds the selections at mount (by column name);
+// every change is reported through `onConfig` so it can be persisted.
+export function PivotTable({
+  columns,
+  rows,
+  config,
+  onConfig,
+}: {
+  columns: Column[];
+  rows: Cell[][];
+  config?: PivotViewConfig;
+  onConfig?: (c: PivotViewConfig) => void;
+}) {
   const numeric = useMemo(() => numericColumns(columns, rows), [columns, rows]);
   const numericIdx = numeric.map((n) => n.i);
 
-  const [rowDim, setRowDim] = useState(0);
-  const [colDim, setColDim] = useState(1);
-  const [valIdx, setValIdx] = useState(-1);
-  const [agg, setAgg] = useState<Agg>("sum");
-  const [color, setColor] = useState(true);
+  // Resolve a persisted column name to its current index (fallback when absent).
+  const byName = (name: string | undefined, fallback: number) => {
+    const i = name == null ? -1 : columns.findIndex((c) => c.name === name);
+    return i >= 0 ? i : fallback;
+  };
+  const [rowDim, setRowDim] = useState(() => byName(config?.rows, 0));
+  const [colDim, setColDim] = useState(() => byName(config?.cols, 1));
+  const [valIdx, setValIdx] = useState(() => byName(config?.value, -1));
+  const [agg, setAgg] = useState<Agg>(() =>
+    config?.agg && AGGS.includes(config.agg) && config.agg !== "none" ? config.agg : "sum",
+  );
+  const [color, setColor] = useState(config?.color ?? true);
 
   // Resolve selections defensively against the current columns.
   const rd = rowDim >= 0 && rowDim < columns.length ? rowDim : 0;
@@ -33,6 +52,22 @@ export function PivotTable({ columns, rows }: { columns: Column[]; rows: Cell[][
       ? colDim
       : columns.findIndex((_, i) => i !== rd);
   const value = numericIdx.includes(valIdx) ? valIdx : (numericIdx[0] ?? -1);
+
+  // Report the (resolved) selections upward, by column name, whenever they
+  // change. onConfig goes through a ref so an unstable callback prop doesn't
+  // re-fire the effect.
+  const onConfigRef = useRef(onConfig);
+  onConfigRef.current = onConfig;
+  useEffect(() => {
+    onConfigRef.current?.({
+      rows: columns[rd]?.name,
+      cols: columns[cd]?.name,
+      value: columns[value]?.name,
+      agg,
+      color,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rd, cd, value, agg, color, columns]);
 
   const p = useMemo(
     () => (value >= 0 && cd >= 0 ? pivot(rows, cd, value, rd, agg, COL_CAP, ROW_CAP) : null),

@@ -16,6 +16,7 @@ import {
 } from "./storage";
 import { buildCompletions } from "./completions";
 import { Gutter } from "./components/Gutter";
+import type { ViewConfig } from "./view";
 
 const clamp = (v: number, lo: number, hi: number) =>
   Math.max(lo, Math.min(hi, v));
@@ -72,9 +73,10 @@ export function App() {
   const [queryH, setQueryH] = useState(() => loadPaneSize("query", 160));
   const workRef = useRef<HTMLElement>(null);
 
-  // Persist tab text (not results) and (re)load autocompletion when sources change.
+  // Persist tab text + view config (not results) and (re)load autocompletion
+  // when sources change.
   useEffect(() => {
-    saveTabs(tabs.map(({ id, name, query }) => ({ id, name, query })));
+    saveTabs(tabs.map(({ id, name, query, view }) => ({ id, name, query, view })));
   }, [tabs]);
   useEffect(() => {
     buildCompletions().then(setCompletions);
@@ -90,6 +92,15 @@ export function App() {
   const setActiveQuery = useCallback(
     (q: string) => patchTab(activeId, { query: q }),
     [activeId, patchTab],
+  );
+  // patchView merges a partial view config (mode / chart / pivot settings) into
+  // a tab, so the chart and the pivot can each update their slice independently.
+  const patchView = useCallback(
+    (id: string, patch: Partial<ViewConfig>) =>
+      setTabs((ts) =>
+        ts.map((t) => (t.id === id ? { ...t, view: { ...t.view, ...patch } } : t)),
+      ),
+    [],
   );
 
   const addTab = useCallback(() => {
@@ -254,7 +265,12 @@ export function App() {
             />
           </div>
           <Gutter dir="row" onPointerDown={dragQuery} />
-          <Results key={activeId} result={active.result} />
+          <Results
+            key={activeId}
+            result={active.result}
+            view={active.view}
+            onView={(p) => patchView(active.id, p)}
+          />
         </section>
       </main>
     </div>

@@ -441,13 +441,21 @@ for both `.use` and the web form is shared via `applySourceField` in `cli.go`.
 Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by
 default. The UI is **tabbed** (`TabBar.tsx` — each tab an independent query
 workspace with its own editor text + result, persisted to localStorage by
-`storage.ts`); each tab has a CodeMirror editor (SQL highlighting + source/
+`storage.ts`; the results-pane view config — table/chart/pivot mode plus each
+view's settings — persists too, as a `ViewConfig` (`view.ts`) whose column refs
+are **by name** so it survives schema drift, and which doubles as the panel
+format for future dashboards — see `docs/dashboards-design.md`); each tab has a
+CodeMirror editor (SQL highlighting + source/
 column/function autocomplete), query history + saved queries (also localStorage),
 and a results pane with three views: a table (client-side sort/filter, cell
 copy/JSON-expand, CSV/JSON/NDJSON export via `export.ts`), a Chart.js chart
 (`Chart.tsx`: bar/line/area/scatter/bubble/heatmap/pie plus node-link
 graph/tree with PNG export, X column + multi-series Y toggles + a series-by
-breakdown + client-side group-by-X aggregation count/sum/avg/min/max), and a
+breakdown + client-side group-by-X aggregation count/sum/avg/min/max; a
+**time-typed X** on line/area gets a real time axis — points become (epoch ms,
+y) via `chartjs-adapter-date-fns`, uneven sampling/gaps render truthfully, and
+LTTB decimation plots ALL rows instead of the 500-row raw cap; scatter/bubble
+accept a time X too), and a
 pivot table (`PivotTable.tsx` — row×column cross-tab of one measure, optional
 cell heatmap colouring). The chart heatmap uses the `chartjs-chart-matrix`
 plugin; the **graph/tree** types use `chartjs-chart-graph` (force-directed +

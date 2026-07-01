@@ -17,6 +17,7 @@
     "@codemirror/view": "^6.43.3",
     "@uiw/react-codemirror": "^4.25.10",
     "chart.js": "~4.4.7",
+    "chartjs-adapter-date-fns": "^3.0.0",
     "chartjs-chart-graph": "^4.3.5",
     "chartjs-chart-matrix": "^3.0.4",
     "chartjs-plugin-datalabels": "^2.2.0",

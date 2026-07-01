@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Cell, QueryResult } from "../api";
+import type { ViewConfig } from "../view";
 import { Modal } from "./Modal";
 import { Chart } from "./Chart";
 import { PivotTable } from "./PivotTable";
@@ -26,13 +27,30 @@ function cellText(c: Cell): string {
   return c === null ? "" : typeof c === "object" ? JSON.stringify(c) : String(c);
 }
 
-export function Results({ result }: { result: QueryResult | null }) {
+// Results renders one tab's query result. `view` is the tab's persisted view
+// config (read once at mount — tab switches remount via key={activeId}); every
+// change is reported back through `onView` so it survives a reload. The row
+// filter/sort stay transient — they belong to one specific result.
+export function Results({
+  result,
+  view,
+  onView,
+}: {
+  result: QueryResult | null;
+  view?: ViewConfig;
+  onView?: (patch: Partial<ViewConfig>) => void;
+}) {
   const [filter, setFilter] = useState("");
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [view, setView] = useState<"table" | "chart" | "pivot">("table");
+  const [mode, setMode] = useState<"table" | "chart" | "pivot">(view?.mode ?? "table");
   const [expand, setExpand] = useState<Cell | null>(null);
   const [copied, setCopied] = useState("");
+
+  const switchMode = (m: "table" | "chart" | "pivot") => {
+    setMode(m);
+    onView?.({ mode: m });
+  };
 
   // A row-less response (error / notice / explain) has no columns field, so
   // guard the length access with optional chaining.
@@ -145,20 +163,20 @@ export function Results({ result }: { result: QueryResult | null }) {
         </span>
         <div className="seg">
           <button
-            className={view === "table" ? "on" : ""}
-            onClick={() => setView("table")}
+            className={mode === "table" ? "on" : ""}
+            onClick={() => switchMode("table")}
           >
             Table
           </button>
           <button
-            className={view === "chart" ? "on" : ""}
-            onClick={() => setView("chart")}
+            className={mode === "chart" ? "on" : ""}
+            onClick={() => switchMode("chart")}
           >
             Chart
           </button>
           <button
-            className={view === "pivot" ? "on" : ""}
-            onClick={() => setView("pivot")}
+            className={mode === "pivot" ? "on" : ""}
+            onClick={() => switchMode("pivot")}
           >
             Pivot
           </button>
@@ -184,10 +202,20 @@ export function Results({ result }: { result: QueryResult | null }) {
         {copied && <span className="copied">{copied}</span>}
       </div>
 
-      {view === "chart" ? (
-        <Chart columns={cols} rows={rows} />
-      ) : view === "pivot" ? (
-        <PivotTable columns={cols} rows={rows} />
+      {mode === "chart" ? (
+        <Chart
+          columns={cols}
+          rows={rows}
+          config={view?.chart}
+          onConfig={(c) => onView?.({ chart: c })}
+        />
+      ) : mode === "pivot" ? (
+        <PivotTable
+          columns={cols}
+          rows={rows}
+          config={view?.pivot}
+          onConfig={(c) => onView?.({ pivot: c })}
+        />
       ) : (
         <div className="table-wrap">
           <table>
