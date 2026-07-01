@@ -265,8 +265,12 @@ interfaces:
     behind a narrow `metricsAPI` returning normalized series (`client.go` adapts
     the SDK; the connector logic is SDK-free and fake-tested). No aggregate
     pushdown — the Azure API is pre-aggregated by `aggregation`+`interval`, so the
-    engine does any further rollup. Per-resource only (v1); fleet-wide metrics is
-    a deferred Batch-API follow-up. See `docs/azure-monitor-design.md`.
+    engine does any further rollup. Two modes: per-resource (`resource`, via
+    `armmonitor`) and **batch** (`resources` list + `region`, via `azmetrics`'
+    data-plane `QueryResources` — many resources/call, chunked at 50, each row
+    tagged by its own `resource`; `realClient` lazily builds+caches an
+    armmonitor client per subscription and an azmetrics client per region).
+    See `docs/azure-monitor-design.md`.
     `azrgraphc` (Azure Resource Graph) is fleet inventory across subscriptions via
     one KQL endpoint (`armresourcegraph`). Like `athenac`, it pushes WHERE/ORDER
     BY/LIMIT down — as KQL, via the shared **`azkql`** renderer (a pure, DB-free,

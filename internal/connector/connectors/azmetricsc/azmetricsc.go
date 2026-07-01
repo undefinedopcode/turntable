@@ -44,6 +44,7 @@ const (
 	defaultAggregation = "Average"
 	defaultInterval    = "PT5M"
 	defaultWindow      = time.Hour
+	batchLimit         = 50 // max resources per Metrics Batch API call
 )
 
 // metricQuery is a normalized metrics request handed to the client.
@@ -57,8 +58,11 @@ type metricQuery struct {
 }
 
 // metricSeries is one returned time series: a metric, its dimension values (from
-// the response metadata), and its points.
+// the response metadata), and its points. In batch mode `resource` names the
+// resource the series came from (empty in per-resource mode — the connector
+// fills the column from the single resource option).
 type metricSeries struct {
+	resource   string
 	metric     string
 	dimensions map[string]string
 	points     []metricPoint
@@ -69,10 +73,12 @@ type metricPoint struct {
 	val *float64 // the value for the requested aggregation; nil = no data
 }
 
-// metricsAPI is the connector's narrow view of Azure Monitor metrics. The real
-// client wraps armmonitor; tests inject a fake.
+// metricsAPI is the connector's narrow view of Azure Monitor metrics: a
+// per-resource query (armmonitor) and a batch query for many resources in one
+// region+subscription (azmetrics). Tests inject a fake.
 type metricsAPI interface {
 	list(ctx context.Context, resourceURI string, q metricQuery) ([]metricSeries, error)
+	listBatch(ctx context.Context, subscription, region string, resourceIDs []string, q metricQuery) ([]metricSeries, error)
 }
 
 // Connector implements the Azure Monitor Metrics connector.
@@ -107,18 +113,13 @@ func (*Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sch
 	return engine.Schema{Columns: cols}, nil
 }
 
-// Scan builds a metricQuery from the options, calls the API, and emits one row
-// per (series, point). Predicate/OrderBy are ignored; the engine applies them.
+// Scan builds a metricQuery from the options and calls the API — the per-resource
+// path (one `resource`) or the batch path (a `resources` list, up to 50 per call
+// in one region+subscription). It emits one row per (series, point).
+// Predicate/OrderBy are ignored; the engine applies them.
 func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.RowIterator, error) {
 	opts := req.Dataset.Options
 
-	resource := stringOpt(opts, "resource")
-	if resource == "" {
-		resource = req.Dataset.Source // allow the ARM ID via the ref source too
-	}
-	if resource == "" {
-		return nil, fmt.Errorf("azmetrics connector requires a resource option (ARM resource ID)")
-	}
 	metricNames := splitList(stringOpt(opts, "metric"))
 	if len(metricNames) == 0 {
 		return nil, fmt.Errorf("azmetrics connector requires a metric option")
@@ -131,13 +132,11 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 	if interval == "" {
 		interval = defaultInterval
 	}
-
 	dims := dimensions(opts)
 	filter := stringOpt(opts, "filter")
 	if filter == "" && len(dims) > 0 {
 		filter = dimensionFilter(dims)
 	}
-
 	q := metricQuery{
 		metricNames: metricNames,
 		namespace:   stringOpt(opts, "namespace"),
@@ -147,13 +146,9 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		filter:      filter,
 	}
 
-	api, err := c.resolveClient(resource)
+	api, err := c.resolveClient()
 	if err != nil {
 		return nil, err
-	}
-	series, err := api.list(ctx, resource, q)
-	if err != nil {
-		return nil, fmt.Errorf("azmetrics %s: %w", resource, err)
 	}
 
 	limit := maxPoints
@@ -161,11 +156,55 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		limit = *req.Limit
 	}
 
+	// Batch mode: a `resources` list queries many resources in one region+sub.
+	if batch := splitList(stringOpt(opts, "resources")); len(batch) > 0 {
+		region := stringOpt(opts, "region")
+		if region == "" {
+			return nil, fmt.Errorf("azmetrics batch mode (resources=…) requires a region option (the metrics data-plane region, e.g. eastus)")
+		}
+		sub := subscriptionFromURI(batch[0])
+		if sub == "" {
+			return nil, fmt.Errorf("azmetrics: resources must be full ARM resource IDs containing /subscriptions/<id>/")
+		}
+		var series []metricSeries
+		for _, chunk := range chunk(batch, batchLimit) {
+			s, err := api.listBatch(ctx, sub, region, chunk, q)
+			if err != nil {
+				return nil, fmt.Errorf("azmetrics batch: %w", err)
+			}
+			series = append(series, s...)
+		}
+		return engine.NewSliceIter(buildRows(series, "", aggregation, dims, limit)), nil
+	}
+
+	// Per-resource mode.
+	resource := stringOpt(opts, "resource")
+	if resource == "" {
+		resource = req.Dataset.Source // allow the ARM ID via the ref source too
+	}
+	if resource == "" {
+		return nil, fmt.Errorf("azmetrics connector requires a resource option (ARM resource ID), or resources=… for batch mode")
+	}
+	series, err := api.list(ctx, resource, q)
+	if err != nil {
+		return nil, fmt.Errorf("azmetrics %s: %w", resource, err)
+	}
+	return engine.NewSliceIter(buildRows(series, resource, aggregation, dims, limit)), nil
+}
+
+// buildRows flattens series into rows [timestamp, resource, metric, aggregation,
+// value, dims…]. The resource column is the series' own resource (batch mode) or
+// defaultResource (per-resource mode).
+func buildRows(series []metricSeries, defaultResource, aggregation string, dims []string, limit int) []engine.Row {
 	var rows []engine.Row
 	for _, s := range series {
+		resource := s.resource
+		if resource == "" {
+			resource = defaultResource
+		}
 		for _, p := range s.points {
 			if len(rows) >= limit {
-				break
+				return rows
 			}
 			row := []engine.Value{
 				timeVal(p.ts),
@@ -184,7 +223,20 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 			rows = append(rows, engine.Row{Values: row})
 		}
 	}
-	return engine.NewSliceIter(rows), nil
+	return rows
+}
+
+// chunk splits ids into slices of at most n.
+func chunk(ids []string, n int) [][]string {
+	var out [][]string
+	for i := 0; i < len(ids); i += n {
+		end := i + n
+		if end > len(ids) {
+			end = len(ids)
+		}
+		out = append(out, ids[i:end])
+	}
+	return out
 }
 
 // ---- option helpers ----------------------------------------------------------

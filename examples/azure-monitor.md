@@ -17,7 +17,9 @@ subscription/resource group).
 
 | option        | required | meaning                                                         |
 | ------------- | -------- | --------------------------------------------------------------- |
-| `resource`    | yes      | full ARM resource ID (`/subscriptions/<id>/resourceGroups/<rg>/providers/<provider>/<name>`) |
+| `resource`    | * | one ARM resource ID (`/subscriptions/<id>/resourceGroups/<rg>/providers/<provider>/<name>`) |
+| `resources`   | * | **batch mode:** many ARM resource IDs, comma-separated (see below) |
+| `region`      | batch | the metrics data-plane region (e.g. `eastus`); required with `resources` |
 | `metric`      | yes      | metric name(s), comma-separated (e.g. `Percentage CPU`)         |
 | `aggregation` | no       | `Average` (default) / `Total` / `Minimum` / `Maximum` / `Count` |
 | `interval`    | no       | ISO-8601 bucket duration (`PT5M` default; `PT1H`, `P1D`, `FULL`)|
@@ -67,12 +69,41 @@ and `MAX` over them. (The connector does **not** push down `GROUP BY` — the Az
 API is already pre-aggregated by `aggregation` + `interval`, and the engine
 handles any further rollup.)
 
+## Batch mode: many resources in one query
+
+Give `resources` (a comma-separated list of ARM IDs) plus `region` to query
+metrics for many resources at once via the Metrics Batch API. Every row carries
+its own `resource`, so you can group across the fleet. All resources must share
+the same **subscription and region**; the connector chunks the list into calls of
+up to 50.
+
+```yaml
+sources:
+  vm-cpu:
+    connector: azmetrics
+    options:
+      region: eastus
+      metric: Percentage CPU
+      aggregation: Maximum
+      resources: >
+        /subscriptions/…/virtualMachines/vm1,
+        /subscriptions/…/virtualMachines/vm2,
+        /subscriptions/…/virtualMachines/vm3
+```
+
+```bash
+turntable -c turntable.yaml \
+  "SELECT resource, MAX(value) AS peak_cpu FROM vm-cpu GROUP BY resource ORDER BY peak_cpu DESC"
+```
+
+Pair with `azrgraph` to get the resource IDs for a fleet: run a Resource Graph
+query to list (say) every VM in a region, then feed those IDs into `resources`.
+(A single correlated query — JOIN Resource Graph to metrics per row — still isn't
+possible; turntable has no lateral join, so the IDs are supplied to the source,
+not joined in.)
+
 ## Notes & limitations
 
-- **One resource per source (v1).** Fleet-wide metrics (many resources in one
-  query) needs the Metrics Batch API, a planned follow-up. To sweep a fleet
-  today, list resources with the (planned) Azure Resource Graph connector and
-  drive one metrics source per resource.
 - The default window is the **last hour**; set `timespan` for anything else
   (e.g. `2026-06-30T00:00:00Z/2026-06-30T06:00:00Z`).
 - `dimension` both adds columns and asks Azure to split the series; without it

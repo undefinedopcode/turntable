@@ -2,6 +2,7 @@ package azmetricsc
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,12 +15,26 @@ type fakeMetrics struct {
 	lastQuery    metricQuery
 	lastResource string
 	series       []metricSeries
+
+	// batch capture
+	batchSub    string
+	batchRegion string
+	batchIDs    []string
+	batchSeries []metricSeries
 }
 
 func (f *fakeMetrics) list(ctx context.Context, resourceURI string, q metricQuery) ([]metricSeries, error) {
 	f.lastResource = resourceURI
 	f.lastQuery = q
 	return f.series, nil
+}
+
+func (f *fakeMetrics) listBatch(ctx context.Context, subscription, region string, resourceIDs []string, q metricQuery) ([]metricSeries, error) {
+	f.lastQuery = q
+	f.batchSub = subscription
+	f.batchRegion = region
+	f.batchIDs = append(f.batchIDs, resourceIDs...)
+	return f.batchSeries, nil
 }
 
 func drain(t *testing.T, it engine.RowIterator) []engine.Row {
@@ -128,6 +143,56 @@ func TestScanBuildsQueryAndRows(t *testing.T) {
 	// second point has nil value -> NULL
 	if !rows[1].Values[4].IsNull() {
 		t.Errorf("missing value should be NULL")
+	}
+}
+
+func TestScanBatchMode(t *testing.T) {
+	ts := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	fake := &fakeMetrics{batchSeries: []metricSeries{
+		{resource: "/subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1", metric: "Percentage CPU", points: []metricPoint{{ts: ts, val: fptr(30)}}},
+		{resource: "/subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm2", metric: "Percentage CPU", points: []metricPoint{{ts: ts, val: fptr(70)}}},
+	}}
+	c := newWithClient(fake)
+	ds := connector.Dataset{Options: map[string]any{
+		"resources":   "/subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1, /subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm2",
+		"metric":      "Percentage CPU",
+		"region":      "eastus",
+		"aggregation": "Maximum",
+	}}
+	rows := drain(t, mustScan(t, c, connector.ScanRequest{Dataset: ds}))
+
+	if fake.batchRegion != "eastus" {
+		t.Errorf("region = %q, want eastus", fake.batchRegion)
+	}
+	if fake.batchSub != "abc" {
+		t.Errorf("subscription = %q, want abc (parsed from resource id)", fake.batchSub)
+	}
+	if len(fake.batchIDs) != 2 {
+		t.Errorf("batch ids = %v, want 2", fake.batchIDs)
+	}
+	if fake.lastQuery.aggregation != "maximum" {
+		t.Errorf("aggregation = %q, want maximum", fake.lastQuery.aggregation)
+	}
+	// One row per resource; the resource column is each series' own resource.
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	if !strings.HasSuffix(rows[0].Values[1].V.(string), "/vm1") {
+		t.Errorf("row0 resource = %v, want …/vm1", rows[0].Values[1].V)
+	}
+	if v, _ := rows[1].Values[4].AsFloat(); v != 70 {
+		t.Errorf("row1 value = %v, want 70", rows[1].Values[4].V)
+	}
+}
+
+func TestBatchModeRequiresRegion(t *testing.T) {
+	c := newWithClient(&fakeMetrics{})
+	ds := connector.Dataset{Options: map[string]any{
+		"resources": "/subscriptions/abc/x/vm1",
+		"metric":    "Percentage CPU",
+	}}
+	if _, err := c.Scan(context.Background(), connector.ScanRequest{Dataset: ds}); err == nil {
+		t.Fatal("expected error: batch mode needs a region")
 	}
 }
 

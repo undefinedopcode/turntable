@@ -282,5 +282,9 @@ Left to settle when we build:
 2. **`azrgraphc`** (Resource Graph) — builds the shared `azkql` core; delivers
    fleet inventory and the resource discovery behind future batch metrics.
 3. **`azlogsc`** (Log Analytics) — reuses `azkql`; table mode + raw passthrough.
-4. *(v2)* **Metrics Batch API** — fleet-wide metrics in one query, riding on the
-   resource lists `azrgraphc` produces.
+4. **Metrics Batch API** — many resources in one query. ✅ *implemented* as
+   `azmetricsc` batch mode (`resources` + `region`; chunks of 50; each row tagged
+   by its `resource`). Note: a single *correlated* query (JOIN Resource Graph to
+   metrics per row) still needs lateral joins, which the engine lacks — so the
+   resource IDs are supplied to the source (or via an `azrgraphc` query), not
+   joined in per row.

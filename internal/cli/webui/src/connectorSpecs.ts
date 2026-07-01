@@ -133,7 +133,9 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     name: "azmetrics",
     label: "Azure Monitor Metrics",
     fields: [
-      { key: "resource", label: "Resource ID", required: true, placeholder: "/subscriptions/…/providers/…/managedClusters/aks1", help: "full ARM resource ID" },
+      { key: "resource", label: "Resource ID", placeholder: "/subscriptions/…/managedClusters/aks1", help: "one resource (or use Resources for a batch)" },
+      { key: "resources", label: "Resources (batch)", placeholder: "id1, id2, … (≤50/call, same region+subscription)", help: "many resources in one query; requires Region" },
+      { key: "region", label: "Region", placeholder: "eastus (required for batch)" },
       { key: "metric", label: "Metric(s)", required: true, placeholder: "Percentage CPU (comma-separated)" },
       { key: "aggregation", label: "Aggregation", type: "select", options: ["Average", "Total", "Minimum", "Maximum", "Count"] },
       { key: "interval", label: "Interval", placeholder: "PT5M (ISO-8601 duration)" },
@@ -141,7 +143,7 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
       { key: "dimension", label: "Split by dimension", placeholder: "node (comma-separated; adds columns)" },
       { key: "namespace", label: "Metric namespace", placeholder: "(optional)" },
     ],
-    note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
+    note: "One of Resource or Resources (batch) is required. Auth is ambient via Azure AD — no key fields.",
   },
   {
     name: "azrgraph",
