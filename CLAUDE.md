@@ -340,6 +340,16 @@ interfaces:
     Wraps aws-sdk-go-v2 `configservice` behind a narrow `configAPI` (fake-tested).
     Needs AWS Config enabled/recording. `region`/`profile`/`aggregator`/`top`
     options. See `examples/aws-config.md`.
+    `awscostc` (AWS Cost Explorer) and `azcostc` (Azure Cost Management) are the
+    cost twins — both option-driven like the metrics connectors (the APIs are
+    pre-aggregated by metric+granularity+group-by, so no SQL-aggregate pushdown).
+    `awscostc` (`GetCostAndUsage`, paginated) options `granularity`/`metric(s)`/
+    `group_by` (`TYPE:KEY`, ≤2)/`start`/`end`; schema = `period_start`,
+    `period_end`, a column per group-by, a column per metric, `currency`. `azcostc`
+    (Cost Management Query API, `DefaultAzureCredential`) options `subscription`/
+    `scope`/`metric`/`group_by`/`granularity`/`timeframe`/`start`/`end`; returns
+    typed columns so the schema is exact (like `azlogsc`). Both wrap their SDK
+    behind a narrow interface (fake-tested). See `examples/cost.md`.
     `athenac` is the odd one in this family: Athena *is* a SQL engine
     (Presto/Trino over S3, Glue catalog), so it pushes projection/predicate
     (`translateExpr`, Presto-flavored — double-quote idents, no ILIKE)/ORDER BY/

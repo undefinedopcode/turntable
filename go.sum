@@ -16,6 +16,8 @@ github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azlogs v1.2.0 h1:KzTYJVNtaAp
 github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azlogs v1.2.0/go.mod h1:a+dxW5k1ZbYaibMYrFuhZEZELPgZslm81QR4CMchMX0=
 github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics v1.3.0 h1:blbWEpcsg2EFqXe64sRPdWPKnLWm0fPY4iHyo4MoHVM=
 github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics v1.3.0/go.mod h1:jWOswzu+YEJ01Csz2ZUir7KecMjHJNYwxufLqAYi+ls=
+github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement v1.1.1 h1:ehSLdbLah6kk6HTVc6e/lrbmbz7MMbpNxkOd3OYlhB0=
+github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement v1.1.1/go.mod h1:Am1cUioOk0HdZIsjpXJkQ4RIeQbwYsW6LkNIc5z/5XY=
 github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/internal/v3 v3.2.0 h1:+lnLQhKh3cgSOIOVH61UZ3s/l9d+bAZp5d/spt1+7UI=
 github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/internal/v3 v3.2.0/go.mod h1:tStOHrivWUrcBolspvKV70Us1ckESYGYSHdG4LX8zyY=
 github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor v0.12.0 h1:qmeVFr8V9dDzhLZDDgdqyOEl+XLhhMpm7xrOajxqKuk=
@@ -88,6 +90,8 @@ github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.77.0 h1:tj7fwM3HuGZ7iuxmK
 github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.77.0/go.mod h1:N336OxQ6TvRbb6V1esVE8PtQFU86YvYaS+lVjsJTmP0=
 github.com/aws/aws-sdk-go-v2/service/configservice v1.64.2 h1:sX01uhbK8OX6ngYKq9pvFsCucxqyKsfHu1jzLn50eAA=
 github.com/aws/aws-sdk-go-v2/service/configservice v1.64.2/go.mod h1:oqVF/7XFqk3GY0/zlvY3Dj2+42ynOx4x/Sp875yKcxE=
+github.com/aws/aws-sdk-go-v2/service/costexplorer v1.65.2 h1:8rZqP/cnSD6F5+gvW5gOMcMOfl3kWAEANZuLF8zmS20=
+github.com/aws/aws-sdk-go-v2/service/costexplorer v1.65.2/go.mod h1:y3B04et7wgCGibEsJJ3BQwI2TzgqbVjre7cjWnGbpj8=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0 h1:S1qETDbdXKZMYVveuxACCKuRqnAt2NlnmYnlq5SeuMY=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0/go.mod h1:jLkDwIDBkCIpiENQhAOjAR2L9jwj56mZgVEvuro4gUE=
 github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.34.0 h1:O9JPx24Pr+CO7kkxo1EnHwug1UJKqgsMadILrJY72Hw=

@@ -8,6 +8,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/data/aztables v1.4.1
 	github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azlogs v1.2.0
 	github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics v1.3.0
+	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement v1.1.1
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor v0.12.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resourcegraph/armresourcegraph v0.10.0
 	github.com/aws/aws-sdk-go-v2 v1.42.0
@@ -17,6 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.77.0
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.64.2
+	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.65.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dolthub/go-mysql-server v0.20.0

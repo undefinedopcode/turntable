@@ -181,6 +181,35 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "Requires AWS Config enabled/recording. Auth is ambient via the AWS SDK (env / profile / role).",
   },
   {
+    name: "awscost",
+    label: "AWS Cost Explorer",
+    fields: [
+      { key: "granularity", label: "Granularity", type: "select", options: ["DAILY", "MONTHLY", "HOURLY"] },
+      { key: "metric", label: "Metric(s)", placeholder: "UnblendedCost (comma-separated)" },
+      { key: "group_by", label: "Group by", placeholder: "SERVICE, REGION, TAG:env (≤2)" },
+      { key: "start", label: "Start", placeholder: "YYYY-MM-DD (default: 30d ago)" },
+      { key: "end", label: "End", placeholder: "YYYY-MM-DD (exclusive; default: today)" },
+      { key: "region", label: "Region", placeholder: "us-east-1" },
+      { key: "profile", label: "Profile", placeholder: "shared-config profile (optional)" },
+    ],
+    note: "Auth is ambient via the AWS SDK (env / profile / role).",
+  },
+  {
+    name: "azcost",
+    label: "Azure Cost Management",
+    fields: [
+      { key: "subscription", label: "Subscription", placeholder: "subscription id (or use Scope)" },
+      { key: "scope", label: "Scope", placeholder: "full ARM scope (management group / billing account)" },
+      { key: "metric", label: "Metric", placeholder: "Cost (or PreTaxCost)" },
+      { key: "group_by", label: "Group by", placeholder: "ServiceName, ResourceGroup, TAG:env" },
+      { key: "granularity", label: "Granularity", type: "select", options: ["None", "Daily"] },
+      { key: "timeframe", label: "Timeframe", placeholder: "MonthToDate / TheLastMonth / Custom" },
+      { key: "start", label: "Start", placeholder: "YYYY-MM-DD (sets Custom)" },
+      { key: "end", label: "End", placeholder: "YYYY-MM-DD" },
+    ],
+    note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [
