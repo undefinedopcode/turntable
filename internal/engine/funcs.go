@@ -76,7 +76,8 @@ func (r *FuncRegistry) Names() []string {
 // the Aggregate operator, not the scalar registry; listed here for discovery.
 func Aggregates() []string {
 	return []string{
-		"AVG", "CORR", "COUNT", "COVAR_POP", "COVAR_SAMP", "MAX", "MEDIAN", "MIN",
+		"AVG", "CORR", "COUNT", "COVAR_POP", "COVAR_SAMP", "FIRST", "LAST", "MAX",
+		"MEDIAN", "MIN",
 		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE", "REGR_AVGX", "REGR_AVGY",
 		"REGR_COUNT", "REGR_INTERCEPT", "REGR_R2", "REGR_SLOPE", "STDDEV",
 		"STDDEV_POP", "STDDEV_SAMP", "STRING_AGG", "SUM", "VARIANCE", "VAR_POP",
@@ -1070,15 +1071,19 @@ func funcDateTrunc(args []Value) (Value, error) {
 }
 
 // funcDateBin buckets a timestamp into fixed-width `stride` intervals aligned to
-// `origin`: DATE_BIN(stride, ts, origin) = origin + floor((ts-origin)/stride) *
-// stride. Like DATE_TRUNC but for arbitrary strides (15 minutes, 6 hours, …).
-// `stride` is an INTERVAL (or an interval string).
+// `origin`: DATE_BIN(stride, ts[, origin]) = origin + floor((ts-origin)/stride)
+// * stride. Like DATE_TRUNC but for arbitrary strides (15 minutes, 6 hours, …).
+// `stride` is an INTERVAL (or an interval string). `origin` defaults to the
+// Unix epoch (TimescaleDB time_bucket semantics), so the common bucketing call
+// is just DATE_BIN('5 minutes', ts).
 func funcDateBin(args []Value) (Value, error) {
-	if len(args) != 3 {
-		return Value{}, fmt.Errorf("DATE_BIN expects 3 args (stride, timestamp, origin)")
+	if len(args) != 2 && len(args) != 3 {
+		return Value{}, fmt.Errorf("DATE_BIN expects 2 or 3 args (stride, timestamp[, origin])")
 	}
-	if args[0].IsNull() || args[1].IsNull() || args[2].IsNull() {
-		return Null(), nil
+	for _, a := range args {
+		if a.IsNull() {
+			return Null(), nil
+		}
 	}
 	stride, ok := args[0].V.(time.Duration)
 	if !ok {
@@ -1095,9 +1100,11 @@ func funcDateBin(args []Value) (Value, error) {
 	if !ok {
 		return Value{}, fmt.Errorf("DATE_BIN: second arg must be a timestamp")
 	}
-	origin, ok := asTimeVal(args[2])
-	if !ok {
-		return Value{}, fmt.Errorf("DATE_BIN: third arg must be a timestamp")
+	origin := time.Unix(0, 0).UTC()
+	if len(args) == 3 {
+		if origin, ok = asTimeVal(args[2]); !ok {
+			return Value{}, fmt.Errorf("DATE_BIN: third arg must be a timestamp")
+		}
 	}
 	diff := ts.Sub(origin)
 	n := diff / stride
@@ -1298,7 +1305,7 @@ func funcCurrentDate(args []Value) (Value, error) {
 // IsAggregate reports whether name is a recognized aggregate function.
 func IsAggregate(name string) bool {
 	switch strings.ToUpper(name) {
-	case "COUNT", "SUM", "AVG", "MIN", "MAX",
+	case "COUNT", "SUM", "AVG", "MIN", "MAX", "FIRST", "LAST",
 		"MEDIAN", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
 		"VARIANCE", "VAR_SAMP", "VAR_POP", "STRING_AGG",
 		"PERCENTILE_CONT", "PERCENTILE_DISC", "QUANTILE",

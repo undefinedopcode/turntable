@@ -743,6 +743,46 @@ func computeRegr(name string, spec AggSpec, rows []Row, eval Evaluator) (Value, 
 	return Value{}, fmt.Errorf("unknown aggregate %s", name)
 }
 
+// computeFirstLast implements FIRST(value, ord) / LAST(value, ord): the value
+// paired with the smallest (FIRST) / largest (LAST) ordering value in the
+// group — e.g. LAST(reading, ts) is the most recent reading. Rows whose
+// ordering value is NULL are skipped; the selected row's value may itself be
+// NULL. On ties of the ordering value, FIRST keeps the earliest input row and
+// LAST the latest, matching their names.
+func computeFirstLast(name string, spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
+	if spec.Arg2 == nil {
+		return Value{}, fmt.Errorf("%s expects 2 args, e.g. %s(value, ts)", name, name)
+	}
+	var bestOrd, bestVal Value
+	found := false
+	for _, r := range rows {
+		ov, err := eval.Eval(spec.Arg2, r)
+		if err != nil {
+			return Value{}, err
+		}
+		if ov.IsNull() {
+			continue
+		}
+		if found {
+			c := Compare(ov, bestOrd)
+			// FIRST replaces only on a strictly smaller ordering value; LAST
+			// replaces on greater-or-equal (so a tie takes the later row).
+			if (name == "FIRST" && c >= 0) || (name == "LAST" && c < 0) {
+				continue
+			}
+		}
+		vv, err := eval.Eval(spec.Arg, r)
+		if err != nil {
+			return Value{}, err
+		}
+		bestOrd, bestVal, found = ov, vv, true
+	}
+	if !found {
+		return Null(), nil
+	}
+	return bestVal, nil
+}
+
 func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 	name := strings.ToUpper(spec.Func)
 	// COUNT(*) counts rows regardless of nullness; DISTINCT is meaningless on it.
@@ -757,6 +797,8 @@ func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
 	case "CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE", "REGR_INTERCEPT",
 		"REGR_R2", "REGR_COUNT", "REGR_AVGX", "REGR_AVGY":
 		return computeRegr(name, spec, rows, eval)
+	case "FIRST", "LAST":
+		return computeFirstLast(name, spec, rows, eval)
 	}
 
 	// Evaluate the argument over each row, dropping NULLs and (with DISTINCT)
@@ -1429,6 +1471,10 @@ func computeWindowPartition(spec WindowSpec, idxs []int, rows []Row, eval Evalua
 		return computeWindowValue(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
 	case "SUM", "AVG", "COUNT", "MIN", "MAX":
 		return computeWindowAgg(spec, idxs, rows, eval, result)
+	case "FIRST", "LAST":
+		return computeWindowFirstLast(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
+	case "LOCF":
+		return computeLOCF(spec, idxs, rows, eval, result)
 	}
 	return fmt.Errorf("unknown window function %s", spec.Func)
 }
@@ -1658,6 +1704,63 @@ func computeWindowValue(spec WindowSpec, idxs []int, rows []Row, eval Evaluator,
 			return err
 		}
 		result[idxs[pos]] = v
+	}
+	return nil
+}
+
+// computeWindowFirstLast implements FIRST/LAST(value, ord) as window
+// aggregates over each row's frame — e.g. LAST(reading, ts) OVER (PARTITION BY
+// station) attaches the station's most recent reading to every row. Frame
+// semantics match the other window aggregates (whole partition, or the running
+// frame when ORDER BY'd, or an explicit ROWS/RANGE frame).
+func computeWindowFirstLast(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, name string) error {
+	if len(spec.Args) < 2 {
+		return fmt.Errorf("%s expects 2 args, e.g. %s(value, ts)", name, name)
+	}
+	los, his, err := windowFrameRanges(spec, idxs, rows, eval)
+	if err != nil {
+		return err
+	}
+	agg := AggSpec{Func: name, Arg: spec.Args[0], Arg2: spec.Args[1]}
+	var frame []Row
+	for pos := 0; pos < len(idxs); pos++ {
+		lo, hi := los[pos], his[pos]
+		if lo > hi {
+			result[idxs[pos]] = Null()
+			continue
+		}
+		frame = frame[:0]
+		for j := lo; j <= hi; j++ {
+			frame = append(frame, rows[idxs[j]])
+		}
+		v, err := computeFirstLast(name, agg, frame, eval)
+		if err != nil {
+			return err
+		}
+		result[idxs[pos]] = v
+	}
+	return nil
+}
+
+// computeLOCF implements LOCF(x) — "last observation carried forward": each
+// row's x, or when x is NULL the most recent non-NULL x earlier in the
+// partition's window order. It is the gap-filling companion to a
+// generate_series LEFT JOIN (see the DIALECT.md recipe); leading NULLs (no
+// prior observation) stay NULL.
+func computeLOCF(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value) error {
+	if len(spec.Args) == 0 {
+		return fmt.Errorf("LOCF requires an argument, e.g. LOCF(value)")
+	}
+	carry := Null()
+	for _, ri := range idxs {
+		v, err := eval.Eval(spec.Args[0], rows[ri])
+		if err != nil {
+			return err
+		}
+		if !v.IsNull() {
+			carry = v
+		}
+		result[ri] = carry
 	}
 	return nil
 }

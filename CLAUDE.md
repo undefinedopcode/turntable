@@ -119,6 +119,12 @@ A query moves through fixed stages, one package each:
    (whole partition, or running when ORDER BY'd) applies when none is given.
    Distribution window fns NTILE/PERCENT_RANK/CUME_DIST and the two-column stats
    CORR/COVAR_*/REGR_* (paired via AggSpec.Arg2, `computeRegr`) also live here.
+   Time-series helpers: FIRST/LAST(value, ord) are two-arg aggregates
+   (`computeFirstLast` — value at min/max ord, e.g. latest reading per station;
+   also usable as window aggregates) and LOCF(x) is a window function carrying
+   the last non-NULL x forward — the gap-filling companion to a generate_series
+   LEFT JOIN (recipe in DIALECT.md). DATE_BIN's origin arg is optional (defaults
+   to the Unix epoch, time_bucket-style).
    Window + GROUP BY in one query is rejected for now.
    A non-correlated `WHERE/HAVING x IN (SELECT ...)` is handled differently:
    `resolveInSubqueries` executes the subquery at build time and folds its one

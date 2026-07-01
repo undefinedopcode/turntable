@@ -2310,14 +2310,14 @@ func funcCallType(fc *sql.FuncCall, in engine.Schema) engine.Type {
 }
 
 // aggregateType infers an aggregate's result type, matching the engine's
-// aggregate operator: COUNT/REGR_COUNT are integers, MIN/MAX preserve their
-// argument's type, STRING_AGG is a string, and every other aggregate computes a
-// float.
+// aggregate operator: COUNT/REGR_COUNT are integers, MIN/MAX/FIRST/LAST
+// preserve their argument's type, STRING_AGG is a string, and every other
+// aggregate computes a float.
 func aggregateType(fc *sql.FuncCall, in engine.Schema) engine.Type {
 	switch strings.ToUpper(fc.Name) {
 	case "COUNT", "REGR_COUNT":
 		return engine.TypeInt
-	case "MIN", "MAX":
+	case "MIN", "MAX", "FIRST", "LAST":
 		return firstArgType(fc, in)
 	case "STRING_AGG":
 		return engine.TypeString
@@ -2335,7 +2335,7 @@ func windowType(fc *sql.FuncCall, in engine.Schema) engine.Type {
 		return engine.TypeInt
 	case "PERCENT_RANK", "CUME_DIST":
 		return engine.TypeFloat
-	case "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE":
+	case "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "LOCF":
 		return firstArgType(fc, in)
 	}
 	if engine.IsAggregate(fc.Name) {

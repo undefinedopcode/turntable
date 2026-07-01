@@ -384,7 +384,7 @@ Domain errors (`SQRT(-1)`, `LN(0)`, …) return `NULL` rather than NaN/∞.
 | `INTERVAL '<spec>'` | a duration literal (e.g. `'7 days'`, `'2h30m'`). Add/subtract with a timestamp: `ts + INTERVAL '1 day'`, `NOW() - INTERVAL '1 hour'`; `ts1 - ts2` yields a duration |
 | `DATE(x)` | truncate a timestamp to the date |
 | `DATE_TRUNC(unit, ts)` | truncate to `second/minute/hour/day/week/month/quarter/year` |
-| `DATE_BIN(stride, ts, origin)` | bucket `ts` into fixed `stride` intervals (any width, e.g. `INTERVAL '15 minutes'`) aligned to `origin` |
+| `DATE_BIN(stride, ts[, origin])` | bucket `ts` into fixed `stride` intervals (any width, e.g. `INTERVAL '15 minutes'`); aligned to `origin`, default the Unix epoch — so `DATE_BIN('5 minutes', ts)` is the usual time-bucketing call |
 | `DATE_ADD(ts, interval)` | add an interval string (e.g. `'1 day'`, `'2h30m'`) |
 | `AGE(ts1, ts2)` | duration `ts1 - ts2` (one-arg form returns `ts1`) |
 | `TO_TIMESTAMP(epoch)` | time from unix epoch seconds |
@@ -420,6 +420,7 @@ Used with (or without) `GROUP BY`:
 | `STDDEV` / `STDDEV_SAMP` / `STDDEV_POP` | standard deviation (`STDDEV` = sample) |
 | `VARIANCE` / `VAR_SAMP` / `VAR_POP` | variance (`VARIANCE` = sample) |
 | `STRING_AGG(expr, sep)` | concatenate values, separated by `sep` (input order) |
+| `FIRST(value, ord)` / `LAST(value, ord)` | `value` at the smallest / largest `ord` in the group — e.g. `LAST(reading, ts)` is the most recent reading |
 | `CORR(y, x)` | Pearson correlation coefficient |
 | `COVAR_POP(y, x)` / `COVAR_SAMP(y, x)` | population / sample covariance |
 | `REGR_SLOPE(y, x)` / `REGR_INTERCEPT(y, x)` / `REGR_R2(y, x)` | least-squares line of `y` on `x`, and its R² |
@@ -427,6 +428,17 @@ Used with (or without) `GROUP BY`:
 
 The two-argument stats take the dependent variable first (`CORR(y, x)`) and skip
 rows where either side is NULL.
+
+`FIRST`/`LAST` skip rows whose ordering value is NULL, but return the selected
+row's `value` as-is (which may itself be NULL). On ties of `ord`, `FIRST` keeps
+the earliest input row and `LAST` the latest. They preserve their argument's
+type, like `MIN`/`MAX` — the canonical use is per-group "latest reading":
+
+```sql
+SELECT station, LAST(reading, ts) AS current, MAX(ts) AS as_of
+FROM readings
+GROUP BY station
+```
 
 Each accepts a leading `DISTINCT` (`COUNT(DISTINCT region)`,
 `SUM(DISTINCT amount)`, `STRING_AGG(DISTINCT tag, ',')`), which deduplicates the
@@ -473,6 +485,8 @@ Supported functions:
 | `PERCENT_RANK()` | `(rank - 1) / (rows - 1)` |
 | `CUME_DIST()` | fraction of rows at or before the current peer group |
 | `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` `(expr)` | aggregate over the window |
+| `FIRST(value, ord)` / `LAST(value, ord)` | the aggregate, over the window — e.g. `LAST(reading, ts) OVER (PARTITION BY station)` attaches each station's latest reading to every row |
+| `LOCF(expr)` | last observation carried forward: `expr`, or when NULL the most recent non-NULL `expr` earlier in the window order (leading NULLs stay NULL) — see gap-filling below |
 
 **Frames** narrow which rows an aggregate covers, by physical row offset:
 `ROWS BETWEEN <start> AND <end>`, where each bound is `UNBOUNDED PRECEDING`,
@@ -513,6 +527,35 @@ covers the whole partition when there is no `ORDER BY`, or a running frame
 last value. Window calls may be wrapped in scalar expressions and
 used in `ORDER BY`. Combining window functions with `GROUP BY` in one query is
 not yet supported.
+
+### Gap-filling a time series
+
+Sensor and metrics data has holes — dropped readings, offline periods. A naive
+`AVG` per bucket silently skips the missing buckets. To make gaps explicit and
+then fill them, build a complete **time spine** with `generate_series`, LEFT
+JOIN the (bucketed) readings onto it, and carry values across the holes with
+`LOCF`:
+
+```sql
+SELECT g.t,
+       r.avg_flow                               AS measured,   -- NULL in a gap
+       LOCF(r.avg_flow) OVER (ORDER BY g.t)     AS filled      -- gap carried forward
+FROM generate_series(CAST('2026-01-01' AS timestamp),
+                     CAST('2026-01-02' AS timestamp),
+                     INTERVAL '5 minutes') AS g(t)
+LEFT JOIN (
+  SELECT DATE_BIN('5 minutes', ts) AS bucket, AVG(flow) AS avg_flow
+  FROM readings
+  WHERE station = 'N-04'
+  GROUP BY bucket
+) r ON g.t = r.bucket
+ORDER BY g.t
+```
+
+Per-station, add the station to the spine's partner and use
+`LOCF(...) OVER (PARTITION BY station ORDER BY t)` so a carry never crosses
+stations. Keep the un-filled column alongside when it matters whether a value
+was measured or imputed.
 
 ---
 
