@@ -205,13 +205,17 @@ interfaces:
     connector across the wire, implementing framing/dispatch/cursor/predicate-eval/
     cell-encoding so an author writes only `Plugin{Name, Datasets}` (each
     `Dataset` = a `Schema` + a `Rows` func); it auto-applies the pushed
-    `WHERE`/`LIMIT` unless `ManualPushdown`. The two reference plugins under
+    `WHERE`/`LIMIT` unless `ManualPushdown`. The reference plugins under
     `examples/plugins/` (`sysinfo` = env + Go-runtime stats, dependency-free;
-    `procinfo` = the live process table via gopsutil) are each their **own
-    module** using the SDK (kept separate so gopsutil never enters turntable's or
-    the SDK's dep graph; they `replace`→`../../../sdk/go` locally). Build them
-    with `examples/plugins/build.sh` — being separate modules, they are **not**
-    compiled by `go build ./...` from the repo root.
+    `procinfo` = the live process table via gopsutil; `k8s` = Kubernetes
+    resources via client-go — flattened datasets for pods/deployments/
+    statefulsets/daemonsets/nodes/services/namespaces/events, plus a generic
+    `resource` dataset for any kind/CRD; auth via kubeconfig incl. AKS/EKS exec
+    plugins; `context`/`kubeconfig`/`namespace` options) are each their **own
+    module** using the SDK (kept separate so gopsutil/client-go never enter
+    turntable's or the SDK's dep graph; they `replace`→`../../../sdk/go`
+    locally). Build them with `examples/plugins/build.sh` — being separate
+    modules, they are **not** compiled by `go build ./...` from the repo root.
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
     `logc` is a plain-text log reader that **auto-detects** the format by
