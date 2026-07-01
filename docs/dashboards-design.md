@@ -1,11 +1,16 @@
 # Design: dashboards / stories
 
-Status: **proposal, for review** — no dashboard code yet. The prerequisite
-shipped alongside this doc: the web UI's results-pane view configuration
-(table/chart/pivot mode + each view's settings) is now a serializable
+Status: **v1 implemented** (server store + API in `internal/cli/dashboard.go`;
+frontend in `webui/src/components/DashboardView.tsx` / `PinModal.tsx` /
+`Markdown.tsx`). All four sequencing steps below shipped: YAML store +
+endpoints, read-only rendering, the variables toolbar, and pin-to-dashboard
+authoring. The "Later" section remains future work.
+
+The prerequisite shipped first: the web UI's results-pane view configuration
+(table/chart/pivot mode + each view's settings) is a serializable
 `ViewConfig` (`webui/src/view.ts`), persisted per tab and keyed by **column
 name** rather than index. A dashboard panel is exactly *a query plus one of
-those frozen view configs*, so the authoring UX can be "pin this tab".
+those frozen view configs*, so the authoring UX is "pin this tab".
 
 Goal: let a user assemble the results of several queries — row tables, pivot
 tables, charts, prose — into a named, persistent, shareable document, for two

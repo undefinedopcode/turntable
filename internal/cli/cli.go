@@ -67,6 +67,10 @@ type App struct {
 	// a saved source can reference an uploaded file.
 	uploadDir string
 
+	// dashDir is the persistent directory (.turntable/dashboards) holding
+	// dashboard definitions, one YAML file each; set in serve(). See dashboard.go.
+	dashDir string
+
 	// configPath is the turntable.yaml in use (from -c, or the autodetected
 	// default), or "" when none. Used to persist runtime-added sources.
 	configPath string

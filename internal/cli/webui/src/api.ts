@@ -2,6 +2,8 @@
 // Paths are relative so the bundle works whether served from the Go binary or
 // the Vite dev server (which proxies /api to the Go server).
 
+import type { ViewConfig } from "./view";
+
 export interface Column {
   name: string;
   type: string;
@@ -115,6 +117,65 @@ export interface LoginferResult {
 // preview, or inferred templates each carrying a ready-to-use `pattern`.
 export function loginfer(path: string): Promise<LoginferResult> {
   return postJSON<LoginferResult>("/api/loginfer", { path });
+}
+
+// ---- dashboards ----------------------------------------------------------
+// A dashboard is a named, ordered list of panels stored server-side as YAML
+// (.turntable/dashboards/<slug>.yaml). The server only stores definitions;
+// panels run their queries through the normal /api/query path client-side.
+
+export interface DashboardVariable {
+  default?: string;
+  options_query?: string;
+}
+
+export interface DashboardPanel {
+  kind: "markdown" | "table" | "pivot" | "chart" | "stat";
+  title?: string;
+  text?: string; // markdown panels
+  width?: "full" | "half";
+  query?: string;
+  view?: ViewConfig; // frozen results-pane config (chart/pivot settings)
+}
+
+export interface Dashboard {
+  name: string;
+  description?: string;
+  variables?: Record<string, DashboardVariable>;
+  panels: DashboardPanel[];
+}
+
+export interface DashboardSummary {
+  slug: string;
+  name: string;
+  description?: string;
+  panels: number;
+  error?: string; // set when the YAML on disk failed to parse
+}
+
+export async function listDashboards(): Promise<DashboardSummary[]> {
+  const res = await fetch("/api/dashboards");
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function getDashboard(slug: string): Promise<Dashboard & { slug: string }> {
+  const res = await fetch("/api/dashboards/" + encodeURIComponent(slug));
+  if (!res.ok) throw new Error((await res.text()) || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+// saveDashboard creates (no slug — derived from the name) or updates (slug set)
+// a dashboard. Returns the slug it was stored under.
+export function saveDashboard(
+  d: Dashboard & { slug?: string },
+): Promise<{ slug?: string; saved?: string; error?: string }> {
+  return postJSON("/api/dashboards", d);
+}
+
+export async function deleteDashboard(slug: string): Promise<void> {
+  const res = await fetch("/api/dashboards/" + encodeURIComponent(slug), { method: "DELETE" });
+  if (!res.ok) throw new Error((await res.text()) || `${res.status} ${res.statusText}`);
 }
 
 // uploadFile streams a file to the server's per-session scratch directory and

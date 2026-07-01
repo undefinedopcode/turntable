@@ -978,3 +978,172 @@ td.json {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- dashboards ------------------------------------------------------------ */
+.dash-work {
+  display: block;
+  overflow-y: auto;
+}
+.dash-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 16px 16px;
+  min-height: 100%;
+}
+.dash-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.dash-head h1 {
+  font-size: 16px;
+  margin: 0;
+}
+.dash-desc {
+  color: var(--muted);
+  font-size: 12px;
+}
+.dash-var {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: 12px ui-monospace, Menlo, monospace;
+  min-width: 110px;
+  outline: none;
+}
+.dash-var:focus {
+  border-color: var(--accent2);
+}
+.dash-panels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-content: flex-start;
+}
+.dash-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px 10px;
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dash-panel.half {
+  flex: 1 1 calc(50% - 10px);
+  max-width: calc(50% - 5px);
+  min-width: 320px;
+}
+.dash-panel.md {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+}
+.dash-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.dash-panel-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.dash-panel-status {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+/* panels host the same .table-wrap/.chart internals as the results pane, but
+   need their own bounded heights (the pane fills; a panel sizes to content). */
+.dash-panel .table-wrap {
+  flex: none;
+  max-height: 380px;
+}
+.dash-panel .chart-canvas {
+  height: 300px;
+  flex: none;
+}
+.dash-panel .chart {
+  flex: none;
+}
+
+/* stat panel: the classic big number */
+.stat {
+  padding: 8px 2px 12px;
+}
+.stat-value {
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.1;
+}
+.stat-label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+/* markdown panel */
+.markdown {
+  max-width: 76ch;
+  line-height: 1.55;
+  font-size: 13px;
+}
+.markdown h1 {
+  font-size: 18px;
+  margin: 8px 0 4px;
+}
+.markdown h2 {
+  font-size: 15px;
+  margin: 8px 0 4px;
+}
+.markdown h3,
+.markdown h4 {
+  font-size: 13px;
+  margin: 6px 0 3px;
+}
+.markdown p {
+  margin: 5px 0;
+}
+.markdown ul,
+.markdown ol {
+  margin: 5px 0;
+  padding-left: 22px;
+}
+.markdown code {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+.md-code {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  margin: 6px 0;
+}
+.markdown a {
+  color: var(--accent);
+}
+
+/* pin-to-dashboard modal */
+.pin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  min-width: 320px;
+}

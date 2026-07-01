@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Editor, type EditorHandle } from "./components/Editor";
 import { Results } from "./components/Results";
 import { TabBar } from "./components/TabBar";
+import { DashboardView } from "./components/DashboardView";
 import {
   loadLastQuery,
   loadPaneSize,
@@ -60,6 +61,9 @@ export function App() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [sourcesVersion, setSourcesVersion] = useState(0);
   const [historyVersion, setHistoryVersion] = useState(0);
+  // activeDash: an open dashboard replaces the query workspace until closed.
+  const [activeDash, setActiveDash] = useState<string | null>(null);
+  const [dashVersion, setDashVersion] = useState(0);
   const [completions, setCompletions] = useState<Completion[]>([]);
   const editorRef = useRef<EditorHandle>(null);
 
@@ -229,49 +233,70 @@ export function App() {
         <Sidebar
           onInsert={(t) => editorRef.current?.insert(t)}
           onSourceAdded={() => setSourcesVersion((v) => v + 1)}
-          onLoadQuery={setActiveQuery}
-          onRunQuery={runNow}
+          onLoadQuery={(q) => {
+            setActiveDash(null);
+            setActiveQuery(q);
+          }}
+          onRunQuery={(q) => {
+            setActiveDash(null);
+            runNow(q);
+          }}
           currentQuery={active.query}
           historyVersion={historyVersion}
           sourcesVersion={sourcesVersion}
+          dashVersion={dashVersion}
+          onOpenDashboard={setActiveDash}
+          onDashboardDeleted={(slug) => {
+            setDashVersion((v) => v + 1);
+            setActiveDash((cur) => (cur === slug ? null : cur));
+          }}
         />
         <Gutter dir="col" onPointerDown={dragSidebar} />
-        <section
-          className="work"
-          ref={workRef}
-          style={{ gridTemplateRows: `auto ${queryH}px 6px 1fr` }}
-        >
-          <TabBar
-            tabs={tabs}
-            activeId={activeId}
-            renamingId={renamingId}
-            onSelect={setActiveId}
-            onAdd={addTab}
-            onClose={closeTab}
-            onStartRename={setRenamingId}
-            onRename={renameTab}
-          />
-          <div className="query-pane">
-            <Editor
-              key={activeId}
-              ref={editorRef}
-              value={active.query}
-              onChange={setActiveQuery}
-              onRun={() => run(false)}
-              onExplain={() => run(true)}
-              running={active.running}
-              status={active.status}
-              completions={completions}
+        {activeDash != null ? (
+          <section className="work dash-work">
+            <DashboardView slug={activeDash} onClose={() => setActiveDash(null)} />
+          </section>
+        ) : (
+          <section
+            className="work"
+            ref={workRef}
+            style={{ gridTemplateRows: `auto ${queryH}px 6px 1fr` }}
+          >
+            <TabBar
+              tabs={tabs}
+              activeId={activeId}
+              renamingId={renamingId}
+              onSelect={setActiveId}
+              onAdd={addTab}
+              onClose={closeTab}
+              onStartRename={setRenamingId}
+              onRename={renameTab}
             />
-          </div>
-          <Gutter dir="row" onPointerDown={dragQuery} />
-          <Results
-            key={activeId}
-            result={active.result}
-            view={active.view}
-            onView={(p) => patchView(active.id, p)}
-          />
-        </section>
+            <div className="query-pane">
+              <Editor
+                key={activeId}
+                ref={editorRef}
+                value={active.query}
+                onChange={setActiveQuery}
+                onRun={() => run(false)}
+                onExplain={() => run(true)}
+                running={active.running}
+                status={active.status}
+                completions={completions}
+              />
+            </div>
+            <Gutter dir="row" onPointerDown={dragQuery} />
+            <Results
+              key={activeId}
+              result={active.result}
+              view={active.view}
+              onView={(p) => patchView(active.id, p)}
+              query={active.query}
+              tabName={active.name}
+              onPinned={() => setDashVersion((v) => v + 1)}
+            />
+          </section>
+        )}
       </main>
     </div>
   );

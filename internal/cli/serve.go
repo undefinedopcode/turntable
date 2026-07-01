@@ -65,6 +65,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 		return 1
 	}
 	a.uploadDir = uploadDirPath
+	a.dashDir = dashDirPath // created lazily on first dashboard save
 
 	mux := http.NewServeMux()
 	// Serve the embedded SPA (index.html + hashed assets) at the root; the API
@@ -76,6 +77,8 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/upload", a.handleUpload)
 	mux.HandleFunc("/api/functions", a.handleFunctions)
 	mux.HandleFunc("/api/loginfer", a.handleLoginfer)
+	mux.HandleFunc("/api/dashboards", a.handleDashboards)
+	mux.HandleFunc("/api/dashboards/", a.handleDashboardItem)
 
 	srv := &http.Server{
 		Addr:              addr,

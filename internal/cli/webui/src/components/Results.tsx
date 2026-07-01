@@ -4,6 +4,7 @@ import type { ViewConfig } from "../view";
 import { Modal } from "./Modal";
 import { Chart } from "./Chart";
 import { PivotTable } from "./PivotTable";
+import { PinModal } from "./PinModal";
 import {
   copyText,
   download,
@@ -30,15 +31,22 @@ function cellText(c: Cell): string {
 // Results renders one tab's query result. `view` is the tab's persisted view
 // config (read once at mount — tab switches remount via key={activeId}); every
 // change is reported back through `onView` so it survives a reload. The row
-// filter/sort stay transient — they belong to one specific result.
+// filter/sort stay transient — they belong to one specific result. `query` and
+// `tabName` feed the Pin-to-dashboard flow (the panel = query + view config).
 export function Results({
   result,
   view,
   onView,
+  query = "",
+  tabName = "",
+  onPinned,
 }: {
   result: QueryResult | null;
   view?: ViewConfig;
   onView?: (patch: Partial<ViewConfig>) => void;
+  query?: string;
+  tabName?: string;
+  onPinned?: () => void;
 }) {
   const [filter, setFilter] = useState("");
   const [sortCol, setSortCol] = useState<number | null>(null);
@@ -46,6 +54,7 @@ export function Results({
   const [mode, setMode] = useState<"table" | "chart" | "pivot">(view?.mode ?? "table");
   const [expand, setExpand] = useState<Cell | null>(null);
   const [copied, setCopied] = useState("");
+  const [pinOpen, setPinOpen] = useState(false);
 
   const switchMode = (m: "table" | "chart" | "pivot") => {
     setMode(m);
@@ -182,6 +191,13 @@ export function Results({
           </button>
         </div>
         <div className="exports">
+          <button
+            className="ghost sm"
+            title="pin this result to a dashboard"
+            onClick={() => setPinOpen(true)}
+          >
+            Pin
+          </button>
           <button className="ghost sm" onClick={() => exportAs("csv")}>
             CSV
           </button>
@@ -249,6 +265,16 @@ export function Results({
           </table>
         </div>
       )}
+
+      <PinModal
+        open={pinOpen}
+        onClose={() => setPinOpen(false)}
+        kind={mode}
+        view={view}
+        query={query}
+        defaultTitle={tabName}
+        onPinned={() => onPinned?.()}
+      />
 
       <Modal open={expand !== null} title="cell" onClose={() => setExpand(null)}>
         <pre className="plan" style={{ margin: 8 }}>

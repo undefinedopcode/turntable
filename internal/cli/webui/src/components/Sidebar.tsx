@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { getSchema, listSources, type Column, type Source } from "../api";
+import {
+  deleteDashboard,
+  getSchema,
+  listDashboards,
+  listSources,
+  type Column,
+  type DashboardSummary,
+  type Source,
+} from "../api";
 import { AddSourceModal } from "./AddSourceModal";
 import {
   clearHistory,
@@ -29,6 +37,9 @@ interface SidebarProps {
   currentQuery: string;
   historyVersion: number;
   sourcesVersion: number;
+  dashVersion: number;
+  onOpenDashboard: (slug: string) => void;
+  onDashboardDeleted: (slug: string) => void;
 }
 
 export function Sidebar({
@@ -39,6 +50,9 @@ export function Sidebar({
   currentQuery,
   historyVersion,
   sourcesVersion,
+  dashVersion,
+  onOpenDashboard,
+  onDashboardDeleted,
 }: SidebarProps) {
   const [sources, setSources] = useState<Source[] | null>(null);
   const [error, setError] = useState<string>("");
@@ -98,6 +112,11 @@ export function Sidebar({
         />
       ))}
 
+      <DashboardsPanel
+        version={dashVersion}
+        onOpen={onOpenDashboard}
+        onDeleted={onDashboardDeleted}
+      />
       <HistoryPanel version={historyVersion} onLoad={onLoadQuery} />
       <SavedPanel currentQuery={currentQuery} onLoad={onLoadQuery} />
     </aside>
@@ -181,6 +200,62 @@ function SourceItem({
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// DashboardsPanel lists the server-side dashboards. Deleting is a two-click
+// confirm (× → sure?) rather than a blocking dialog.
+function DashboardsPanel({
+  version,
+  onOpen,
+  onDeleted,
+}: {
+  version: number;
+  onOpen: (slug: string) => void;
+  onDeleted: (slug: string) => void;
+}) {
+  const [items, setItems] = useState<DashboardSummary[]>([]);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  useEffect(() => {
+    listDashboards()
+      .then(setItems)
+      .catch(() => {});
+  }, [version]);
+  if (items.length === 0) return null;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Dashboards</h2>
+      </div>
+      {items.map((d) => (
+        <div key={d.slug} className="hist saved" title={d.error ?? d.description ?? d.name}>
+          <span className="hist-q" onClick={() => onOpen(d.slug)}>
+            {d.name}
+            {d.error ? " ⚠" : ""}
+          </span>
+          <button
+            className="link del"
+            title={confirmDel === d.slug ? "click again to delete" : "delete"}
+            onClick={() => {
+              if (confirmDel !== d.slug) {
+                setConfirmDel(d.slug);
+                return;
+              }
+              deleteDashboard(d.slug)
+                .then(() => {
+                  setItems((it) => it.filter((x) => x.slug !== d.slug));
+                  onDeleted(d.slug);
+                })
+                .catch(() => {})
+                .finally(() => setConfirmDel(null));
+            }}
+          >
+            {confirmDel === d.slug ? "sure?" : "×"}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

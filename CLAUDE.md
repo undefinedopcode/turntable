@@ -430,7 +430,17 @@ returns the recognized `logc` format + a parsed preview, or — for an
 unrecognized file — inferred templates from `internal/loginfer`, a Drain-style
 miner, each carrying a ready-to-use `pattern` regex; the add-source modal
 auto-runs this when a log file is chosen and lets the user pick a template and
-rename its columns, which rewrites the pattern), and `POST /api/upload`
+rename its columns, which rewrites the pattern), `GET/POST /api/dashboards` +
+`GET/DELETE /api/dashboards/{slug}` (**dashboards/stories** — named panel lists
+of markdown/table/pivot/chart/stat, one YAML file each under
+`.turntable/dashboards/` (git-committable, NOT ignored — only `.turntable/data`
+is), CRUD in `dashboard.go`; the server only stores definitions — the client
+runs each panel's query through `/api/query`, substituting `{{var}}` toolbar
+variables as quoted literals (`{{var:raw}}` raw); a panel's `view` is the
+frontend `ViewConfig` (see below), and the results pane's **Pin** button
+appends the current query+view as a panel — see `docs/dashboards-design.md`;
+frontend: `DashboardView.tsx`, `PinModal.tsx`, `Markdown.tsx` a minimal
+React-element markdown renderer, no innerHTML), and `POST /api/upload`
 (multipart file → streamed to the persistent, project-relative `App.uploadDir` =
 `.turntable/data` (gitignored), created in `serve()`; kept across restarts so a
 file source saved to the config keeps resolving. Stored under the original
