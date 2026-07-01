@@ -258,7 +258,15 @@ interfaces:
     WIQL→batch-fetch API behind its injected `devopsAPI` — fields are namespaced
     (`System.Title`, `System.AssignedTo.displayName`) so columns use a
     multi-segment `path` like `linearc`; `cwlogsc`/`cwmetricsc`/`dynamodbc` wrap
-    aws-sdk-go-v2.
+    aws-sdk-go-v2. `azmetricsc` is the Azure twin of `cwmetricsc`: option-driven
+    Azure Monitor metrics for one resource (`resource`/`metric`/`aggregation`/
+    `interval`/`timespan`/`dimension`), a fixed schema + one column per split
+    dimension, Azure AD auth via `DefaultAzureCredential`. It wraps `armmonitor`
+    behind a narrow `metricsAPI` returning normalized series (`client.go` adapts
+    the SDK; the connector logic is SDK-free and fake-tested). No aggregate
+    pushdown — the Azure API is pre-aggregated by `aggregation`+`interval`, so the
+    engine does any further rollup. Per-resource only (v1); fleet-wide metrics is
+    a deferred Batch-API follow-up. See `docs/azure-monitor-design.md`.
     `dynamodbc` and `aztablesc` are schemaless entity stores (schema inferred
     from sampled items, like `jsonc`) with a `table="*"` wildcard via
     `DatasetsFor` + `expand{Dynamo,Azure}Tables` in `cli.go`. `aztablesc`

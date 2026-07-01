@@ -130,6 +130,20 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "events supports only aggregate queries (GROUP BY / COUNT / SUM / …) — Honeycomb has no raw-event read API.",
   },
   {
+    name: "azmetrics",
+    label: "Azure Monitor Metrics",
+    fields: [
+      { key: "resource", label: "Resource ID", required: true, placeholder: "/subscriptions/…/providers/…/managedClusters/aks1", help: "full ARM resource ID" },
+      { key: "metric", label: "Metric(s)", required: true, placeholder: "Percentage CPU (comma-separated)" },
+      { key: "aggregation", label: "Aggregation", type: "select", options: ["Average", "Total", "Minimum", "Maximum", "Count"] },
+      { key: "interval", label: "Interval", placeholder: "PT5M (ISO-8601 duration)" },
+      { key: "timespan", label: "Timespan", placeholder: "startISO/endISO (default: last hour)" },
+      { key: "dimension", label: "Split by dimension", placeholder: "node (comma-separated; adds columns)" },
+      { key: "namespace", label: "Metric namespace", placeholder: "(optional)" },
+    ],
+    note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [
