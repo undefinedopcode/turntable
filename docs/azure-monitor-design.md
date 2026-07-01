@@ -14,7 +14,7 @@ Three connectors, sequenced:
    layer that makes per-resource metrics usable at scale, via JOIN). ✅
    *implemented, incl. the shared `azkql` renderer.*
 3. **`azlogsc`** — Azure Monitor **Logs** / Log Analytics (KQL), a fast follow.
-   *pending — reuses `azkql`.*
+   ✅ *implemented — reuses `azkql`.*
 
 They share auth (Azure AD via `DefaultAzureCredential`, already used by
 `aztablesc`) but hit different data planes and have different query models, so

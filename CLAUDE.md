@@ -280,6 +280,14 @@ interfaces:
     Reader). `azkql.Build` translates only push-safe predicate parts (top-level
     columns; `LIKE`→case-insensitive `contains`, a safe superset) and leaves the
     rest to the engine — pushing is always an optimization.
+    `azlogsc` (Azure Monitor Logs / Log Analytics, the Azure twin of `cwlogsc`)
+    also reuses `azkql`: it queries a workspace (`workspace` option) by `table`
+    (or ref Source, `azlogs:AppRequests`) with WHERE/ORDER BY/LIMIT pushed as KQL,
+    or a raw `query`. Log Analytics returns **typed columns** with the rows, so
+    the schema is exact (no inference; `columnType` maps datetime/int/long/real/
+    dynamic/… to engine types) and there is no pagination (one query, bounded by
+    the KQL take cap + the `timespan`, default P1D). Wraps `azlogs` behind a
+    narrow `logsAPI`; Azure AD auth (Log Analytics Reader).
     `dynamodbc` and `aztablesc` are schemaless entity stores (schema inferred
     from sampled items, like `jsonc`) with a `table="*"` wildcard via
     `DatasetsFor` + `expand{Dynamo,Azure}Tables` in `cli.go`. `aztablesc`

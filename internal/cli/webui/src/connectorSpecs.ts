@@ -155,6 +155,18 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
   },
   {
+    name: "azlogs",
+    label: "Azure Monitor Logs",
+    fields: [
+      { key: "workspace", label: "Workspace ID", required: true, placeholder: "Log Analytics workspace GUID" },
+      { key: "table", label: "Table", placeholder: "ContainerLogV2, AppRequests, …" },
+      { key: "query", label: "Raw KQL", placeholder: "AppRequests | summarize … (overrides table)" },
+      { key: "timespan", label: "Timespan", placeholder: "P1D (ISO-8601 duration or start/end)" },
+      { key: "top", label: "Row cap", placeholder: "30000" },
+    ],
+    note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [
