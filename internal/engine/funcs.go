@@ -991,6 +991,11 @@ func asTimeVal(v Value) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// ParseInterval parses a Postgres-style interval literal ("1 day", "3 hours",
+// "30 minutes") to a duration — exported for the planner's DATE_BIN group-by
+// pushdown, which must resolve a constant stride at plan time.
+func ParseInterval(s string) (time.Duration, error) { return parseInterval(s) }
+
 // parseInterval parses a Postgres-style interval literal given as a string
 // like "1 day", "3 hours", "30 minutes". Returns the duration. Units: second(s),
 // minute(s), hour(s), day(s), week(s), month(s, 30d), year(s, 365d).

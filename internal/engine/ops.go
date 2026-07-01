@@ -521,6 +521,162 @@ func (j *HashJoinIter) Close() error {
 	return err2
 }
 
+// ---- ASOF join ----------------------------------------------------------------
+
+// AsofSpec describes the inequality of an ASOF join, normalized to
+// `left OP right`: for each left row the join picks the single right partner
+// whose key is nearest per Op (">=" / ">" pick the greatest right key at/below
+// the left key; "<=" / "<" the smallest at/above).
+type AsofSpec struct {
+	LeftKey  KeyExtractor
+	RightKey KeyExtractor
+	Op       string // ">=", ">", "<=", "<"
+}
+
+type asofEntry struct {
+	key Value
+	row Row
+}
+
+// AsofJoinIter implements ASOF [LEFT] JOIN: the right side is materialized,
+// grouped by the equality keys, and each group sorted by the ASOF key; the left
+// side streams, each row matched (binary search) to at most one right row —
+// the nearest per the spec. NULL equality or ASOF keys never match, mirroring
+// the hash join. Output rows are [left..., right...], right NULL-padded for an
+// unmatched left row under JoinLeft (inner drops it).
+type AsofJoinIter struct {
+	left, right         RowIterator
+	leftKeys, rightKeys []KeyExtractor
+	spec                AsofSpec
+	kind                sql.JoinKind // JoinInner or JoinLeft
+	rightWidth          int
+
+	groups map[string][]asofEntry
+	built  bool
+	closed bool
+}
+
+// NewAsofJoinIter builds an ASOF join. leftKeys/rightKeys are the equality
+// conjuncts (may be empty: one global group); spec is the normalized
+// inequality; rightWidth NULL-pads unmatched left rows under JoinLeft.
+func NewAsofJoinIter(
+	left, right RowIterator,
+	leftKeys, rightKeys []KeyExtractor,
+	spec AsofSpec,
+	kind sql.JoinKind,
+	rightWidth int,
+) *AsofJoinIter {
+	return &AsofJoinIter{
+		left: left, right: right,
+		leftKeys: leftKeys, rightKeys: rightKeys,
+		spec: spec, kind: kind, rightWidth: rightWidth,
+	}
+}
+
+func (j *AsofJoinIter) build() error {
+	j.groups = map[string][]asofEntry{}
+	for {
+		r, ok, err := j.right.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		if anyNullKey(j.rightKeys, r) {
+			continue // NULL equality keys never match
+		}
+		k := j.spec.RightKey(r)
+		if k.IsNull() {
+			continue // a NULL ASOF key can never be nearest
+		}
+		gk := compositeKey(j.rightKeys, r)
+		j.groups[gk] = append(j.groups[gk], asofEntry{key: k, row: r})
+	}
+	for _, g := range j.groups {
+		sort.SliceStable(g, func(a, b int) bool { return Compare(g[a].key, g[b].key) < 0 })
+	}
+	j.built = true
+	return nil
+}
+
+// match returns the index of the matching entry in g for left ASOF key lv, or
+// -1. Entries are sorted ascending by key.
+func (j *AsofJoinIter) match(g []asofEntry, lv Value) int {
+	switch j.spec.Op {
+	case ">=": // greatest right key <= lv
+		i := sort.Search(len(g), func(i int) bool { return Compare(g[i].key, lv) > 0 })
+		return i - 1
+	case ">": // greatest right key < lv
+		i := sort.Search(len(g), func(i int) bool { return Compare(g[i].key, lv) >= 0 })
+		return i - 1
+	case "<=": // smallest right key >= lv
+		i := sort.Search(len(g), func(i int) bool { return Compare(g[i].key, lv) >= 0 })
+		if i == len(g) {
+			return -1
+		}
+		return i
+	case "<": // smallest right key > lv
+		i := sort.Search(len(g), func(i int) bool { return Compare(g[i].key, lv) > 0 })
+		if i == len(g) {
+			return -1
+		}
+		return i
+	}
+	return -1
+}
+
+func (j *AsofJoinIter) Next() (Row, bool, error) {
+	if !j.built {
+		if err := j.build(); err != nil {
+			return Row{}, false, err
+		}
+	}
+	for {
+		l, ok, err := j.left.Next()
+		if err != nil || !ok {
+			return Row{}, false, err
+		}
+		mi := -1
+		var g []asofEntry
+		if !anyNullKey(j.leftKeys, l) {
+			if lv := j.spec.LeftKey(l); !lv.IsNull() {
+				g = j.groups[compositeKey(j.leftKeys, l)]
+				mi = j.match(g, lv)
+			}
+		}
+		if mi < 0 {
+			if j.kind != sql.JoinLeft {
+				continue // inner: an unmatched left row is dropped
+			}
+			out := make([]Value, 0, len(l.Values)+j.rightWidth)
+			out = append(out, l.Values...)
+			for i := 0; i < j.rightWidth; i++ {
+				out = append(out, Null())
+			}
+			return Row{Values: out}, true, nil
+		}
+		r := g[mi].row
+		out := make([]Value, 0, len(l.Values)+len(r.Values))
+		out = append(out, l.Values...)
+		out = append(out, r.Values...)
+		return Row{Values: out}, true, nil
+	}
+}
+
+func (j *AsofJoinIter) Close() error {
+	if j.closed {
+		return nil
+	}
+	j.closed = true
+	err1 := j.left.Close()
+	err2 := j.right.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
 // ---- Aggregate --------------------------------------------------------------
 
 // AggSpec describes one aggregate output column: the function name, the
@@ -1475,6 +1631,8 @@ func computeWindowPartition(spec WindowSpec, idxs []int, rows []Row, eval Evalua
 		return computeWindowFirstLast(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
 	case "LOCF":
 		return computeLOCF(spec, idxs, rows, eval, result)
+	case "DELTA", "RATE":
+		return computeDeltaRate(spec, idxs, rows, eval, result, strings.ToUpper(spec.Func))
 	}
 	return fmt.Errorf("unknown window function %s", spec.Func)
 }
@@ -1761,6 +1919,83 @@ func computeLOCF(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result
 			carry = v
 		}
 		result[ri] = carry
+	}
+	return nil
+}
+
+// computeDeltaRate implements DELTA(x) — the difference from the previous
+// row's x in window order — and RATE(x, ts) — the per-second rate of increase
+// between the previous row and this one, with Prometheus-style counter-reset
+// handling: a drop in x is treated as a counter reset, so the increase is the
+// new value rather than a negative delta. The first row of each partition is
+// NULL, as is any pair with a NULL input or (for RATE) a non-positive time
+// step. ts may be a timestamp (rate per second) or a number (rate per unit).
+func computeDeltaRate(spec WindowSpec, idxs []int, rows []Row, eval Evaluator, result []Value, name string) error {
+	if len(spec.Args) == 0 {
+		return fmt.Errorf("%s requires an argument, e.g. %s(value)", name, name)
+	}
+	if name == "RATE" && len(spec.Args) < 2 {
+		return fmt.Errorf("RATE expects 2 args, e.g. RATE(counter, ts)")
+	}
+	// seconds converts an ordering value to a float axis position: timestamps
+	// to epoch seconds, numbers as-is.
+	seconds := func(v Value) (float64, bool) {
+		if t, ok := v.V.(time.Time); ok {
+			return float64(t.UnixNano()) / 1e9, true
+		}
+		return v.AsFloat()
+	}
+	for pos, ri := range idxs {
+		result[ri] = Null()
+		if pos == 0 {
+			continue
+		}
+		prev := idxs[pos-1]
+		cv, err := eval.Eval(spec.Args[0], rows[ri])
+		if err != nil {
+			return err
+		}
+		pv, err := eval.Eval(spec.Args[0], rows[prev])
+		if err != nil {
+			return err
+		}
+		if cv.IsNull() || pv.IsNull() {
+			continue
+		}
+		cur, ok1 := cv.AsFloat()
+		prv, ok2 := pv.AsFloat()
+		if !ok1 || !ok2 {
+			return fmt.Errorf("%s requires a numeric argument", name)
+		}
+		if name == "DELTA" {
+			result[ri] = FloatVal(cur - prv)
+			continue
+		}
+		ctv, err := eval.Eval(spec.Args[1], rows[ri])
+		if err != nil {
+			return err
+		}
+		ptv, err := eval.Eval(spec.Args[1], rows[prev])
+		if err != nil {
+			return err
+		}
+		if ctv.IsNull() || ptv.IsNull() {
+			continue
+		}
+		ct, ok1 := seconds(ctv)
+		pt, ok2 := seconds(ptv)
+		if !ok1 || !ok2 {
+			return fmt.Errorf("RATE requires a timestamp or numeric second argument")
+		}
+		dt := ct - pt
+		if dt <= 0 {
+			continue // duplicate or out-of-order timestamps: no meaningful rate
+		}
+		inc := cur - prv
+		if inc < 0 {
+			inc = cur // counter reset: assume the counter restarted from zero
+		}
+		result[ri] = FloatVal(inc / dt)
 	}
 	return nil
 }

@@ -121,10 +121,12 @@ A query moves through fixed stages, one package each:
    CORR/COVAR_*/REGR_* (paired via AggSpec.Arg2, `computeRegr`) also live here.
    Time-series helpers: FIRST/LAST(value, ord) are two-arg aggregates
    (`computeFirstLast` — value at min/max ord, e.g. latest reading per station;
-   also usable as window aggregates) and LOCF(x) is a window function carrying
+   also usable as window aggregates); LOCF(x) is a window function carrying
    the last non-NULL x forward — the gap-filling companion to a generate_series
-   LEFT JOIN (recipe in DIALECT.md). DATE_BIN's origin arg is optional (defaults
-   to the Unix epoch, time_bucket-style).
+   LEFT JOIN (recipe in DIALECT.md); DELTA(x) / RATE(counter, ts) are window
+   functions for consecutive-row difference and per-second rate (RATE treats a
+   counter drop as a reset: increase = new value). DATE_BIN's origin arg is
+   optional (defaults to the Unix epoch, time_bucket-style).
    Window + GROUP BY in one query is rejected for now.
    A non-correlated `WHERE/HAVING x IN (SELECT ...)` is handled differently:
    `resolveInSubqueries` executes the subquery at build time and folds its one
@@ -170,7 +172,13 @@ A query moves through fixed stages, one package each:
    build side, the right is streamed, and the unmatched side of an outer join is
    NULL-padded (a left row whose every keyed partner fails the residual still
    appears NULL-padded). `--explain` tags joins with `[N keys]`/`[residual]`/
-   `[nested loop]`.
+   `[nested loop]`. **ASOF [LEFT] JOIN** (`sql.Join.Asof`, parsed as a
+   non-reserved word via `startsAsofJoin` lookahead so identifiers named asof
+   keep working): each left row matches at most the single nearest right row per
+   the ON's one inequality, grouped by its equality conjuncts —
+   `splitAsofJoin` normalizes to `engine.AsofSpec` (no residuals allowed) and
+   `AsofJoinIter` materializes/groups/sorts the right side and binary-searches
+   per left row; explain tag `ASOF … [on >=, N group key(s)]`.
 4. **`internal/render`** — formats the final rows. `render.go` +
    `stream_test.go`; csv/json/ndjson/yaml/raw stream row-by-row (bounded
    memory), `table` buffers to compute column widths.
@@ -383,16 +391,27 @@ interfaces:
     also truncate). `--explain` annotates pushed scans, e.g.
     `Scan inv [pushdown: predicate, limit=3, order]`. There is no `ScanResponse`,
     so the engine cannot drop the redundant re-filter/re-sort — a future refinement.
-    **Aggregate pushdown** (opt-in, for sources that cannot return raw rows —
-    currently `honeycombc`): a connector implementing `connector.AggregatePusher`
+    **Aggregate pushdown** (opt-in — `honeycombc`, which cannot return raw rows,
+    and `sqlc`, as an optimization): a connector implementing
+    `connector.AggregatePusher`
     can compute a whole `GROUP BY`/aggregate query at the source. When a
     single-scan aggregate query's connector is a pusher, `buildSelect` calls
-    `buildPushedAggregate`, which extracts group-by→`AggregateRequest.GroupBy`,
+    `buildPushedAggregate`, which extracts group-by→`AggregateRequest.GroupBy`
+    (`[]AggregateGroup` — a plain column, or a **`DATE_BIN(stride, ts)` time
+    bucket** via `bucketGroupExpr`: 2-arg form only, constant stride; the bucket
+    expression's occurrences in SELECT/HAVING/ORDER BY are rewritten to its
+    output column, and the request declines if any leftover expression still
+    references a raw column),
     aggregates→`AggregateOp`s (via `pushAggExtractor`, the pushdown analogue of
     `aggExtractor` — plain-column args only, `COUNT(*)`/`COUNT(DISTINCT)`
     supported, scalar wrappers like `ROUND(AVG(x),2)` left for the engine's
     projection), and the WHERE→`AggregateRequest.Predicate`, then calls
-    `PushAggregate(ctx, ds, req)`. On `ok=true` the `Scan` gains `.Aggregate` (its
+    `PushAggregate(ctx, ds, req)`. `sqlc`'s implementation (`buildAggQuery`, a
+    pure renderer like `buildScanQuery`) pushes COUNT/SUM/AVG/MIN/MAX + plain or
+    bucketed group-bys + an *exactly*-translatable WHERE (a superset predicate
+    like sqlite/mysql case-insensitive LIKE declines — no raw rows remain to
+    refine); buckets render as epoch-floor arithmetic per dialect
+    (`dialect.bucketExpr`; SQL Server declines, DATEDIFF int-overflow risk). On `ok=true` the `Scan` gains `.Aggregate` (its
     schema becomes the aggregated rows), and the engine emits **no** `Aggregate`
     and **no** WHERE-`Filter` for that scan — HAVING (`Filter`), ORDER BY (`Sort`)
     and the projection run above it over the aggregated rows. This is

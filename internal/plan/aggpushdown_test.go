@@ -58,7 +58,7 @@ func (c *aggPusherConn) PushAggregate(ctx context.Context, ds connector.Dataset,
 	}
 	cols := make([]engine.Column, 0, len(agg.GroupBy)+len(agg.Aggregates))
 	for _, g := range agg.GroupBy {
-		cols = append(cols, engine.Column{Name: g, Type: engine.TypeString, Nullable: true})
+		cols = append(cols, engine.Column{Name: g.Alias, Type: engine.TypeString, Nullable: true})
 	}
 	for _, op := range agg.Aggregates {
 		cols = append(cols, engine.Column{Name: op.Alias, Type: engine.TypeInt, Nullable: true})
@@ -108,7 +108,7 @@ func TestAggregatePushedToConnector(t *testing.T) {
 	if c.lastReq == nil {
 		t.Fatal("PushAggregate was not called")
 	}
-	if len(c.lastReq.GroupBy) != 1 || c.lastReq.GroupBy[0] != "svc" {
+	if len(c.lastReq.GroupBy) != 1 || c.lastReq.GroupBy[0].Column != "svc" || c.lastReq.GroupBy[0].Stride != 0 {
 		t.Errorf("GroupBy = %v, want [svc]", c.lastReq.GroupBy)
 	}
 	if len(c.lastReq.Aggregates) != 1 || c.lastReq.Aggregates[0].Func != "COUNT" {

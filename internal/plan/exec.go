@@ -270,6 +270,10 @@ func execJoin(ctx context.Context, node *Join, funcs *engine.FuncRegistry, stric
 	}
 	leftWidth := len(leftSchema.Columns)
 	rightWidth := len(rightSchema.Columns)
+	if node.Asof != nil {
+		it := engine.NewAsofJoinIter(left, right, node.LeftKeys, node.RightKeys, *node.Asof, node.Kind, rightWidth)
+		return it, node.Schema, nil
+	}
 	// The residual predicate (non-equi ON remainder) resolves columns over the
 	// combined [left..., right...] schema via the join's alias ranges.
 	var residualEval engine.Evaluator

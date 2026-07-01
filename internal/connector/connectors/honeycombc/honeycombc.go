@@ -394,11 +394,16 @@ func (c *Connector) PushAggregate(ctx context.Context, ds connector.Dataset, agg
 
 	cols := make([]engine.Column, 0, len(agg.GroupBy)+len(agg.Aggregates))
 	for _, g := range agg.GroupBy {
-		t, ok := colTypes[g]
+		if g.Stride != 0 {
+			// Honeycomb breakdowns are plain columns; its time granularity is a
+			// query-level setting, not a group-by expression.
+			return engine.Schema{}, false, fmt.Errorf("honeycomb: time-bucket GROUP BY (DATE_BIN) is not supported; group by a plain column")
+		}
+		t, ok := colTypes[g.Column]
 		if !ok {
 			t = engine.TypeAny
 		}
-		cols = append(cols, engine.Column{Name: g, Type: t, Nullable: true})
+		cols = append(cols, engine.Column{Name: g.Alias, Type: t, Nullable: true})
 	}
 	for _, op := range agg.Aggregates {
 		cols = append(cols, engine.Column{Name: op.Alias, Type: aggResultType(op, colTypes), Nullable: true})
@@ -510,7 +515,7 @@ func (c *Connector) scanEvents(ctx context.Context, req connector.ScanRequest) (
 	}
 	spec := querySpec{
 		Calculations:      calcs,
-		Breakdowns:        req.Aggregate.GroupBy,
+		Breakdowns:        connector.GroupColumns(req.Aggregate.GroupBy),
 		Filters:           filters,
 		FilterCombination: comb,
 		Limit:             eventsLimit(req.Limit),
@@ -568,7 +573,7 @@ func (c *Connector) scanEvents(ctx context.Context, req connector.ScanRequest) (
 	if !done {
 		return nil, fmt.Errorf("honeycomb: query_result %s did not complete after %d polls", res.ID, maxPolls)
 	}
-	return rowsFromResults(res.Results, req.Aggregate.GroupBy, calcs), nil
+	return rowsFromResults(res.Results, connector.GroupColumns(req.Aggregate.GroupBy), calcs), nil
 }
 
 type queryResult struct {

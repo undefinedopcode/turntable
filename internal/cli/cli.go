@@ -758,6 +758,19 @@ func formatPlan(n plan.Node, depth int) string {
 	case *plan.Scan:
 		line := indent + "Scan " + node.Source.Name
 		var pd []string
+		if node.Aggregate != nil {
+			buckets := 0
+			for _, g := range node.Aggregate.GroupBy {
+				if g.Stride != 0 {
+					buckets++
+				}
+			}
+			tag := "aggregate"
+			if buckets > 0 {
+				tag = "aggregate+bucket"
+			}
+			pd = append(pd, tag)
+		}
 		if node.Predicate != nil {
 			pd = append(pd, "predicate")
 		}
@@ -834,8 +847,16 @@ func formatPlan(n plan.Node, depth int) string {
 		if label == "" {
 			label = "Join"
 		}
+		if node.Asof != nil {
+			label = "ASOF " + strings.ToLower(label[:1]) + label[1:]
+		}
 		var notes []string
 		switch {
+		case node.Asof != nil:
+			notes = append(notes, "on "+node.Asof.Op)
+			if n := len(node.LeftKeys); n > 0 {
+				notes = append(notes, fmt.Sprintf("%d group key(s)", n))
+			}
 		case len(node.LeftKeys) == 0:
 			notes = append(notes, "nested loop")
 		case len(node.LeftKeys) > 1:

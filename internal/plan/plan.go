@@ -10,6 +10,7 @@ package plan
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -198,8 +199,12 @@ type Join struct {
 	LeftKeys  []engine.KeyExtractor
 	RightKeys []engine.KeyExtractor
 	Residual  sql.Expr // non-equi ON remainder, applied to each candidate pair (nil if none)
-	Schema    engine.Schema
-	Aliases   []engine.AliasRange // all contributing aliases in the combined schema
+	// Asof, when set, makes this an ASOF join: LeftKeys/RightKeys group, and
+	// each left row matches at most the single nearest right row per the spec
+	// (no Residual — splitAsofJoin rejects other conditions).
+	Asof    *engine.AsofSpec
+	Schema  engine.Schema
+	Aliases []engine.AliasRange // all contributing aliases in the combined schema
 }
 
 // Aggregate groups rows.
@@ -839,7 +844,16 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
-		lks, rks, residual, err := bc.splitJoin(j.On, schema, aliases, rightSchema, rightAlias)
+		var (
+			lks, rks []engine.KeyExtractor
+			residual sql.Expr
+			asof     *engine.AsofSpec
+		)
+		if j.Asof {
+			lks, rks, asof, err = bc.splitAsofJoin(j.On, schema, aliases, rightSchema, rightAlias)
+		} else {
+			lks, rks, residual, err = bc.splitJoin(j.On, schema, aliases, rightSchema, rightAlias)
+		}
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
@@ -849,7 +863,8 @@ func (bc *buildCtx) buildFrom(stmt *sql.SelectStmt) (Node, engine.Schema, error)
 		})
 		leftNode = &Join{
 			Kind: j.Kind, Left: leftNode, Right: rightNode,
-			LeftKeys: lks, RightKeys: rks, Residual: residual, Schema: combined,
+			LeftKeys: lks, RightKeys: rks, Residual: residual, Asof: asof,
+			Schema:  combined,
 			Aliases: aliases,
 		}
 		schema = combined
@@ -1067,6 +1082,135 @@ func (bc *buildCtx) splitJoin(on sql.Expr, leftSchema engine.Schema, leftAliases
 		return nil, nil, nil, fmt.Errorf("JOIN ON has no usable condition")
 	}
 	return leftKeys, rightKeys, andConjuncts(resid), nil
+}
+
+// bucketGroupExpr recognizes a pushable time-bucket GROUP BY expression:
+// DATE_BIN(stride, col) — a 2-arg call whose stride is a constant interval
+// (INTERVAL literal or interval string) and whose second arg is a plain
+// column. The 3-arg (explicit origin) form and DATE_TRUNC's calendar units
+// (months vary in length; days depend on the zone) are left to the engine.
+func bucketGroupExpr(e sql.Expr, alias string) (col string, stride time.Duration, ok bool) {
+	fc, isFc := e.(*sql.FuncCall)
+	if !isFc || !strings.EqualFold(fc.Name, "DATE_BIN") || len(fc.Args) != 2 || fc.Over != nil {
+		return "", 0, false
+	}
+	var spec string
+	switch a := fc.Args[0].(type) {
+	case *sql.IntervalLit:
+		spec = a.Spec
+	case *sql.LitString:
+		spec = a.V
+	default:
+		return "", 0, false
+	}
+	d, err := engine.ParseInterval(spec)
+	if err != nil || d <= 0 {
+		return "", 0, false
+	}
+	c, k := pushColumnName(fc.Args[1], alias)
+	if !k {
+		return "", 0, false
+	}
+	return c, d, true
+}
+
+// exprsEqual reports structural equality of two expressions (same shape, same
+// literals/names). Used to match a GROUP BY bucket expression against its
+// occurrences in SELECT/HAVING/ORDER BY.
+func exprsEqual(a, b sql.Expr) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+// exprUsesOnly reports whether every column reference in e (nil = trivially
+// true) resolves to one of the allowed (lower-cased) names.
+func exprUsesOnly(e sql.Expr, allowed map[string]bool) bool {
+	if e == nil {
+		return true
+	}
+	ok := true
+	mapExpr(e, func(sub sql.Expr) sql.Expr {
+		if cr, is := sub.(*sql.ColRef); is {
+			if !allowed[strings.ToLower(cr.Name)] {
+				ok = false
+			}
+		}
+		return nil
+	})
+	return ok
+}
+
+// splitAsofJoin analyzes an ASOF JOIN's ON expression: equality conjuncts
+// become group keys (as in splitJoin) and exactly one inequality of the form
+// `leftcol >= rightcol` (any of >=, >, <=, <; either operand order) becomes the
+// ASOF key pair. Anything else is an error — ASOF picks a single nearest
+// partner per left row, so a residual predicate has no defined semantics here.
+func (bc *buildCtx) splitAsofJoin(on sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (leftKeys, rightKeys []engine.KeyExtractor, spec *engine.AsofSpec, err error) {
+	keyAt := func(idx int) engine.KeyExtractor {
+		return func(row engine.Row) engine.Value {
+			if idx >= 0 && idx < len(row.Values) {
+				return row.Values[idx]
+			}
+			return engine.Null()
+		}
+	}
+	for _, c := range splitConjuncts(on) {
+		if lIdx, rIdx, ok := bc.equiKey(c, leftSchema, leftAliases, rightSchema, rightAlias); ok {
+			leftKeys = append(leftKeys, keyAt(lIdx))
+			rightKeys = append(rightKeys, keyAt(rIdx))
+			continue
+		}
+		if lIdx, rIdx, op, ok := bc.asofKey(c, leftSchema, leftAliases, rightSchema, rightAlias); ok {
+			if spec != nil {
+				return nil, nil, nil, fmt.Errorf("ASOF JOIN ON must have exactly one inequality (found several)")
+			}
+			spec = &engine.AsofSpec{LeftKey: keyAt(lIdx), RightKey: keyAt(rIdx), Op: op}
+			continue
+		}
+		return nil, nil, nil, fmt.Errorf("ASOF JOIN ON supports column equalities plus one column inequality (e.g. l.ts >= r.ts)")
+	}
+	if spec == nil {
+		return nil, nil, nil, fmt.Errorf("ASOF JOIN ON needs an inequality condition, e.g. l.ts >= r.ts")
+	}
+	return leftKeys, rightKeys, spec, nil
+}
+
+// asofKey reports whether conjunct c is `leftcol OP rightcol` with OP an
+// inequality and the columns on opposite join sides; the returned op is
+// normalized to `left OP right` (flipped when the operands were reversed).
+func (bc *buildCtx) asofKey(c sql.Expr, leftSchema engine.Schema, leftAliases []engine.AliasRange, rightSchema engine.Schema, rightAlias string) (int, int, string, bool) {
+	bin, ok := c.(*sql.BinaryOp)
+	if !ok {
+		return 0, 0, "", false
+	}
+	switch bin.Op {
+	case ">", ">=", "<", "<=":
+	default:
+		return 0, 0, "", false
+	}
+	ai, aSide := bc.colSide(bin.Left, leftSchema, leftAliases, rightSchema, rightAlias)
+	bi, bSide := bc.colSide(bin.Right, leftSchema, leftAliases, rightSchema, rightAlias)
+	switch {
+	case aSide == "left" && bSide == "right":
+		return ai, bi, bin.Op, true
+	case aSide == "right" && bSide == "left":
+		return bi, ai, flipCompareOp(bin.Op), true
+	}
+	return 0, 0, "", false
+}
+
+// flipCompareOp mirrors an inequality for swapped operands (a > b == b < a).
+func flipCompareOp(op string) string {
+	switch op {
+	case ">":
+		return "<"
+	case "<":
+		return ">"
+	case ">=":
+		return "<="
+	case "<=":
+		return ">="
+	}
+	return op
 }
 
 // equiKey reports whether conjunct c is `leftcol = rightcol` with the columns on
@@ -1349,14 +1493,53 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 	if !ok {
 		return nil, engine.Schema{}, false, nil
 	}
-	// Breakdowns: every GROUP BY term must be a plain column.
-	var groupBy []string
-	for _, g := range stmt.GroupBy {
-		col, ok := pushColumnName(g, scan.Alias)
+	// Group-by terms: a plain column, or a DATE_BIN time bucket. A bucket term
+	// is named by a structurally-equal SELECT item's alias (else a synthetic
+	// $grpN), and every occurrence of the expression in SELECT/HAVING/ORDER BY
+	// is later rewritten to reference that output column — the raw time column
+	// no longer exists in the aggregated rows.
+	var groupBy []connector.AggregateGroup
+	type bucketRewrite struct {
+		from sql.Expr
+		to   *sql.ColRef
+	}
+	var bucketRewrites []bucketRewrite
+	for i, g := range stmt.GroupBy {
+		if col, ok := pushColumnName(g, scan.Alias); ok {
+			groupBy = append(groupBy, connector.AggregateGroup{Column: col, Alias: col})
+			continue
+		}
+		col, stride, ok := bucketGroupExpr(g, scan.Alias)
 		if !ok {
 			return nil, engine.Schema{}, false, nil
 		}
-		groupBy = append(groupBy, col)
+		alias := ""
+		for _, it := range stmt.Items.Items {
+			if it.As != "" && exprsEqual(it.Expr, g) {
+				alias = it.As
+				break
+			}
+		}
+		if alias == "" {
+			alias = fmt.Sprintf("$grp%d", i)
+		}
+		groupBy = append(groupBy, connector.AggregateGroup{Column: col, Stride: stride, Alias: alias})
+		bucketRewrites = append(bucketRewrites, bucketRewrite{from: g, to: &sql.ColRef{Name: alias}})
+	}
+	// rewriteBuckets replaces each bucket group expression (matched
+	// structurally) with a reference to its output column.
+	rewriteBuckets := func(e sql.Expr) sql.Expr {
+		if e == nil {
+			return nil
+		}
+		return mapExpr(e, func(sub sql.Expr) sql.Expr {
+			for _, br := range bucketRewrites {
+				if exprsEqual(sub, br.from) {
+					return &sql.ColRef{Name: br.to.Name}
+				}
+			}
+			return nil
+		})
 	}
 	// Extract aggregates from SELECT / HAVING / ORDER BY into calculations,
 	// rewriting each aggregate call to a reference to its output column. Compute
@@ -1375,21 +1558,46 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 		if fc, ok := it.Expr.(*sql.FuncCall); ok && isTopLevelAgg(it.Expr) && it.As != "" {
 			it.Expr = ext.register(fc, it.As)
 		} else {
-			it.Expr = ext.rewrite(it.Expr)
+			it.Expr = rewriteBuckets(ext.rewrite(it.Expr))
 		}
 		newItems[i] = it
 	}
 	newHaving := stmt.Having
 	if newHaving != nil {
-		newHaving = ext.rewrite(newHaving)
+		newHaving = rewriteBuckets(ext.rewrite(newHaving))
 	}
 	newOrder := make([]sql.OrderTerm, len(stmt.OrderBy))
 	for i, ot := range stmt.OrderBy {
-		ot.Expr = ext.rewrite(ot.Expr)
+		ot.Expr = rewriteBuckets(ext.rewrite(ot.Expr))
 		newOrder[i] = ot
 	}
 	if !ext.ok {
 		return nil, engine.Schema{}, false, nil
+	}
+	// With bucket group-bys the raw columns are gone from the aggregated rows.
+	// If any rewritten expression still references a column that won't exist
+	// (e.g. the bucket call was spelled differently in SELECT vs GROUP BY),
+	// decline — committing would be a hard "unknown column" error, while the
+	// engine's own aggregation handles it fine.
+	if len(bucketRewrites) > 0 {
+		allowed := map[string]bool{}
+		for _, g := range groupBy {
+			allowed[strings.ToLower(g.Alias)] = true
+		}
+		for _, op := range ext.ops {
+			allowed[strings.ToLower(op.Alias)] = true
+		}
+		ok := true
+		for _, it := range newItems {
+			ok = ok && exprUsesOnly(it.Expr, allowed)
+		}
+		ok = ok && exprUsesOnly(newHaving, allowed)
+		for _, ot := range newOrder {
+			ok = ok && exprUsesOnly(ot.Expr, allowed)
+		}
+		if !ok {
+			return nil, engine.Schema{}, false, nil
+		}
 	}
 
 	req := connector.AggregateRequest{GroupBy: groupBy, Aggregates: ext.ops, Predicate: stmt.Where}
@@ -2333,7 +2541,7 @@ func windowType(fc *sql.FuncCall, in engine.Schema) engine.Type {
 	switch strings.ToUpper(fc.Name) {
 	case "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE":
 		return engine.TypeInt
-	case "PERCENT_RANK", "CUME_DIST":
+	case "PERCENT_RANK", "CUME_DIST", "DELTA", "RATE":
 		return engine.TypeFloat
 	case "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "LOCF":
 		return firstArgType(fc, in)

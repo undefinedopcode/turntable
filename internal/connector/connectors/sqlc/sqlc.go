@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
@@ -172,13 +173,169 @@ func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sche
 	return engine.Schema{Columns: cols}, nil
 }
 
+// PushAggregate implements connector.AggregatePusher: a GROUP BY/aggregate
+// query over one table is computed in the database when every part is
+// expressible in the target dialect — plain-column or DATE_BIN-bucket group-by
+// terms, the standard aggregate ops, and a WHERE that translates *exactly*.
+// (A superset predicate like the MySQL/SQLite case-insensitive LIKE is fine
+// for a raw scan, where the engine re-filters — but after aggregation there
+// are no raw rows left to refine, so anything inexact declines.) Declining
+// (ok=false) falls back to the engine aggregating the connector's raw rows,
+// which is always correct; pushing is an optimization only.
+func (Connector) PushAggregate(ctx context.Context, ds connector.Dataset, agg connector.AggregateRequest) (engine.Schema, bool, error) {
+	db, table, dial, err := openAndTable(ds)
+	if err != nil {
+		return engine.Schema{}, false, err
+	}
+	defer db.Close()
+	base, err := discoverSchema(ctx, db, table, dial)
+	if err != nil {
+		return engine.Schema{}, false, err
+	}
+	schema, ok := aggregateSchema(agg, base)
+	if !ok {
+		return engine.Schema{}, false, nil
+	}
+	if _, ok := buildAggQuery(agg, table, dial); !ok {
+		return engine.Schema{}, false, nil
+	}
+	return schema, true, nil
+}
+
+// aggregateSchema types the aggregated rows (group terms then ops, in request
+// order), or ok=false when an op or bucket is not supported: buckets must be a
+// whole positive number of seconds over an existing column, ops must be
+// COUNT/SUM/AVG/MIN/MAX.
+func aggregateSchema(agg connector.AggregateRequest, base engine.Schema) (engine.Schema, bool) {
+	colType := func(name string) (engine.Type, bool) {
+		if i := base.Index(name); i >= 0 {
+			return base.Columns[i].Type, true
+		}
+		return engine.TypeAny, false
+	}
+	cols := make([]engine.Column, 0, len(agg.GroupBy)+len(agg.Aggregates))
+	for _, g := range agg.GroupBy {
+		t, exists := colType(g.Column)
+		if !exists {
+			return engine.Schema{}, false
+		}
+		if g.Stride != 0 {
+			if g.Stride < time.Second || g.Stride%time.Second != 0 {
+				return engine.Schema{}, false
+			}
+			t = engine.TypeTime
+		}
+		cols = append(cols, engine.Column{Name: g.Alias, Type: t, Nullable: true})
+	}
+	for _, op := range agg.Aggregates {
+		var t engine.Type
+		switch strings.ToUpper(op.Func) {
+		case "COUNT":
+			t = engine.TypeInt
+		case "SUM", "AVG":
+			if op.Column == "" {
+				return engine.Schema{}, false
+			}
+			t = engine.TypeFloat
+		case "MIN", "MAX":
+			ct, exists := colType(op.Column)
+			if !exists {
+				return engine.Schema{}, false
+			}
+			t = ct
+		default:
+			return engine.Schema{}, false
+		}
+		if op.Column != "" {
+			if _, exists := colType(op.Column); !exists {
+				return engine.Schema{}, false
+			}
+		}
+		cols = append(cols, engine.Column{Name: op.Alias, Type: t, Nullable: true})
+	}
+	return engine.Schema{Columns: cols}, true
+}
+
+// buildAggQuery renders the aggregated SELECT for a pushed AggregateRequest.
+// Like buildScanQuery it is pure (no DB) so the per-dialect SQL — bucket
+// arithmetic included — is unit-testable. ok=false when the dialect cannot
+// express a part (bucket SQL, or a predicate that doesn't translate exactly).
+func buildAggQuery(agg connector.AggregateRequest, table tableRef, dial dialect) (string, bool) {
+	var sel, group []string
+	for _, g := range agg.GroupBy {
+		expr := dial.quoteIdent(g.Column)
+		if g.Stride != 0 {
+			be, ok := dial.bucketExpr(expr, int64(g.Stride/time.Second))
+			if !ok {
+				return "", false
+			}
+			expr = be
+		}
+		sel = append(sel, expr+" AS "+dial.quoteIdent(g.Alias))
+		group = append(group, expr)
+	}
+	for _, op := range agg.Aggregates {
+		arg := "*"
+		if op.Column != "" {
+			arg = dial.quoteIdent(op.Column)
+		}
+		if op.Distinct {
+			arg = "DISTINCT " + arg
+		}
+		sel = append(sel, fmt.Sprintf("%s(%s) AS %s", strings.ToUpper(op.Func), arg, dial.quoteIdent(op.Alias)))
+	}
+	if len(sel) == 0 {
+		return "", false
+	}
+
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(strings.Join(sel, ", "))
+	fmt.Fprintf(&b, " FROM %s", table.quoted(dial))
+	if agg.Predicate != nil {
+		where, ok := translateExpr(agg.Predicate, dial)
+		if !ok || !predicateExact(agg.Predicate, dial) {
+			return "", false
+		}
+		fmt.Fprintf(&b, " WHERE %s", where)
+	}
+	if len(group) > 0 {
+		b.WriteString(" GROUP BY ")
+		b.WriteString(strings.Join(group, ", "))
+	}
+	return b.String(), true
+}
+
 // Scan executes a SELECT against the table, pushing down whatever the request
 // asks for. Unpushable predicates are not pushed; the engine applies them in
-// memory via a Filter.
+// memory via a Filter. A req.Aggregate (accepted earlier by PushAggregate)
+// switches the scan to the aggregated query: the rows returned are the
+// grouped/aggregated result.
 func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.RowIterator, error) {
 	db, table, dial, err := openAndTable(req.Dataset)
 	if err != nil {
 		return nil, err
+	}
+
+	if req.Aggregate != nil {
+		base, err := discoverSchema(ctx, db, table, dial)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		schema, sok := aggregateSchema(*req.Aggregate, base)
+		query, qok := buildAggQuery(*req.Aggregate, table, dial)
+		if !sok || !qok {
+			// PushAggregate accepted this request, so it must render.
+			db.Close()
+			return nil, fmt.Errorf("sql: pushed aggregate no longer renderable (schema changed?)")
+		}
+		rows, err := db.QueryContext(ctx, query)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("aggregate query: %w", err)
+		}
+		return &rowIter{db: db, rows: rows, schema: schema, columns: schemaColumnNames(schema)}, nil
 	}
 
 	query := buildScanQuery(req, table, dial)
@@ -555,6 +712,8 @@ func scanValue(raw any, t engine.Type) engine.Value {
 		return engine.IntVal(int64(v))
 	case bool:
 		return engine.BoolVal(v)
+	case time.Time:
+		return engine.TimeVal(v)
 	case string:
 		if t == engine.TypeInt {
 			// Try to parse if the column was discovered as int but driver returned string.
@@ -766,6 +925,24 @@ func (d dialect) placeholder(n int) string {
 // (SQL Server) rather than a trailing LIMIT n.
 func (d dialect) usesTop() bool {
 	return d.driver == "sqlserver" || d.driver == "mssql"
+}
+
+// bucketExpr renders the SQL computing an epoch-aligned time bucket of `sec`
+// seconds over the (already-quoted) column expression — the engine's 2-arg
+// DATE_BIN. All three use the same floor(epoch/sec)*sec arithmetic, so the
+// bucket boundaries agree with the engine's exactly. SQL Server declines:
+// DATEDIFF(second, epoch, ts) overflows int for timestamps ±68 years out, so
+// the engine buckets its rows instead (correct, just not pushed).
+func (d dialect) bucketExpr(col string, sec int64) (string, bool) {
+	switch d.driver {
+	case "sqlite":
+		return fmt.Sprintf("datetime((CAST(strftime('%%s', %s) AS INTEGER) / %d) * %d, 'unixepoch')", col, sec, sec), true
+	case "postgres", "pgx":
+		return fmt.Sprintf("to_timestamp(floor(extract(epoch from %s) / %d) * %d)", col, sec, sec), true
+	case "mysql":
+		return fmt.Sprintf("from_unixtime(floor(unix_timestamp(%s) / %d) * %d)", col, sec, sec), true
+	}
+	return "", false
 }
 
 // pushesLike reports whether LIKE/ILIKE predicates may be pushed to the server.

@@ -48,6 +48,28 @@ func (p *Parser) op(s string) bool {
 	return t.Kind == TKOperator && t.Value == s
 }
 
+// startsAsofJoin reports whether the cursor sits at the head of an ASOF join:
+// the (deliberately non-reserved) word ASOF followed by JOIN/INNER/LEFT. The
+// lookahead lets the implicit-alias parser leave it alone, so a table or
+// column named "asof" still works (use AS for a table *aliased* asof before an
+// ASOF join).
+func (p *Parser) startsAsofJoin() bool {
+	if !p.word("ASOF") {
+		return false
+	}
+	n := p.peek()
+	if n.Kind != TKKeyword {
+		return false
+	}
+	// RIGHT/FULL are matched too so `ASOF RIGHT JOIN` reaches parseJoin's
+	// friendly rejection instead of mis-parsing ASOF as an alias.
+	switch strings.ToUpper(n.Value) {
+	case "JOIN", "INNER", "LEFT", "RIGHT", "FULL":
+		return true
+	}
+	return false
+}
+
 // word matches a bare word whether it lexed as a keyword or an identifier —
 // used for the non-reserved noise words of the window-frame grammar (ROWS,
 // PRECEDING, UNBOUNDED, …) so they don't have to be reserved.
@@ -410,7 +432,7 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 	}
 
 	// JOINs
-	for p.kw("INNER") || p.kw("LEFT") || p.kw("RIGHT") || p.kw("FULL") || p.kw("JOIN") {
+	for p.kw("INNER") || p.kw("LEFT") || p.kw("RIGHT") || p.kw("FULL") || p.kw("JOIN") || p.startsAsofJoin() {
 		j, err := p.parseJoin()
 		if err != nil {
 			return nil, err
@@ -584,8 +606,8 @@ func (p *Parser) parseTableRef() (TableRef, error) {
 			return tr, p.errf("expected alias after AS")
 		}
 		tr.Alias = a.Value
-	} else if p.cur().Kind == TKIdent {
-		// implicit alias
+	} else if p.cur().Kind == TKIdent && !p.startsAsofJoin() {
+		// implicit alias (but not the ASOF of an ASOF JOIN — see startsAsofJoin)
 		tr.Alias = p.advance().Value
 	}
 	// Optional column-rename list: alias(c1, c2, …). Requires a table alias.
@@ -691,6 +713,12 @@ func urlScheme(url string) string {
 
 func (p *Parser) parseJoin() (Join, error) {
 	j := Join{Kind: JoinInner}
+	// ASOF is matched as a non-reserved word, only when it heads a join (so
+	// columns or tables named "asof" still parse — see startsAsofJoin).
+	if p.startsAsofJoin() {
+		j.Asof = true
+		p.advance()
+	}
 	switch {
 	case p.kw("INNER"):
 		p.advance()
@@ -703,6 +731,9 @@ func (p *Parser) parseJoin() (Join, error) {
 	case p.kw("FULL"):
 		j.Kind = JoinFull
 		p.advance()
+	}
+	if j.Asof && j.Kind != JoinInner && j.Kind != JoinLeft {
+		return j, p.errf("ASOF supports only inner and LEFT joins")
 	}
 	// An optional OUTER keyword (LEFT/RIGHT/FULL OUTER JOIN) is accepted noise.
 	if p.kw("OUTER") {

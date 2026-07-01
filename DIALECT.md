@@ -63,6 +63,32 @@ b.v <= a.hi`) runs as a nested loop — correct, but `O(left × right)`; prefer 
 least one equi-key where possible. `--explain` tags the join with `[N keys]`,
 `[residual]`, and/or `[nested loop]`.
 
+### ASOF joins
+
+`ASOF JOIN` / `ASOF LEFT JOIN` match each left row to **at most one** right row:
+the *nearest* per the `ON` inequality, among rows agreeing on the equality
+conditions. The canonical time-series use is attaching the most recent reading,
+calibration, or price at or before each event:
+
+```sql
+SELECT e.ts, e.event, r.flow
+FROM events e
+ASOF JOIN readings r
+  ON e.ts >= r.ts AND e.station = r.station
+```
+
+For each event this picks the single reading with the **greatest** `r.ts <=
+e.ts` for that station — one sorted lookup per left row instead of the
+`O(left × right)` nested loop the plain inequality join would need.
+
+The `ON` clause must contain exactly one column inequality (`>=`, `>`, `<=`,
+`<`, either operand order — `>=`/`>` match backward in the right table,
+`<=`/`<` forward) plus any number of column equalities (the grouping keys);
+other conditions are rejected. `NULL` keys never match. An unmatched left row
+is dropped by the inner form and NULL-padded by `ASOF LEFT JOIN`; `RIGHT`/
+`FULL` are not supported. `--explain` tags the join `ASOF … [on >=, N group
+key(s)]`.
+
 ### Table functions (`generate_series`)
 
 `FROM generate_series(start, stop[, step])` produces a one-column relation
@@ -487,6 +513,8 @@ Supported functions:
 | `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` `(expr)` | aggregate over the window |
 | `FIRST(value, ord)` / `LAST(value, ord)` | the aggregate, over the window — e.g. `LAST(reading, ts) OVER (PARTITION BY station)` attaches each station's latest reading to every row |
 | `LOCF(expr)` | last observation carried forward: `expr`, or when NULL the most recent non-NULL `expr` earlier in the window order (leading NULLs stay NULL) — see gap-filling below |
+| `DELTA(expr)` | `expr` minus the previous row's `expr` in window order (NULL on the first row / over a NULL) |
+| `RATE(counter, ts)` | per-second rate of increase between the previous row and this one, with counter-reset handling: a drop is treated as a restart from zero (the increase is the new value, not a negative delta). `ts` may be a timestamp (per second) or numeric (per unit); NULL for the first row or a non-positive time step |
 
 **Frames** narrow which rows an aggregate covers, by physical row offset:
 `ROWS BETWEEN <start> AND <end>`, where each bound is `UNBOUNDED PRECEDING`,
@@ -569,6 +597,17 @@ unsupported pieces (e.g. `LOWER(name) = 'x'`) and all `ORDER BY` run in the
 engine. Azure Tables translates predicates to an OData `$filter`. Run
 `turntable --explain '<query>'` to see what was pushed
 (`Scan inv [pushdown: predicate, limit=3]`).
+
+A single-table **`GROUP BY`/aggregate** query can be computed entirely at the
+source when the connector supports it. SQL databases (SQLite, Postgres, MySQL)
+push plain-column group-bys, **`DATE_BIN(stride, ts)` time buckets** (rendered
+as epoch-floor arithmetic, so bucket boundaries match the engine exactly), the
+standard `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` ops, and the `WHERE` — so a
+time-series rollup over a large table ships back only the buckets, not the raw
+rows. Anything not expressible (other aggregates, `DATE_TRUNC`, expression
+arguments, an inexactly-translatable predicate, SQL Server buckets) quietly
+falls back to engine aggregation over the raw rows. `--explain` shows
+`Scan readings [pushdown: aggregate+bucket, …]` when it applied.
 
 ---
 

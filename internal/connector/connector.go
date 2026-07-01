@@ -7,6 +7,7 @@ package connector
 
 import (
 	"context"
+	"time"
 
 	"github.com/april/turntable/internal/engine"
 	"github.com/april/turntable/internal/sql"
@@ -69,9 +70,30 @@ type ScanRequest struct {
 // exactly, because the engine drops its own Aggregate and WHERE-Filter nodes for
 // that scan (there are no raw rows left to re-aggregate or re-filter).
 type AggregateRequest struct {
-	GroupBy    []string      // group-by (breakdown) column names; all plain columns
-	Aggregates []AggregateOp // the aggregate calculations to compute
-	Predicate  Expr          // the WHERE to apply natively (nil = none)
+	GroupBy    []AggregateGroup // group-by terms (plain columns or time buckets)
+	Aggregates []AggregateOp    // the aggregate calculations to compute
+	Predicate  Expr             // the WHERE to apply natively (nil = none)
+}
+
+// AggregateGroup is one GROUP BY term of a pushed aggregation: a plain column
+// (Stride zero), or a fixed-stride time bucket over Column — the engine's
+// 2-arg DATE_BIN(stride, col), i.e. epoch-aligned. Alias names the term's
+// output column in the aggregated schema (for a plain column it equals Column).
+// A connector that cannot compute a bucket must decline the request.
+type AggregateGroup struct {
+	Column string
+	Stride time.Duration
+	Alias  string
+}
+
+// GroupColumns returns just the column names of a group-by list — a
+// convenience for connectors that only accept plain columns.
+func GroupColumns(gb []AggregateGroup) []string {
+	out := make([]string, len(gb))
+	for i, g := range gb {
+		out[i] = g.Column
+	}
+	return out
 }
 
 // AggregateOp is one aggregate calculation in an AggregateRequest.

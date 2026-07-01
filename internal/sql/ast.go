@@ -148,9 +148,12 @@ type TableRef struct {
 	ColAliases []string // optional column-rename list: AS alias(c1, c2, …)
 }
 
-// Join is a join clause.
+// Join is a join clause. Asof marks an ASOF join (`a ASOF [LEFT] JOIN b ON
+// a.ts >= b.ts [AND a.k = b.k]`): for each left row, the single right row
+// nearest per the ON inequality among equality-matched partners.
 type Join struct {
 	Kind JoinKind
+	Asof bool
 	Ref  TableRef
 	On   Expr
 }
