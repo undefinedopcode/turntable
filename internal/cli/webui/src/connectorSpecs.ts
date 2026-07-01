@@ -144,6 +144,17 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
   },
   {
+    name: "azrgraph",
+    label: "Azure Resource Graph",
+    fields: [
+      { key: "table", label: "Table", placeholder: "Resources (default)", help: "Resources, ResourceContainers, …" },
+      { key: "subscriptions", label: "Subscriptions", placeholder: "sub-id-1, sub-id-2 (default: all)" },
+      { key: "query", label: "Raw KQL", placeholder: "Resources | where … | project … (overrides table)" },
+      { key: "top", label: "Row cap", placeholder: "5000" },
+    ],
+    note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [

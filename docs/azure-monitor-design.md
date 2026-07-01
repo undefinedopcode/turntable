@@ -9,10 +9,12 @@ them against Honeycomb traces and (later) fleet inventory.
 
 Three connectors, sequenced:
 
-1. **`azmetricsc`** — Azure Monitor **Metrics** (this is the priority).
+1. **`azmetricsc`** — Azure Monitor **Metrics**. ✅ *implemented*
 2. **`azrgraphc`** — Azure **Resource Graph** (fleet inventory; the discovery
-   layer that makes per-resource metrics usable at scale, via JOIN).
+   layer that makes per-resource metrics usable at scale, via JOIN). ✅
+   *implemented, incl. the shared `azkql` renderer.*
 3. **`azlogsc`** — Azure Monitor **Logs** / Log Analytics (KQL), a fast follow.
+   *pending — reuses `azkql`.*
 
 They share auth (Azure AD via `DefaultAzureCredential`, already used by
 `aztablesc`) but hit different data planes and have different query models, so

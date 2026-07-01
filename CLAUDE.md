@@ -267,6 +267,19 @@ interfaces:
     pushdown — the Azure API is pre-aggregated by `aggregation`+`interval`, so the
     engine does any further rollup. Per-resource only (v1); fleet-wide metrics is
     a deferred Batch-API follow-up. See `docs/azure-monitor-design.md`.
+    `azrgraphc` (Azure Resource Graph) is fleet inventory across subscriptions via
+    one KQL endpoint (`armresourcegraph`). Like `athenac`, it pushes WHERE/ORDER
+    BY/LIMIT down — as KQL, via the shared **`azkql`** renderer (a pure, DB-free,
+    unit-tested package — the KQL analogue of `sqlc`'s `buildScanQuery`, meant to
+    be reused by a future Log Analytics connector). A `query` option carries raw
+    KQL (no pushdown). Schemaless: schema inferred from a sample like `dynamodbc`
+    (`Scan` calls `Resolve`; keys sorted for determinism; nested `tags`/
+    `properties` stay `TypeAny`). Table via `table` option or the ref Source
+    (`azrgraph:Resources`, default `Resources`); `subscriptions`/`top` options;
+    paginates via the response `SkipToken`. Azure AD auth (`DefaultAzureCredential`,
+    Reader). `azkql.Build` translates only push-safe predicate parts (top-level
+    columns; `LIKE`→case-insensitive `contains`, a safe superset) and leaves the
+    rest to the engine — pushing is always an optimization.
     `dynamodbc` and `aztablesc` are schemaless entity stores (schema inferred
     from sampled items, like `jsonc`) with a `table="*"` wildcard via
     `DatasetsFor` + `expand{Dynamo,Azure}Tables` in `cli.go`. `aztablesc`
