@@ -3,6 +3,7 @@ package honeycombc
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/april/turntable/internal/connector"
@@ -15,11 +16,15 @@ import (
 // request body per key (so query-spec translation can be asserted).
 type fakeHoney struct {
 	resp   map[string]string // "METHOD path" -> JSON response
+	errs   map[string]error  // "METHOD path" -> error to return (overrides resp)
 	bodies map[string]any    // "METHOD path" -> decoded last request body
 }
 
 func (f *fakeHoney) do(ctx context.Context, method, path string, body any, v2 bool) ([]byte, error) {
 	key := method + " " + path
+	if e, ok := f.errs[key]; ok {
+		return nil, e
+	}
 	if body != nil {
 		if f.bodies == nil {
 			f.bodies = map[string]any{}
@@ -230,6 +235,31 @@ func TestEventsAggregatePushdownEndToEnd(t *testing.T) {
 	fl := filters[0].(map[string]any)
 	if fl["column"] != "duration_ms" || fl["op"] != ">" {
 		t.Errorf("filter = %v, want duration_ms > …", fl)
+	}
+}
+
+// TestEventsQuery403HintOnFreePlan: a 403 from the query POST (the paid-only
+// Query Data API) is wrapped with an explanatory hint, not surfaced raw.
+func TestEventsQuery403HintOnFreePlan(t *testing.T) {
+	f := &fakeHoney{
+		resp: map[string]string{
+			"GET /1/columns/prod": `[{"key_name":"duration_ms","type":"float"}]`,
+		},
+		errs: map[string]error{
+			"POST /1/queries/prod": &apiError{status: 403, body: "forbidden"},
+		},
+	}
+	c := newWithClient(f)
+	req := connector.ScanRequest{
+		Dataset:   connector.Dataset{Options: map[string]any{"api_key": "k", "dataset": "prod"}},
+		Aggregate: &connector.AggregateRequest{Aggregates: []connector.AggregateOp{{Func: "COUNT", Alias: "n"}}},
+	}
+	_, err := c.Scan(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "paid plan") || !strings.Contains(err.Error(), "403") {
+		t.Errorf("error = %q, want a 403 hint mentioning a paid plan", err)
 	}
 }
 

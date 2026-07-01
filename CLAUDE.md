@@ -287,6 +287,9 @@ interfaces:
     literally named `<qualifier>.<name>`. `dataset="*"` expands to one events
     source per Honeycomb dataset via `DatasetsFor`+`expandHoneycombDatasets`.
     Time window from `time_range` (default 7200s) or `start_time`/`end_time`.
+    Plan note: the events **Query Data API** is gated to paid Honeycomb plans, so
+    on a free plan the query POST returns 403 (`enterpriseHint` wraps it with an
+    explanation); the metadata datasets work on any plan.
     `athenac` is the odd one in this family: Athena *is* a SQL engine
     (Presto/Trino over S3, Glue catalog), so it pushes projection/predicate
     (`translateExpr`, Presto-flavored — double-quote idents, no ILIKE)/ORDER BY/

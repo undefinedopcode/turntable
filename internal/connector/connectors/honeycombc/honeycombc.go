@@ -15,6 +15,10 @@
 // query -> create query_result -> poll), and returns the aggregated rows. A
 // non-aggregate scan of events is an error (there are no raw rows to return).
 //
+// Plan note: running event queries uses Honeycomb's Query Data API, which is
+// gated to paid plans — on a free plan the query POST returns 403 (surfaced with
+// a hint by enterpriseHint). The metadata datasets work on any plan.
+//
 // Options:
 //
 //	kind        one of datasets|columns|environments|events; falls back to the
@@ -33,6 +37,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -520,7 +525,7 @@ func (c *Connector) scanEvents(ctx context.Context, req connector.ScanRequest) (
 	// 1. Create the query -> query id.
 	raw, err := api.do(ctx, "POST", "/1/queries/"+slug, spec, false)
 	if err != nil {
-		return nil, fmt.Errorf("honeycomb create query: %w", err)
+		return nil, enterpriseHint("create query", err)
 	}
 	var q struct {
 		ID string `json:"id"`
@@ -532,7 +537,7 @@ func (c *Connector) scanEvents(ctx context.Context, req connector.ScanRequest) (
 	// 2. Create the query result -> result id (async run).
 	raw, err = api.do(ctx, "POST", "/1/query_results/"+slug, map[string]any{"query_id": q.ID, "disable_series": true}, false)
 	if err != nil {
-		return nil, fmt.Errorf("honeycomb create query_result: %w", err)
+		return nil, enterpriseHint("create query_result", err)
 	}
 	res, done, err := parseResult(raw)
 	if err != nil {
@@ -960,7 +965,27 @@ func (h *httpClient) do(ctx context.Context, method, path string, body any, v2 b
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, &apiError{status: resp.StatusCode, body: strings.TrimSpace(string(data))}
 	}
 	return data, nil
+}
+
+// apiError is a non-2xx HTTP response from Honeycomb, carrying the status so the
+// query path can special-case 403 (the Query Data API requires a paid plan).
+type apiError struct {
+	status int
+	body   string
+}
+
+func (e *apiError) Error() string { return fmt.Sprintf("status %d: %s", e.status, e.body) }
+
+// enterpriseHint wraps a query-running error, adding an explanation when it is a
+// 403: running event queries uses Honeycomb's Query Data API, which is gated to
+// paid plans, whereas the metadata datasets work on any plan.
+func enterpriseHint(stage string, err error) error {
+	var ae *apiError
+	if errors.As(err, &ae) && ae.status == 403 {
+		return fmt.Errorf("honeycomb %s: %w — running event queries uses Honeycomb's Query Data API, which requires a paid plan (Enterprise/Pro); the metadata datasets (honeycomb:datasets, columns) work on any plan", stage, err)
+	}
+	return fmt.Errorf("honeycomb %s: %w", stage, err)
 }
