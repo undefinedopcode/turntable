@@ -226,6 +226,130 @@ export function nodesEdges(
   return { nodes, edges, total: index.size, rootIndex, focusMissing: focused };
 }
 
+// finalizeGraph applies focus extraction (drill into a node's subtree) and, in
+// tree mode, attaches every parentless node to a synthetic root. It is the shared
+// tail used by the hierarchy builder below (nodesEdges has the equivalent inline).
+function finalizeGraph(
+  nodes: GraphNode[],
+  edges: { source: number; target: number }[],
+  index: Map<string, number>,
+  hasParent: Set<number>,
+  mode: "graph" | "tree",
+  focus: string | null,
+): Graph {
+  const focused = focus != null;
+  if (focused) {
+    const start = index.get(focus!);
+    if (start !== undefined) {
+      const adj = new Map<number, number[]>();
+      for (const e of edges) {
+        const a = adj.get(e.source);
+        if (a) a.push(e.target);
+        else adj.set(e.source, [e.target]);
+      }
+      const keep = new Set<number>([start]);
+      const queue = [start];
+      while (queue.length) {
+        const u = queue.shift()!;
+        for (const v of adj.get(u) ?? []) {
+          if (!keep.has(v)) {
+            keep.add(v);
+            queue.push(v);
+          }
+        }
+      }
+      const remap = new Map<number, number>();
+      const fnodes: GraphNode[] = [];
+      for (const oi of keep) {
+        remap.set(oi, fnodes.length);
+        fnodes.push(nodes[oi]);
+      }
+      const fedges = edges
+        .filter((e) => keep.has(e.source) && keep.has(e.target))
+        .map((e) => ({ source: remap.get(e.source)!, target: remap.get(e.target)! }));
+      return { nodes: fnodes, edges: fedges, total: fnodes.length, rootIndex: -1, focusMissing: false };
+    }
+  }
+  let rootIndex = -1;
+  if (mode === "tree") {
+    rootIndex = nodes.length;
+    nodes.push({ key: "", label: "", size: null, color: null });
+    for (let i = 0; i < rootIndex; i++) {
+      if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
+    }
+  }
+  return { nodes, edges, total: index.size, rootIndex, focusMissing: focused };
+}
+
+// nodesEdgesFromPath builds a hierarchy from an ordered list of columns
+// (outer→inner, e.g. subscriptionId › resourceGroup › name). Unlike nodesEdges
+// (a self-referential parent-pointer in one column), here each row is a leaf and
+// its ancestry is the path across those columns: every cumulative prefix becomes
+// a node (id = the full prefix so same-named branches under different parents stay
+// distinct, label = the last segment), edges link parent prefix → child prefix,
+// and a measure is summed up each prefix for sizing. Null/empty levels are
+// skipped. It returns the same Graph shape, so the renderer and focus/root
+// handling are shared.
+export function nodesEdgesFromPath(
+  rows: Cell[][],
+  levelIdxs: number[],
+  sizeIdx: number, // -1 = no sizing
+  colorIdx: number, // -1 = no colouring (applied to leaf nodes)
+  mode: "graph" | "tree",
+  focus: string | null = null,
+  cap = 300,
+): Graph {
+  const SEP = "›"; // › — path separator for node ids
+  const index = new Map<string, number>();
+  const nodes: GraphNode[] = [];
+  const edgeSet = new Set<string>();
+  const edges: { source: number; target: number }[] = [];
+  const hasParent = new Set<number>();
+  const focused = focus != null;
+
+  const ensure = (key: string, label: string): number => {
+    let i = index.get(key);
+    if (i === undefined) {
+      i = nodes.length;
+      index.set(key, i);
+      nodes.push({ key, label, size: null, color: null });
+    }
+    return i;
+  };
+
+  for (const r of rows) {
+    const segs: string[] = [];
+    for (const c of levelIdxs) {
+      const v = r[c];
+      if (v === null || v === undefined || v === "") continue; // skip a missing level
+      segs.push(labelOf(v));
+    }
+    if (segs.length === 0) continue;
+    const leafKey = segs.join(SEP);
+    if (!focused && index.size >= cap && index.get(leafKey) === undefined) continue;
+
+    const rowSize = sizeIdx >= 0 ? numOrNull(r[sizeIdx]) : null;
+    let prevIdx = -1;
+    let prefix = "";
+    for (let d = 0; d < segs.length; d++) {
+      prefix = d === 0 ? segs[0] : prefix + SEP + segs[d];
+      const ni = ensure(prefix, segs[d]);
+      if (rowSize !== null) nodes[ni].size = (nodes[ni].size ?? 0) + rowSize;
+      if (colorIdx >= 0 && d === segs.length - 1) nodes[ni].color = r[colorIdx] ?? null;
+      if (prevIdx >= 0 && prevIdx !== ni) {
+        const ek = prevIdx + ">" + ni;
+        if (!edgeSet.has(ek)) {
+          edgeSet.add(ek);
+          edges.push({ source: prevIdx, target: ni });
+          hasParent.add(ni);
+        }
+      }
+      prevIdx = ni;
+    }
+  }
+  return finalizeGraph(nodes, edges, index, hasParent, mode, focus);
+}
+
 // heatColor maps a value in [lo,hi] to a blue→accent→amber gradient (null →
 // faint). Three stops keep low/mid/high visually distinct on the dark UI. alpha
 // < 1 lets a colored cell sit over the dark table while keeping its text legible.

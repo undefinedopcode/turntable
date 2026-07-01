@@ -35,6 +35,7 @@ import {
   heatColor,
   labelOf,
   nodesEdges,
+  nodesEdgesFromPath,
   numOrNull,
   numericColumns,
   pivot,
@@ -170,11 +171,23 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   const [labelIdx, setLabelIdx] = useState(-1); // graph: node label (-1 = node value)
   const [colorIdx, setColorIdx] = useState(-1); // graph: node colour column (-1 = constant)
   const [focusNode, setFocusNode] = useState<string | null>(null); // graph: drilled-in subtree
+  // graph input model: "edges" = node + links-to (self-referential parent
+  // pointer); "path" = a hierarchy synthesized from an ordered list of columns.
+  const [graphSource, setGraphSource] = useState<"edges" | "path">("edges");
+  const [levelIdxs, setLevelIdxs] = useState<number[]>([0, 1]); // path mode: the ordered levels
+  // The ordered levels, clamped to the current columns (at least one). Memoized so
+  // its array reference is stable across unrelated re-renders — GraphChart is
+  // memoized and a fresh array each render would defeat that (and blank the graph).
+  const levels = useMemo(() => {
+    const l = levelIdxs.filter((i) => i >= 0 && i < columns.length);
+    return l.length ? l : [0];
+  }, [levelIdxs, columns.length]);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // A focus key belongs to a specific dataset/structure; drop it when the data
-  // or the node/parent columns change so it can't point at a stale node.
-  const focusResetKey = `${rows.length}:${nodeIdx}:${linkIdx}`;
+  // or the node/parent columns (or the hierarchy levels) change so it can't point
+  // at a stale node.
+  const focusResetKey = `${rows.length}:${nodeIdx}:${linkIdx}:${graphSource}:${levelIdxs.join(",")}`;
   const prevFocusResetKey = useRef(focusResetKey);
   if (prevFocusResetKey.current !== focusResetKey) {
     prevFocusResetKey.current = focusResetKey;
@@ -243,6 +256,11 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
     const labelCol = labelIdx < columns.length ? labelIdx : -1;
     const gSizeCol = numIdx.includes(sizeIdx) ? sizeIdx : -1;
     const colorCol = colorIdx >= 0 && colorIdx < columns.length ? colorIdx : -1;
+    // Path mode: `levels` (memoized above) is the ordered, clamped level list.
+    const setLevel = (pos: number, col: number) =>
+      setLevelIdxs(levels.map((v, i) => (i === pos ? col : v)));
+    const addLevel = () => setLevelIdxs([...levels, Math.min(levels.length, columns.length - 1)]);
+    const removeLevel = (pos: number) => setLevelIdxs(levels.filter((_, i) => i !== pos));
 
     return (
       <div className="chart">
@@ -254,37 +272,74 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
               </button>
             ))}
           </div>
-          <label className="chart-field">
-            node
-            <select value={nodeCol} onChange={(e) => setNodeIdx(Number(e.target.value))}>
-              {columns.map((c, i) => (
-                <option key={i} value={i}>
-                  {c.name}
-                </option>
+          <div className="seg" title="edges: a self-referential parent column · hierarchy: an ordered list of columns">
+            <button className={graphSource === "edges" ? "on" : ""} onClick={() => setGraphSource("edges")}>
+              edges
+            </button>
+            <button className={graphSource === "path" ? "on" : ""} onClick={() => setGraphSource("path")}>
+              hierarchy
+            </button>
+          </div>
+          {graphSource === "path" ? (
+            <>
+              {levels.map((col, pos) => (
+                <label className="chart-field" key={pos}>
+                  {pos === 0 ? "levels" : "›"}
+                  <select value={col} onChange={(e) => setLevel(pos, Number(e.target.value))}>
+                    {columns.map((c, i) => (
+                      <option key={i} value={i}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  {levels.length > 1 && (
+                    <button className="ghost sm" title="remove level" onClick={() => removeLevel(pos)}>
+                      ✕
+                    </button>
+                  )}
+                </label>
               ))}
-            </select>
-          </label>
-          <label className="chart-field">
-            {type === "tree" ? "parent" : "links to"}
-            <select value={linkCol} onChange={(e) => setLinkIdx(Number(e.target.value))}>
-              {columns.map((c, i) => (
-                <option key={i} value={i}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="chart-field">
-            label
-            <select value={labelCol} onChange={(e) => setLabelIdx(Number(e.target.value))}>
-              <option value={-1}>(node)</option>
-              {columns.map((c, i) => (
-                <option key={i} value={i}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              {levels.length < columns.length && (
+                <button className="ghost sm" title="add a level" onClick={addLevel}>
+                  + level
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <label className="chart-field">
+                node
+                <select value={nodeCol} onChange={(e) => setNodeIdx(Number(e.target.value))}>
+                  {columns.map((c, i) => (
+                    <option key={i} value={i}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="chart-field">
+                {type === "tree" ? "parent" : "links to"}
+                <select value={linkCol} onChange={(e) => setLinkIdx(Number(e.target.value))}>
+                  {columns.map((c, i) => (
+                    <option key={i} value={i}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="chart-field">
+                label
+                <select value={labelCol} onChange={(e) => setLabelIdx(Number(e.target.value))}>
+                  <option value={-1}>(node)</option>
+                  {columns.map((c, i) => (
+                    <option key={i} value={i}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
           <label className="chart-field">
             size
             <select value={gSizeCol} onChange={(e) => setSizeIdx(Number(e.target.value))}>
@@ -317,6 +372,8 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
           columns={columns}
           numeric={numeric}
           type={type}
+          graphSource={graphSource}
+          levels={levels}
           nodeCol={nodeCol}
           linkCol={linkCol}
           labelCol={labelCol}
@@ -720,6 +777,8 @@ const GraphChart = memo(function GraphChart({
   columns,
   numeric,
   type,
+  graphSource,
+  levels,
   nodeCol,
   linkCol,
   labelCol,
@@ -733,6 +792,8 @@ const GraphChart = memo(function GraphChart({
   columns: Column[];
   numeric: { c: Column; i: number }[];
   type: "graph" | "tree";
+  graphSource: "edges" | "path";
+  levels: number[];
   nodeCol: number;
   linkCol: number;
   labelCol: number;
@@ -747,7 +808,10 @@ const GraphChart = memo(function GraphChart({
   const chartRef = useRef<any>(null);
 
   const numIdx = numeric.map((n) => n.i);
-  const g = nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, colorCol, type, focusNode, NODE_CAP);
+  const g =
+    graphSource === "path"
+      ? nodesEdgesFromPath(rows, levels, sizeCol, colorCol, type, focusNode, NODE_CAP)
+      : nodesEdges(rows, nodeCol, linkCol, labelCol, sizeCol, colorCol, type, focusNode, NODE_CAP);
   const radii = bubbleRadii(g.nodes.map((n) => n.size));
   const showLabels = g.nodes.length <= LABEL_CAP;
 
