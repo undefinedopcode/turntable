@@ -24,8 +24,13 @@ export interface ChartViewConfig {
   agg?: Agg;
   x?: string;
   y?: string[]; // empty/omitted = auto (first numeric column)
+  y2?: string[]; // series plotted on a secondary (right) Y axis
   seriesBy?: string;
   size?: string;
+  thresholds?: number[]; // horizontal reference lines (alarm levels etc.)
+  bandLo?: string; // envelope band: lower/upper bound columns (e.g. p10/p90),
+  bandHi?: string; // rendered as a translucent fill behind the series
+
   // graph/tree settings
   node?: string;
   link?: string;

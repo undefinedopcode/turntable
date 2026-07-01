@@ -30,6 +30,7 @@ import {
 } from "chartjs-chart-graph";
 import ChartDataLabels from "chartjs-plugin-datalabels";
 import zoomPlugin from "chartjs-plugin-zoom";
+import annotationPlugin from "chartjs-plugin-annotation";
 import { Bar, Line, Scatter, Pie, Bubble, Chart as ReactChart } from "react-chartjs-2";
 import type { Cell, Column } from "../api";
 import type { ChartType, ChartViewConfig } from "../view";
@@ -66,6 +67,7 @@ ChartJS.register(
   ChartDataLabels,
   zoomPlugin,
   Decimation,
+  annotationPlugin,
 );
 
 // datalabels is registered globally for the graph/tree node labels, but it must
@@ -194,6 +196,19 @@ export function Chart({
   const [ySel, setYSel] = useState<number[]>(() =>
     (config?.y ?? []).map((n) => byName(n, -1)).filter((i) => i >= 0),
   );
+  // Series assigned to a secondary (right) Y axis — for mixed-unit charts like
+  // flow rate vs. reservoir level. A Y chip cycles off → left → right.
+  const [y2Sel, setY2Sel] = useState<number[]>(() =>
+    (config?.y2 ?? []).map((n) => byName(n, -1)).filter((i) => i >= 0),
+  );
+  // Horizontal reference lines (alarm levels): a comma-separated numeric input.
+  const [thresholdText, setThresholdText] = useState(() =>
+    (config?.thresholds ?? []).join(", "),
+  );
+  // Envelope band: lower/upper bound columns (e.g. P10/P90) filled behind the
+  // series. -1 = off.
+  const [bandLoIdx, setBandLoIdx] = useState(() => byName(config?.bandLo, -1));
+  const [bandHiIdx, setBandHiIdx] = useState(() => byName(config?.bandHi, -1));
   const [seriesBy, setSeriesBy] = useState(() => byName(config?.seriesBy, -1)); // -1 = none (no breakdown)
   const [sizeIdx, setSizeIdx] = useState(() => byName(config?.size, -1)); // bubble/node size measure (-1 = constant)
   const [nodeIdx, setNodeIdx] = useState(() => byName(config?.node, 0)); // graph: the node column
@@ -224,6 +239,16 @@ export function Chart({
   // the effect (and can't loop: the effect depends only on local state).
   const onConfigRef = useRef(onConfig);
   onConfigRef.current = onConfig;
+  const thresholds = useMemo(
+    () =>
+      thresholdText
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "")
+        .map(Number)
+        .filter((n) => Number.isFinite(n)),
+    [thresholdText],
+  );
   useEffect(() => {
     const colName = (i: number) =>
       i >= 0 && i < columns.length ? columns[i].name : undefined;
@@ -234,8 +259,12 @@ export function Chart({
       agg,
       x: colName(xIdx),
       y: names(ySel),
+      y2: names(y2Sel),
       seriesBy: colName(seriesBy),
       size: colName(sizeIdx),
+      thresholds,
+      bandLo: colName(bandLoIdx),
+      bandHi: colName(bandHiIdx),
       node: colName(nodeIdx),
       link: colName(linkIdx),
       label: colName(labelIdx),
@@ -248,8 +277,12 @@ export function Chart({
     agg,
     xIdx,
     ySel,
+    y2Sel,
     seriesBy,
     sizeIdx,
+    thresholds,
+    bandLoIdx,
+    bandHiIdx,
     nodeIdx,
     linkIdx,
     labelIdx,
@@ -285,9 +318,13 @@ export function Chart({
   // A time-typed X gets a real time axis (see the line/point branches below).
   const xIsTime = columns[x]?.type === "time";
   let ys = ySel.filter((i) => numericIdx.includes(i) && i !== (isPoint ? x : -1));
-  if (ys.length === 0) ys = numericIdx.filter((i) => i !== x).slice(0, 1);
+  const y2s = y2Sel.filter(
+    (i) => numericIdx.includes(i) && i !== (isPoint ? x : -1) && !ys.includes(i),
+  );
+  if (ys.length === 0 && y2s.length === 0) ys = numericIdx.filter((i) => i !== x).slice(0, 1);
+  const allY = [...ys, ...y2s];
   // Pie and bubble show a single Y series.
-  const series = type === "pie" || isBubble ? ys.slice(0, 1) : ys;
+  const series = type === "pie" || isBubble ? allY.slice(0, 1) : allY;
   const sizeCol = numericIdx.includes(sizeIdx) ? sizeIdx : -1;
 
   const exportPNG = () => {
@@ -307,11 +344,28 @@ export function Chart({
   // own pivot; point charts plot raw rows).
   const grouping = agg !== "none" && !isPoint && !isHeatmap;
 
+  // Secondary axis: only the category cartesian charts, and only when a series
+  // is actually assigned right. A chip cycles off → left → right (see cycleY).
+  const canDual = canSplit && !splitting;
+  const dualAxis = canDual && series.some((i) => y2s.includes(i));
+  const axisFor = (idx: number) => (dualAxis && y2s.includes(idx) ? "y2" : "y");
+
+  // Envelope band (e.g. a P10–P90 range behind a median line): two bound
+  // columns filled between, on line/area without a series-by split.
+  const canBand = (type === "line" || type === "area") && !splitting;
+  const bandLo = canBand && numericIdx.includes(bandLoIdx) ? bandLoIdx : -1;
+  const bandHi = canBand && numericIdx.includes(bandHiIdx) ? bandHiIdx : -1;
+  const banding = bandLo >= 0 && bandHi >= 0;
+  // The band bounds ride the same data pipeline as the Y series (aggregated
+  // with the same fn); dataCols = series then band bounds.
+  const bandCols = banding ? [bandLo, bandHi] : [];
+  const dataCols = [...series, ...bandCols];
+
   const rawRows = useMemo(() => rows.slice(0, RAW_CAP), [rows]);
   const grouped = useMemo(
-    () => (grouping && !splitting ? aggregate(rows, x, series, agg) : null),
+    () => (grouping && !splitting ? aggregate(rows, x, dataCols, agg) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rows, x, agg, grouping, splitting, series.join(",")],
+    [rows, x, agg, grouping, splitting, dataCols.join(",")],
   );
   const pivoted = useMemo(
     () => (splitting ? pivot(rows, x, yMeasure, seriesBy, agg) : null),
@@ -491,8 +545,18 @@ export function Chart({
     );
   }
 
-  const toggleY = (i: number) =>
-    setYSel((s) => (s.includes(i) ? s.filter((v) => v !== i) : [...s, i]));
+  // A Y chip cycles: off → left axis → right axis → off (the right-axis step
+  // only on the dual-capable cartesian charts).
+  const toggleY = (i: number) => {
+    if (ySel.includes(i)) {
+      setYSel((s) => s.filter((v) => v !== i));
+      if (canDual) setY2Sel((s) => (s.includes(i) ? s : [...s, i]));
+    } else if (y2Sel.includes(i)) {
+      setY2Sel((s) => s.filter((v) => v !== i));
+    } else {
+      setYSel((s) => [...s, i]);
+    }
+  };
 
   const seriesName = (idx: number) =>
     grouping ? `${agg}(${columns[idx]?.name})` : (columns[idx]?.name ?? "");
@@ -514,39 +578,99 @@ export function Chart({
     }));
   }
 
+  // Envelope-band bound values, aligned to chartLabels. The bounds rode the
+  // same pipeline as the series (grouped: the tail of dataCols; raw: direct).
+  let bandVals: { lo: (number | null)[]; hi: (number | null)[] } | null = null;
+  if (banding && !pivoted) {
+    if (grouped) {
+      bandVals = {
+        lo: grouped.values[series.length],
+        hi: grouped.values[series.length + 1],
+      };
+    } else {
+      bandVals = {
+        lo: rawRows.map((r) => numOrNull(r[bandLo])),
+        hi: rawRows.map((r) => numOrNull(r[bandHi])),
+      };
+    }
+  }
+
   // A time-typed X on a line/area chart gets a real time axis: points become
   // (epoch ms, y), so uneven sampling and time gaps render truthfully, and the
   // decimation plugin (LTTB) thins dense series for display — so ALL rows are
   // plotted, not just the first RAW_CAP. Bails to categorical labels when a
   // value doesn't parse as a time.
   let timeSers: { label: string; data: { x: number; y: number }[] }[] | null = null;
+  let bandTime: { lo: { x: number; y: number }[]; hi: { x: number; y: number }[] } | null = null;
+  const timePts = (ms: number[], vals: (number | null)[]) =>
+    ms
+      .map((m, i) => ({ x: m, y: vals[i] }))
+      .filter((p): p is { x: number; y: number } => p.y !== null)
+      .sort((a, b) => a.x - b.x);
+  const rawTimePts = (idx: number) => {
+    const pts: { x: number; y: number }[] = [];
+    for (const r of rows) {
+      const m = timeMs(r[x]);
+      const yv = numOrNull(r[idx]);
+      if (m !== null && yv !== null) pts.push({ x: m, y: yv });
+    }
+    pts.sort((a, b) => a.x - b.x);
+    return pts;
+  };
   if (xIsTime && (type === "line" || type === "area")) {
     if (grouped || pivoted) {
       // Grouped/pivoted labels are the time cells' label strings — parse back.
       const ms = chartLabels.map(timeMs);
       if (ms.every((m): m is number => m !== null)) {
-        timeSers = sers.map((s) => ({
-          label: s.label,
-          data: ms
-            .map((m, i) => ({ x: m, y: s.data[i] }))
-            .filter((p): p is { x: number; y: number } => p.y !== null)
-            .sort((a, b) => a.x - b.x),
-        }));
+        timeSers = sers.map((s) => ({ label: s.label, data: timePts(ms, s.data) }));
+        if (bandVals) {
+          bandTime = { lo: timePts(ms, bandVals.lo), hi: timePts(ms, bandVals.hi) };
+        }
       }
     } else {
-      timeSers = series.map((idx) => {
-        const pts: { x: number; y: number }[] = [];
-        for (const r of rows) {
-          const m = timeMs(r[x]);
-          const yv = numOrNull(r[idx]);
-          if (m !== null && yv !== null) pts.push({ x: m, y: yv });
-        }
-        pts.sort((a, b) => a.x - b.x);
-        return { label: seriesName(idx), data: pts };
-      });
+      timeSers = series.map((idx) => ({ label: seriesName(idx), data: rawTimePts(idx) }));
       if (!timeSers.some((s) => s.data.length > 0)) timeSers = null;
+      else if (banding) bandTime = { lo: rawTimePts(bandLo), hi: rawTimePts(bandHi) };
     }
   }
+
+  // Shared option fragments: the secondary axis (only when a series is
+  // assigned right) and the threshold reference lines (annotation plugin).
+  const y2Scale = dualAxis
+    ? {
+        y2: {
+          position: "right" as const,
+          grid: { drawOnChartArea: false },
+          beginAtZero: true,
+        },
+      }
+    : {};
+  const annotationOpts =
+    thresholds.length > 0
+      ? {
+          annotation: {
+            annotations: thresholds.map((v) => ({
+              type: "line" as const,
+              yMin: v,
+              yMax: v,
+              borderColor: "#ff6b6b",
+              borderWidth: 1.5,
+              borderDash: [6, 4],
+              label: {
+                display: true,
+                content: String(v),
+                position: "end" as const,
+                backgroundColor: "rgba(23,26,33,0.85)",
+                color: "#ff8f8f",
+                font: { size: 10 },
+                padding: 3,
+              },
+            })),
+          },
+        }
+      : {};
+  const BAND_FILL = "rgba(138,147,167,0.16)";
+  const BAND_EDGE = "rgba(138,147,167,0.35)";
 
   const showLegend = sers.length > 1 || type === "pie";
   const baseOptions: ChartOptions<"bar"> = {
@@ -558,7 +682,14 @@ export function Chart({
       legend: {
         display: showLegend,
         position: "bottom",
-        labels: { boxWidth: 12, boxHeight: 12, padding: 14 },
+        labels: {
+          boxWidth: 12,
+          boxHeight: 12,
+          padding: 14,
+          // Band bound datasets stay out of the legend (still in tooltips).
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          filter: (item, data) => !(data.datasets[item.datasetIndex!] as any)?.$band,
+        },
       },
     },
     scales: {
@@ -566,6 +697,40 @@ export function Chart({
       y: { grid: { color: GRID }, beginAtZero: true },
     },
   };
+  // bandDatasets renders the envelope: an invisible lower bound plus an upper
+  // bound filled down to it ("-1"). Marked $band for the legend filter.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const bandDatasets = (lo: any, hi: any, extra: Record<string, unknown>): any[] => [
+    {
+      label: columns[bandLo]?.name ?? "lo",
+      data: lo,
+      borderColor: BAND_EDGE,
+      borderWidth: 0.5,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      fill: false,
+      tension: 0.3,
+      spanGaps: true,
+      yAxisID: axisFor(series[0] ?? -1),
+      $band: true,
+      ...extra,
+    },
+    {
+      label: columns[bandHi]?.name ?? "hi",
+      data: hi,
+      borderColor: BAND_EDGE,
+      borderWidth: 0.5,
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      fill: "-1",
+      backgroundColor: BAND_FILL,
+      tension: 0.3,
+      spanGaps: true,
+      yAxisID: axisFor(series[0] ?? -1),
+      $band: true,
+      ...extra,
+    },
+  ];
 
   let chart;
   if (type === "pie") {
@@ -609,6 +774,7 @@ export function Chart({
         },
         y: { grid: { color: GRID } },
       },
+      plugins: { ...baseOptions.plugins, ...annotationOpts },
     } as ChartOptions<"scatter">;
     chart = <Scatter data={scatterData} options={opts} />;
   } else if (isBubble) {
@@ -647,6 +813,7 @@ export function Chart({
           title: { display: true, text: columns[yIdx]?.name },
         },
       },
+      plugins: { ...baseOptions.plugins, ...annotationOpts },
     } as ChartOptions<"bubble">;
     chart = <Bubble data={bubbleData} options={opts} />;
   } else if (isHeatmap) {
@@ -729,22 +896,27 @@ export function Chart({
   } else if (timeSers) {
     const filled = type === "area";
     const timeData = {
-      datasets: timeSers.map((s, k) => {
-        const color = PALETTE[k % PALETTE.length];
-        return {
-          label: s.label,
-          data: s.data,
-          parsing: false as const, // pre-parsed {x: ms, y} points (decimation needs this)
-          borderColor: color,
-          backgroundColor: filled ? alpha(color, "33") : color,
-          borderWidth: 2,
-          fill: filled,
-          tension: 0.3,
-          spanGaps: true,
-          pointRadius: 0, // dense series; hover still snaps to points
-          pointHoverRadius: 4,
-        };
-      }),
+      datasets: [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...timeSers.map((s, k): any => {
+          const color = PALETTE[k % PALETTE.length];
+          return {
+            label: s.label,
+            data: s.data,
+            parsing: false as const, // pre-parsed {x: ms, y} points (decimation needs this)
+            borderColor: color,
+            backgroundColor: filled ? alpha(color, "33") : color,
+            borderWidth: 2,
+            fill: filled,
+            tension: 0.3,
+            spanGaps: true,
+            pointRadius: 0, // dense series; hover still snaps to points
+            pointHoverRadius: 4,
+            yAxisID: axisFor(series[k] ?? -1),
+          };
+        }),
+        ...(bandTime ? bandDatasets(bandTime.lo, bandTime.hi, { parsing: false }) : []),
+      ],
     };
     const opts = {
       ...(baseOptions as ChartOptions<"line">),
@@ -754,6 +926,7 @@ export function Chart({
       scales: {
         x: { type: "time", grid: { color: GRID }, ticks: { maxRotation: 0, autoSkip: true } },
         y: { grid: { color: GRID }, beginAtZero: true },
+        ...y2Scale,
       },
       plugins: {
         ...baseOptions.plugins,
@@ -761,6 +934,7 @@ export function Chart({
         // (default sample count) while preserving the visual shape — so
         // plotting every row stays cheap even for very large results.
         decimation: { enabled: true, algorithm: "lttb", threshold: 1000 },
+        ...annotationOpts,
       },
     } as ChartOptions<"line">;
     chart = <Line data={timeData} options={opts} />;
@@ -769,26 +943,36 @@ export function Chart({
     const isLine = type === "line" || filled;
     const chartData = {
       labels: chartLabels,
-      datasets: sers.map((s, k) => {
-        const color = PALETTE[k % PALETTE.length];
-        return {
-          label: s.label,
-          data: s.data,
-          borderColor: color,
-          backgroundColor: isLine ? (filled ? alpha(color, "33") : color) : alpha(color, "cc"),
-          borderWidth: 2,
-          fill: filled,
-          tension: 0.3,
-          spanGaps: true,
-          pointRadius: isLine ? 2 : 0,
-          pointHoverRadius: 4,
-        };
-      }),
+      datasets: [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...sers.map((s, k): any => {
+          const color = PALETTE[k % PALETTE.length];
+          return {
+            label: s.label,
+            data: s.data,
+            borderColor: color,
+            backgroundColor: isLine ? (filled ? alpha(color, "33") : color) : alpha(color, "cc"),
+            borderWidth: 2,
+            fill: filled,
+            tension: 0.3,
+            spanGaps: true,
+            pointRadius: isLine ? 2 : 0,
+            pointHoverRadius: 4,
+            yAxisID: axisFor(series[k] ?? -1),
+          };
+        }),
+        ...(isLine && bandVals ? bandDatasets(bandVals.lo, bandVals.hi, {}) : []),
+      ],
+    };
+    const opts = {
+      ...baseOptions,
+      scales: { ...baseOptions.scales, ...y2Scale },
+      plugins: { ...baseOptions.plugins, ...annotationOpts },
     };
     chart = isLine ? (
-      <Line data={chartData} options={baseOptions as ChartOptions<"line">} />
+      <Line data={chartData} options={opts as ChartOptions<"line">} />
     ) : (
-      <Bar data={chartData} options={baseOptions} />
+      <Bar data={chartData} options={opts as ChartOptions<"bar">} />
     );
   }
 
@@ -871,18 +1055,54 @@ export function Chart({
             <div className="y-chips">
               {numeric
                 .filter(({ i }) => !(isPoint && i === x))
-                .map(({ c, i }) => (
-                  <button
-                    key={i}
-                    className={`chip ${series.includes(i) ? "on" : ""}`}
-                    onClick={() => toggleY(i)}
-                    title={c.name}
-                  >
-                    {c.name}
-                  </button>
-                ))}
+                .map(({ c, i }) => {
+                  const onRight = series.includes(i) && y2s.includes(i);
+                  return (
+                    <button
+                      key={i}
+                      className={`chip ${series.includes(i) ? (onRight ? "on r2" : "on") : ""}`}
+                      onClick={() => toggleY(i)}
+                      title={canDual ? `${c.name} — click cycles: left axis → right axis → off` : c.name}
+                    >
+                      {c.name}
+                      {onRight && <span className="chip-axis">R</span>}
+                    </button>
+                  );
+                })}
             </div>
           </div>
+        )}
+        {canBand && (
+          <label className="chart-field" title="envelope band: a translucent fill between two bound columns (e.g. P10/P90)">
+            band
+            <select value={bandLo} onChange={(e) => setBandLoIdx(Number(e.target.value))}>
+              <option value={-1}>(lo)</option>
+              {numeric.map(({ c, i }) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <select value={bandHi} onChange={(e) => setBandHiIdx(Number(e.target.value))}>
+              <option value={-1}>(hi)</option>
+              {numeric.map(({ c, i }) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {!isHeatmap && type !== "pie" && (
+          <label className="chart-field" title="horizontal reference lines, comma-separated (e.g. alarm levels)">
+            threshold
+            <input
+              className="dash-var thresh"
+              placeholder="e.g. 80, 95"
+              value={thresholdText}
+              onChange={(e) => setThresholdText(e.target.value)}
+            />
+          </label>
         )}
         <button
           className="ghost sm chart-png"

@@ -490,7 +490,12 @@ breakdown + client-side group-by-X aggregation count/sum/avg/min/max; a
 **time-typed X** on line/area gets a real time axis — points become (epoch ms,
 y) via `chartjs-adapter-date-fns`, uneven sampling/gaps render truthfully, and
 LTTB decimation plots ALL rows instead of the 500-row raw cap; scatter/bubble
-accept a time X too), and a
+accept a time X too; chart extras: a Y chip cycles left axis → **right axis**
+(dual-axis `y2`, mixed-unit series) → off, a **threshold** input draws
+horizontal reference lines via `chartjs-plugin-annotation`, and a **band**
+lo/hi column pair renders a translucent envelope fill (e.g. P10–P90) behind
+line/area series — all persisted in the ViewConfig so they carry into
+dashboard panels), and a
 pivot table (`PivotTable.tsx` — row×column cross-tab of one measure, optional
 cell heatmap colouring). The chart heatmap uses the `chartjs-chart-matrix`
 plugin; the **graph/tree** types use `chartjs-chart-graph` (force-directed +

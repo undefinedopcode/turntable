@@ -1147,3 +1147,18 @@ td.json {
   padding: 12px;
   min-width: 320px;
 }
+
+/* chart extras: right-axis chip marker + threshold input */
+.chip.on.r2 {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chip-axis {
+  font-size: 9px;
+  margin-left: 4px;
+  opacity: 0.9;
+}
+input.thresh {
+  min-width: 70px;
+  width: 92px;
+}
