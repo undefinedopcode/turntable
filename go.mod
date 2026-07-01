@@ -16,6 +16,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/athena v1.58.4
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.77.0
+	github.com/aws/aws-sdk-go-v2/service/configservice v1.64.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0
 	github.com/chzyer/readline v1.5.1
 	github.com/dolthub/go-mysql-server v0.20.0

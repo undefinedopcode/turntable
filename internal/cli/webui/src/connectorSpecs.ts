@@ -169,6 +169,18 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "Auth is ambient via Azure AD (env / managed identity / az login) — no key fields.",
   },
   {
+    name: "awsconfig",
+    label: "AWS Config (inventory)",
+    fields: [
+      { key: "region", label: "Region", placeholder: "us-east-1" },
+      { key: "profile", label: "Profile", placeholder: "shared-config profile (optional)" },
+      { key: "aggregator", label: "Aggregator", placeholder: "config aggregator name (multi-account)" },
+      { key: "query", label: "Raw Config SQL", placeholder: "SELECT resourceId, resourceType WHERE … (overrides table)" },
+      { key: "top", label: "Row cap", placeholder: "5000" },
+    ],
+    note: "Requires AWS Config enabled/recording. Auth is ambient via the AWS SDK (env / profile / role).",
+  },
+  {
     name: "dynamodb",
     label: "DynamoDB",
     fields: [

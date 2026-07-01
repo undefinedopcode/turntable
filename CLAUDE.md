@@ -323,6 +323,19 @@ interfaces:
     Plan note: the events **Query Data API** is gated to paid Honeycomb plans, so
     on a free plan the query POST returns 403 (`enterpriseHint` wraps it with an
     explanation); the metadata datasets work on any plan.
+    `awsconfigc` (AWS Config Advanced Query) is the AWS analogue of `azrgraphc`:
+    account/region resource inventory (every type Config records) via Config's
+    SQL `SELECT` surface. Table mode exposes a **fixed** top-level schema
+    (`resourceId`/`resourceType`/`awsRegion`/`tags`/`configuration`/… — no
+    inference, since Config's top-level shape is documented) and pushes WHERE
+    (`=`/`IN`/`LIKE` on scalar top-level columns, `translate`/`buildWhere`) + LIMIT
+    down as a Config `SELECT`; a raw `query` option carries a full Config `SELECT`
+    (schema then inferred from a sample). `SelectResourceConfig`, or
+    `SelectAggregateResourceConfig` when an `aggregator` option is set (multi-
+    account); paginates via `NextToken`; results are JSON strings parsed to rows.
+    Wraps aws-sdk-go-v2 `configservice` behind a narrow `configAPI` (fake-tested).
+    Needs AWS Config enabled/recording. `region`/`profile`/`aggregator`/`top`
+    options. See `examples/aws-config.md`.
     `athenac` is the odd one in this family: Athena *is* a SQL engine
     (Presto/Trino over S3, Glue catalog), so it pushes projection/predicate
     (`translateExpr`, Presto-flavored — double-quote idents, no ILIKE)/ORDER BY/

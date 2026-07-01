@@ -13,6 +13,7 @@ import (
 	"github.com/april/turntable/internal/config"
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/connector/connectors/athenac"
+	"github.com/april/turntable/internal/connector/connectors/awsconfigc"
 	"github.com/april/turntable/internal/connector/connectors/azdevopsc"
 	"github.com/april/turntable/internal/connector/connectors/azlogsc"
 	"github.com/april/turntable/internal/connector/connectors/azmetricsc"
@@ -98,6 +99,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(aztablesc.New())
 	_ = reg.RegisterConnector(azmetricsc.New())
 	_ = reg.RegisterConnector(azrgraphc.New())
+	_ = reg.RegisterConnector(awsconfigc.New())
 	_ = reg.RegisterConnector(azlogsc.New())
 	_ = reg.RegisterConnector(athenac.New())
 	_ = reg.RegisterConnector(trelloc.New())
