@@ -330,10 +330,26 @@ export function Chart({ columns, rows }: { columns: Column[]; rows: Cell[][] }) 
   }
 
   if (numeric.length === 0) {
+    // The axis-based charts need a numeric column, but graph/tree do not (they map
+    // a node + link column). Keep the type selector visible so those stay
+    // reachable without a dummy numeric column.
     return (
-      <div className="hint" style={{ padding: 12 }}>
-        no numeric column to chart — select a numeric value, e.g.{" "}
-        <code>COUNT(*)</code> or <code>SUM(...)</code>.
+      <div className="chart">
+        <div className="chart-controls">
+          <div className="seg">
+            {TYPES.map((t) => (
+              <button key={t} className={type === t ? "on" : ""} onClick={() => setType(t)}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="hint" style={{ padding: 12 }}>
+          no numeric column to chart — select a numeric value, e.g.{" "}
+          <code>COUNT(*)</code> or <code>SUM(...)</code>, or switch to{" "}
+          <b>graph</b>/<b>tree</b> (which map a node + link column, no numeric
+          needed).
+        </div>
       </div>
     );
   }
