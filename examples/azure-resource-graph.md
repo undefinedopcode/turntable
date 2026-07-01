@@ -87,6 +87,12 @@ sources:
   nested `tags.env`) still work — they just run in-engine over the fetched rows.
   Push-eligible: `=`, `<>`, `<`,`<=`,`>`,`>=`, `IN`, `LIKE '%x%'` (→ `contains`),
   `IS [NOT] NULL`, on top-level columns.
+- **Nested `properties`/`tags`.** Two ways to reach into them: extract in the
+  outer SQL with `JSON_EXTRACT(properties, 'hardwareProfile.vmSize')` (works on
+  any `any` column), or project them source-side in a raw `query`
+  (`| project vmSize = properties.hardwareProfile.vmSize`) so they arrive as
+  typed top-level columns. The raw-KQL route also lets you *filter* on them at
+  the source; `JSON_EXTRACT` filters in-engine.
 - **Sampling.** The schema comes from the first ~32 rows; a column that only
   appears on rare resource types may be missed. Use a raw `query` with an
   explicit `project` when you need a guaranteed column set.

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -129,6 +130,7 @@ func (r *FuncRegistry) registerDefaults() {
 	r.Register("REGEXP_MATCHES", funcRegexpMatches)
 	r.Register("REGEXP_EXTRACT", funcRegexpExtract)
 	r.Register("EXTRACT_VALUE", funcExtractValue)
+	r.Register("JSON_EXTRACT", funcJSONExtract)
 	r.Register("REPEAT", funcRepeat)
 	r.Register("REVERSE", funcReverse)
 	r.Register("INITCAP", funcInitcap)
@@ -732,6 +734,97 @@ func funcExtractValue(args []Value) (Value, error) {
 		}
 	}
 	return StringVal(""), nil // key present with an empty value
+}
+
+// funcJSONExtract navigates a nested JSON-ish value by a path and returns what it
+// finds. JSON_EXTRACT(value, path):
+//
+//   - value is a structured value (an "any" column holding a decoded object/
+//     array, as produced by the JSON/Config/Resource-Graph/etc. connectors) or a
+//     string containing JSON (which is parsed first).
+//   - path is a dotted path with optional array indices and an optional leading
+//     "$": "a.b.c", "a[0].b", "$.hardwareProfile.vmSize", "tags['env']".
+//
+// The result is the value at that path: a typed scalar (string/number/bool) for a
+// leaf, an "any" for a nested object/array, or NULL if any segment is absent.
+func funcJSONExtract(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("JSON_EXTRACT expects 2 args (value, path)")
+	}
+	if args[0].IsNull() || args[1].IsNull() {
+		return Null(), nil
+	}
+	cur := args[0].V
+	// A string value may itself be a JSON document; parse it so paths work.
+	if s, ok := cur.(string); ok {
+		var parsed any
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+			return Null(), nil // a plain (non-JSON) string has no sub-paths
+		}
+		cur = parsed
+	}
+	for _, seg := range jsonPathSegments(args[1].AsString()) {
+		next, ok := jsonIndex(cur, seg)
+		if !ok {
+			return Null(), nil
+		}
+		cur = next
+	}
+	return valueFromGo(cur), nil
+}
+
+// jsonPathSegments splits a JSON path into segments, normalizing bracket indices
+// (a[0] -> a.0), stripping a leading "$", and unquoting bracket keys (['k']).
+func jsonPathSegments(path string) []string {
+	path = strings.TrimPrefix(path, "$")
+	path = strings.NewReplacer("[", ".", "]", "").Replace(path)
+	var segs []string
+	for _, s := range strings.Split(path, ".") {
+		if s = strings.Trim(s, "'\""); s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return segs
+}
+
+// jsonIndex resolves one path segment against a map (by key) or a slice (by
+// integer index). ok=false means the segment does not resolve.
+func jsonIndex(cur any, seg string) (any, bool) {
+	switch c := cur.(type) {
+	case map[string]any:
+		v, ok := c[seg]
+		return v, ok
+	case []any:
+		if i, err := strconv.Atoi(seg); err == nil && i >= 0 && i < len(c) {
+			return c[i], true
+		}
+	}
+	return nil, false
+}
+
+// valueFromGo wraps a decoded Go value (from JSON) as an engine Value, typing
+// scalars and leaving objects/arrays as "any". It mirrors connector.FromAny,
+// duplicated here to avoid an engine->connector import cycle.
+func valueFromGo(v any) Value {
+	switch x := v.(type) {
+	case nil:
+		return Null()
+	case bool:
+		return BoolVal(x)
+	case float64:
+		return FloatVal(x)
+	case float32:
+		return FloatVal(float64(x))
+	case int:
+		return IntVal(int64(x))
+	case int64:
+		return IntVal(x)
+	case string:
+		return StringVal(x)
+	case time.Time:
+		return TimeVal(x)
+	}
+	return AnyVal(v)
 }
 
 // funcRegexpExtract pulls a substring out of a string by regular expression.

@@ -356,6 +356,7 @@ Run `.functions` in the REPL for the live list.
 | `REGEXP_EXTRACT(s, pattern[, group])` | pull a substring out by regex: with `group` the n-th capture (0 = whole match), else the first capturing group (or the whole match if the pattern has none); NULL on no match. Returns a string — wrap in `CAST(… AS int/float)` to compute on it |
 | `REGEXP_MATCHES(s, pattern)` | alias of the 2-arg `REGEXP_EXTRACT` |
 | `EXTRACT_VALUE(key FROM s)` / `EXTRACT_VALUE(s, key)` | pull the value of `key` out of a `key: value` / `key=value` string (e.g. a log message or logfmt line); the value is a quoted `"…"`/`'…'` or a bare run, and `key` must sit on a separator boundary. NULL if absent. Returns a string — `CAST` to compute on it |
+| `JSON_EXTRACT(value, path)` | reach into a nested/structured value (an `any` column — e.g. `properties`/`configuration`/`tags` from the Resource Graph, AWS Config, or Kubernetes connectors — or a string containing JSON, which is parsed) by a dotted `path` with optional array indices and an optional leading `$`: `'a.b.c'`, `'a[0].b'`, `'$.hardwareProfile.vmSize'`, `'tags[''env'']'`. Returns the value at that path — a typed scalar for a leaf, an `any` for a nested object/array (extract again), or NULL if any segment is absent |
 
 ### Numeric
 

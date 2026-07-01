@@ -106,6 +106,11 @@ sources:
 
 ## Notes
 
+- **Nested `configuration`/`tags`.** Reach into them in the outer SQL with
+  `JSON_EXTRACT(configuration, 'instanceType')` (works on any `any` column), or
+  project them source-side with a raw `query` (Config's dotted paths) so they
+  arrive as top-level columns. Source-side projection also filters at the source;
+  `JSON_EXTRACT` filters in-engine.
 - **Pushdown is an optimization** — the engine re-applies the full
   `WHERE`/`LIMIT`, so a filter Config can't express (nested config, `<`/`>`,
   `<>`) still works, just fetched-then-filtered.

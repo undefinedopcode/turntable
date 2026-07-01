@@ -373,6 +373,54 @@ func TestNewStringFunctions(t *testing.T) {
 	}
 }
 
+func TestJSONExtract(t *testing.T) {
+	fr := NewFuncRegistry()
+	// A nested object like a connector's "any" column (Resource Graph properties).
+	obj := AnyVal(map[string]any{
+		"hardwareProfile": map[string]any{"vmSize": "Standard_D4s_v3"},
+		"instanceView":    map[string]any{"statuses": []any{map[string]any{"code": "PowerState/running"}}},
+		"count":           float64(3),
+		"enabled":         true,
+	})
+	cases := []struct {
+		args []Value
+		want Value
+	}{
+		// dotted path -> leaf string
+		{[]Value{obj, StringVal("hardwareProfile.vmSize")}, StringVal("Standard_D4s_v3")},
+		// leading $ (MySQL-style) is accepted
+		{[]Value{obj, StringVal("$.hardwareProfile.vmSize")}, StringVal("Standard_D4s_v3")},
+		// numeric leaf -> float; bool leaf -> bool
+		{[]Value{obj, StringVal("count")}, FloatVal(3)},
+		{[]Value{obj, StringVal("enabled")}, BoolVal(true)},
+		// array index via [i]
+		{[]Value{obj, StringVal("instanceView.statuses[0].code")}, StringVal("PowerState/running")},
+		// missing path -> NULL
+		{[]Value{obj, StringVal("hardwareProfile.missing")}, Null()},
+		{[]Value{obj, StringVal("nope.at.all")}, Null()},
+		// NULL value -> NULL
+		{[]Value{Null(), StringVal("a")}, Null()},
+		// a JSON *string* value is parsed
+		{[]Value{StringVal(`{"a":{"b":42}}`), StringVal("a.b")}, FloatVal(42)},
+		// a plain (non-JSON) string -> NULL
+		{[]Value{StringVal("hello"), StringVal("a")}, Null()},
+	}
+	for _, c := range cases {
+		got, err := fr.Lookup("JSON_EXTRACT")(c.args)
+		if err != nil {
+			t.Fatalf("JSON_EXTRACT(%v): %v", c.args, err)
+		}
+		if got.Type != c.want.Type || got.V != c.want.V {
+			t.Errorf("JSON_EXTRACT(%v) = %v (%v), want %v (%v)", c.args, got.V, got.Type, c.want.V, c.want.Type)
+		}
+	}
+	// A nested object path returns an "any" for further extraction.
+	got, _ := fr.Lookup("JSON_EXTRACT")([]Value{obj, StringVal("hardwareProfile")})
+	if got.Type != TypeAny {
+		t.Errorf("extracting an object should yield TypeAny, got %v", got.Type)
+	}
+}
+
 func TestNewTimeFunctions(t *testing.T) {
 	fr := NewFuncRegistry()
 	tm, _ := parseTime("2024-03-15T14:30:00Z")

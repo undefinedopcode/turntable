@@ -63,7 +63,9 @@ with your default kubeconfig):
 
 Plus a generic **`resource`** dataset for any other kind or CRD — returns
 `name, namespace, apiVersion, kind, created` plus `metadata`, `spec`, `status`
-as JSON to index into. Select the kind with options:
+as JSON to index into with `JSON_EXTRACT` (e.g.
+`JSON_EXTRACT(spec, 'replicas')`, `JSON_EXTRACT(status, 'phase')`). Select the
+kind with options:
 
 ```yaml
 sources:
