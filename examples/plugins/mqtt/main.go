@@ -46,7 +46,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/april/turntable/sdk/go/ttplugin"
+	"github.com/undefinedopcode/turntable-go-sdk/ttplugin"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 

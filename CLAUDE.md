@@ -214,7 +214,12 @@ interfaces:
     web add-source UI). Protocol is specified in **PLUGINS.md**. Tests:
     pipe-based codec/iterator (`client_test.go`) + an exec-self real-subprocess
     e2e (`pluginc_test.go`, via `TestMain`). **Author SDKs exist in three
-    languages**, each expected to graduate into its own repo eventually: **Go**
+    languages**, each also published as a standalone repo
+    (`undefinedopcode/turntable-{go,python,node}-sdk`) split from the canonical
+    `sdk/` directories here via `./sdk/publish.sh` (history-preserving
+    `git subtree split` + force-push; the dirs are standalone-ready — the Go
+    module path IS the standalone path `github.com/undefinedopcode/turntable-go-sdk`,
+    in-repo example plugins reach it via `replace`): **Go**
     (`sdk/go`, package `ttplugin`, dependency-free module) — mirrors this
     connector across the wire, implementing framing/dispatch/cursor/predicate-eval/
     cell-encoding so an author writes only `Plugin{Name, Datasets}` (each

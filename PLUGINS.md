@@ -14,13 +14,17 @@ downstream — the planner, the engine, pushdown — is identical to a built-in.
 dispatch, cursors, predicate evaluation, cell encoding), so you only declare
 datasets and a row function:
 
-- **Go**: `github.com/april/turntable/sdk/go/ttplugin` — see [Go SDK](#go-sdk)
-- **Python**: [`sdk/python`](sdk/python/README.md) — a single stdlib-only module
-- **Node.js**: [`sdk/node`](sdk/node/README.md) — a single dependency-free ES module
+- **Go**: `github.com/undefinedopcode/turntable-go-sdk/ttplugin`
+  ([repo](https://github.com/undefinedopcode/turntable-go-sdk)) — see [Go SDK](#go-sdk)
+- **Python**: [`sdk/python`](sdk/python/README.md)
+  ([repo](https://github.com/undefinedopcode/turntable-python-sdk)) — a single stdlib-only module
+- **Node.js**: [`sdk/node`](sdk/node/README.md)
+  ([repo](https://github.com/undefinedopcode/turntable-node-sdk)) — a single dependency-free ES module
 
 The protocol spec here remains the source of truth, and is what you implement
-directly in any other language. (The SDK directories are expected to graduate
-into their own repositories/packages eventually.)
+directly in any other language. The `sdk/` directories in this repo are the
+canonical source; each standalone repo is published from them with
+`./sdk/publish.sh` (a history-preserving `git subtree split`).
 
 Reference plugins, one per SDK style, live under `examples/plugins/`:
 
@@ -70,7 +74,7 @@ command in your shell profile.
 
 ## Go SDK
 
-The SDK module `github.com/april/turntable/sdk/go/ttplugin` is dependency-free
+The SDK module `github.com/undefinedopcode/turntable-go-sdk/ttplugin` is dependency-free
 (standard library only), so importing it does not pull in turntable's own
 dependency graph. It implements the entire protocol below — framing, dispatch,
 scan cursors, predicate **evaluation**, limit, and cell encoding — leaving you to
@@ -83,7 +87,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/april/turntable/sdk/go/ttplugin"
+	"github.com/undefinedopcode/turntable-go-sdk/ttplugin"
 )
 
 func main() {

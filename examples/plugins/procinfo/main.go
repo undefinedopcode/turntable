@@ -1,6 +1,6 @@
 // Command procinfo is a turntable plugin connector that exposes the live process
 // table as a queryable relation, built on the Go SDK
-// (github.com/april/turntable/sdk/go/ttplugin) and gopsutil for cross-platform
+// (github.com/undefinedopcode/turntable-go-sdk/ttplugin) and gopsutil for cross-platform
 // process enumeration.
 //
 // It demonstrates how little code a real plugin needs: the SDK handles the
@@ -27,7 +27,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/april/turntable/sdk/go/ttplugin"
+	"github.com/undefinedopcode/turntable-go-sdk/ttplugin"
 	"github.com/shirou/gopsutil/v4/process"
 )
 

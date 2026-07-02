@@ -1,5 +1,5 @@
 // Command sysinfo is a reference turntable plugin connector built on the Go SDK
-// (github.com/april/turntable/sdk/go/ttplugin). The SDK handles all of the
+// (github.com/undefinedopcode/turntable-go-sdk/ttplugin). The SDK handles all of the
 // JSON-RPC protocol plumbing — framing, dispatch, scan cursors, predicate
 // evaluation, limit, cell encoding — so this program only declares its datasets
 // and the functions that produce rows.
@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/april/turntable/sdk/go/ttplugin"
+	"github.com/undefinedopcode/turntable-go-sdk/ttplugin"
 )
 
 func main() {

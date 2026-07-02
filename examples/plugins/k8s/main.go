@@ -1,6 +1,6 @@
 // Command k8s is a turntable plugin connector that exposes a Kubernetes cluster's
 // resources as queryable relations, built on the Go SDK
-// (github.com/april/turntable/sdk/go/ttplugin) and client-go.
+// (github.com/undefinedopcode/turntable-go-sdk/ttplugin) and client-go.
 //
 // It is a plugin (not a built-in connector) so client-go — a large dependency
 // with strict version pins — stays out of turntable's own dependency graph, the
@@ -43,7 +43,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/april/turntable/sdk/go/ttplugin"
+	"github.com/undefinedopcode/turntable-go-sdk/ttplugin"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"

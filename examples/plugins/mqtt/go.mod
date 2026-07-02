@@ -7,7 +7,7 @@ module github.com/april/turntable/examples/plugins/mqtt
 go 1.23
 
 require (
-	github.com/april/turntable/sdk/go v0.0.0
+	github.com/undefinedopcode/turntable-go-sdk v0.0.0
 	github.com/eclipse/paho.mqtt.golang v1.5.0
 )
 
@@ -17,4 +17,4 @@ require (
 	golang.org/x/sync v0.7.0 // indirect
 )
 
-replace github.com/april/turntable/sdk/go => ../../../sdk/go
+replace github.com/undefinedopcode/turntable-go-sdk => ../../../sdk/go

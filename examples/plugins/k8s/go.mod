@@ -7,7 +7,7 @@ module github.com/april/turntable/examples/plugins/k8s
 go 1.24.0
 
 require (
-	github.com/april/turntable/sdk/go v0.0.0
+	github.com/undefinedopcode/turntable-go-sdk v0.0.0
 	k8s.io/api v0.31.1
 	k8s.io/apimachinery v0.31.1
 	k8s.io/client-go v0.31.1
@@ -54,4 +54,4 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace github.com/april/turntable/sdk/go => ../../../sdk/go
+replace github.com/undefinedopcode/turntable-go-sdk => ../../../sdk/go

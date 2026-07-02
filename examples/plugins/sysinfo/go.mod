@@ -5,6 +5,6 @@ module github.com/april/turntable/examples/plugins/sysinfo
 
 go 1.23
 
-require github.com/april/turntable/sdk/go v0.0.0
+require github.com/undefinedopcode/turntable-go-sdk v0.0.0
 
-replace github.com/april/turntable/sdk/go => ../../../sdk/go
+replace github.com/undefinedopcode/turntable-go-sdk => ../../../sdk/go

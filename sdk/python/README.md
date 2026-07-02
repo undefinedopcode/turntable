@@ -1,8 +1,8 @@
 # ttplugin (Python)
 
-The Python SDK for writing [turntable](../../README.md) plugin connectors — a
+The Python SDK for writing [turntable](https://github.com/undefinedopcode/turntable) plugin connectors — a
 single stdlib-only module implementing the stdio JSON-RPC protocol from
-[PLUGINS.md](../../PLUGINS.md): framing, dispatch, scan cursors, predicate
+[PLUGINS.md](https://github.com/undefinedopcode/turntable/blob/main/PLUGINS.md): framing, dispatch, scan cursors, predicate
 evaluation, and cell encoding. You declare datasets and a rows function:
 
 ```python
@@ -41,7 +41,14 @@ sources:
   `eval_predicate()` is exported).
 - stdout carries protocol messages only — log to stderr.
 
-See [`examples/plugins/pyfiles`](../../examples/plugins/pyfiles/pyfiles.py)
-for a complete reference plugin. This directory is intended to graduate into
-its own repository/package eventually; until then, import it by path (the
-reference plugin shows the two-line `sys.path` bootstrap).
+See [`examples/plugins/pyfiles`](https://github.com/undefinedopcode/turntable/blob/main/examples/plugins/pyfiles/pyfiles.py)
+for a complete reference plugin — it imports the module by path (a two-line
+`sys.path` bootstrap); with this repository checked out or the package
+installed, a plain `import ttplugin` works.
+
+Published standalone at
+[undefinedopcode/turntable-python-sdk](https://github.com/undefinedopcode/turntable-python-sdk)
+(split from the turntable monorepo's `sdk/python` — develop and file issues
+there). Sibling SDKs:
+[Go](https://github.com/undefinedopcode/turntable-go-sdk),
+[Node.js](https://github.com/undefinedopcode/turntable-node-sdk).

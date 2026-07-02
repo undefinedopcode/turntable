@@ -7,7 +7,7 @@ module github.com/april/turntable/examples/plugins/procinfo
 go 1.24.0
 
 require (
-	github.com/april/turntable/sdk/go v0.0.0
+	github.com/undefinedopcode/turntable-go-sdk v0.0.0
 	github.com/shirou/gopsutil/v4 v4.26.5
 )
 
@@ -22,4 +22,4 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 )
 
-replace github.com/april/turntable/sdk/go => ../../../sdk/go
+replace github.com/undefinedopcode/turntable-go-sdk => ../../../sdk/go

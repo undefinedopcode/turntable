@@ -1,8 +1,8 @@
 # ttplugin (Node.js)
 
-The Node.js SDK for writing [turntable](../../README.md) plugin connectors — a
+The Node.js SDK for writing [turntable](https://github.com/undefinedopcode/turntable) plugin connectors — a
 single dependency-free ES module implementing the stdio JSON-RPC protocol from
-[PLUGINS.md](../../PLUGINS.md): framing, dispatch, scan cursors, predicate
+[PLUGINS.md](https://github.com/undefinedopcode/turntable/blob/main/PLUGINS.md): framing, dispatch, scan cursors, predicate
 evaluation, and cell encoding. You declare datasets and a rows function (sync
 or async):
 
@@ -42,7 +42,14 @@ sources:
   is exported).
 - stdout carries protocol messages only — log with `console.error`.
 
-See [`examples/plugins/nodeos`](../../examples/plugins/nodeos/nodeos.mjs) for
-a complete reference plugin. This directory is intended to graduate into its
-own repository/package eventually; until then, import it by relative path (the
-reference plugin shows how).
+See [`examples/plugins/nodeos`](https://github.com/undefinedopcode/turntable/blob/main/examples/plugins/nodeos/nodeos.mjs) for
+a complete reference plugin — it imports the module by relative path; with
+this repository checked out (or the package installed) a plain
+`import { serve } from "ttplugin"` works.
+
+Published standalone at
+[undefinedopcode/turntable-node-sdk](https://github.com/undefinedopcode/turntable-node-sdk)
+(split from the turntable monorepo's `sdk/node` — develop and file issues
+there). Sibling SDKs:
+[Go](https://github.com/undefinedopcode/turntable-go-sdk),
+[Python](https://github.com/undefinedopcode/turntable-python-sdk).
