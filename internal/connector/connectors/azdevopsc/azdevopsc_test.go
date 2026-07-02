@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
@@ -457,6 +458,82 @@ func TestWIQLTopCap(t *testing.T) {
 	it.Close()
 	if gotTop != "5" {
 		t.Errorf("$top with LIMIT 5 = %q, want 5", gotTop)
+	}
+}
+
+// TestRetriesOn429 verifies a throttled response is retried (honoring
+// Retry-After) rather than surfaced as an error. The server 429s the first two
+// requests with Retry-After: 0 (no real wait), then succeeds.
+func TestRetriesOn429(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"workItems":[]}`))
+	}))
+	defer srv.Close()
+
+	opts := map[string]any{"organization": "org", "project": "proj", "pat": "x", "url": srv.URL}
+	it, err := New().Scan(context.Background(), connector.ScanRequest{Dataset: connector.Dataset{Source: "work_items", Options: opts}})
+	if err != nil {
+		t.Fatalf("scan should have retried through the 429s: %v", err)
+	}
+	it.Close()
+	if calls != 3 {
+		t.Errorf("server saw %d requests, want 3 (two throttled + one success)", calls)
+	}
+}
+
+// TestRetriesExhausted verifies that a server which never stops throttling
+// eventually surfaces the 429 rather than looping forever.
+func TestRetriesExhausted(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	opts := map[string]any{"organization": "org", "project": "proj", "pat": "x", "url": srv.URL}
+	_, err := New().Scan(context.Background(), connector.ScanRequest{Dataset: connector.Dataset{Source: "work_items", Options: opts}})
+	if err == nil {
+		t.Fatal("expected an error once retries are exhausted")
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error = %v, want it to mention the 429 status", err)
+	}
+	if calls != maxRetries+1 {
+		t.Errorf("server saw %d requests, want %d (initial + %d retries)", calls, maxRetries+1, maxRetries)
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	mk := func(h string) *http.Response {
+		r := &http.Response{Header: http.Header{}}
+		if h != "" {
+			r.Header.Set("Retry-After", h)
+		}
+		return r
+	}
+	// Delta-seconds Retry-After is honored.
+	if got := retryDelay(mk("2"), 0); got != 2*time.Second {
+		t.Errorf("Retry-After 2s = %v, want 2s", got)
+	}
+	// A value beyond the cap is clamped, not obeyed literally.
+	if got := retryDelay(mk("9999"), 0); got != maxRetryDelay {
+		t.Errorf("Retry-After 9999s = %v, want clamp to %v", got, maxRetryDelay)
+	}
+	// No header -> exponential backoff from a 2s base.
+	if got := retryDelay(mk(""), 0); got != 2*time.Second {
+		t.Errorf("backoff attempt 0 = %v, want 2s", got)
+	}
+	if got := retryDelay(mk(""), 2); got != 8*time.Second {
+		t.Errorf("backoff attempt 2 = %v, want 8s", got)
 	}
 }
 

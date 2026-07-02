@@ -36,10 +36,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/aztables"
 
 	"github.com/april/turntable/internal/connector"
+	"github.com/april/turntable/internal/connector/connectors/azcommon"
 	"github.com/april/turntable/internal/engine"
 	tsql "github.com/april/turntable/internal/sql"
 )
@@ -326,8 +328,13 @@ func (c *Connector) resolveClient(ctx context.Context, opts map[string]any) (tab
 // (account key / SAS / Azurite) or Azure AD via DefaultAzureCredential when an
 // account/endpoint is given.
 func buildServiceClient(opts map[string]any) (*aztables.ServiceClient, error) {
+	// Retry generously on 429s — Table Storage throttles, and a dashboard
+	// refresh fires many panels at once (see azcommon.RetryOptions).
+	clientOpts := &aztables.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Retry: azcommon.RetryOptions()},
+	}
 	if cs := stringOpt(opts, "connection_string"); cs != "" {
-		return aztables.NewServiceClientFromConnectionString(cs, nil)
+		return aztables.NewServiceClientFromConnectionString(cs, clientOpts)
 	}
 	account := stringOpt(opts, "account")
 	endpoint := stringOpt(opts, "endpoint")
@@ -342,7 +349,7 @@ func buildServiceClient(opts map[string]any) (*aztables.ServiceClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure credential: %w", err)
 	}
-	return aztables.NewServiceClient(serviceURL, cred, nil)
+	return aztables.NewServiceClient(serviceURL, cred, clientOpts)
 }
 
 // azAdapter wraps an aztables.ServiceClient as a tablesAPI: it drives the pagers
