@@ -30,8 +30,11 @@ const dashDirPath = ".turntable/dashboards"
 type Dashboard struct {
 	Name        string                  `yaml:"name" json:"name"`
 	Description string                  `yaml:"description,omitempty" json:"description,omitempty"`
-	Variables   map[string]DashboardVar `yaml:"variables,omitempty" json:"variables,omitempty"`
-	Panels      []DashboardPanel        `yaml:"panels" json:"panels"`
+	// Refresh, in seconds, makes the web UI re-run every panel on an interval
+	// (0 = manual only). The headless renderer ignores it.
+	Refresh   int                     `yaml:"refresh,omitempty" json:"refresh,omitempty"`
+	Variables map[string]DashboardVar `yaml:"variables,omitempty" json:"variables,omitempty"`
+	Panels    []DashboardPanel        `yaml:"panels" json:"panels"`
 }
 
 // DashboardVar is a `{{name}}` substitution variable: a default value and an

@@ -62,6 +62,15 @@ export function DashboardView({ slug, onClose }: { slug: string; onClose: () => 
   const varNames = useMemo(() => Object.keys(dash?.variables ?? {}).sort(), [dash]);
   const setVar = (k: string, v: string) => setVars((old) => ({ ...old, [k]: v }));
 
+  // Auto-refresh: a dashboard with `refresh: N` re-runs every panel every N
+  // seconds while open.
+  const refresh = dash?.refresh ?? 0;
+  useEffect(() => {
+    if (!(refresh > 0)) return;
+    const id = setInterval(() => setRunId((n) => n + 1), refresh * 1000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
   if (error) {
     return (
       <div className="dash-view">

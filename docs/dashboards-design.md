@@ -133,13 +133,23 @@ statements all behave identically to a tab). A future headless
   Editing beyond that (reorder, retitle, markdown) is v1-acceptable to do by
   editing the YAML; an in-app panel editor is a fast follow.
 
-## Later (explicitly out of v1)
+## Later — now shipped
+
+- **Headless rendering** (`internal/cli/dashrender.go`):
+  `turntable dashboard render <slug> [out.html] [name=value …]` executes every
+  panel (variables from their defaults, overridable per-run) and writes one
+  self-contained HTML report — markdown/stat/table/pivot rendered in Go,
+  charts via an embedded Chart.js bundle (`internal/cli/reportjs/`, vendored)
+  driven by each panel's frozen view config (line/area/bar/pie/scatter incl.
+  time axis, dual axis, bands, thresholds; other chart kinds fall back to a
+  table). `turntable dashboard list` lists dashboards.
+- **Auto-refresh**: a `refresh: N` (seconds) field re-runs every panel on an
+  interval while the dashboard is open in the web UI.
+
+## Still later (out of scope so far)
 
 - Grid layout / drag-and-drop; panel-level time-range picker synced across
-  panels (variables cover this in v1 via `{{range}}`).
-- Headless rendering: `turntable dashboard render <slug> --out report.html`
-  producing a static, self-contained HTML report (charts pre-rendered via the
-  same Chart.js configs), turning a story into an emailable artifact.
+  panels (variables cover this via `{{range}}`).
 - Server-side scheduled refresh of matviews feeding a dashboard.
 
 ## Sequencing

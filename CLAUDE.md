@@ -244,6 +244,12 @@ interfaces:
     compiled by `go build ./...` from the repo root.
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
+    `parquetc` additionally does **row-group pruning**: footer min/max chunk
+    statistics skip groups that provably cannot match the pushed WHERE
+    (`extractBounds` — column-vs-literal comparisons/BETWEEN in AND conjuncts;
+    time columns parse string literals) — a superset optimization, the engine
+    re-filters; on a time-sorted sensor file `WHERE ts > …` skips most groups
+    unread.
     `logc` is a plain-text log reader that **auto-detects** the format by
     sampling the first ~200 lines and picking the first of json / Apache-combined
     / common (CLF) / syslog / bracketed (`[time] [component] message`, e.g.
@@ -487,7 +493,12 @@ variables as quoted literals (`{{var:raw}}` raw); a panel's `view` is the
 frontend `ViewConfig` (see below), and the results pane's **Pin** button
 appends the current query+view as a panel — see `docs/dashboards-design.md`;
 frontend: `DashboardView.tsx`, `PinModal.tsx`, `Markdown.tsx` a minimal
-React-element markdown renderer, no innerHTML), and `POST /api/upload`
+React-element markdown renderer, no innerHTML; a `refresh: N` seconds field
+re-runs panels on an interval while open; **headless rendering** via the CLI
+subcommand `turntable dashboard render <slug> [out.html] [name=value …]`
+(`dashrender.go` — executes panels with variable defaults/overrides and writes
+one self-contained HTML report: markdown/stat/table/pivot rendered in Go,
+charts via the vendored Chart.js bundle in `reportjs/`; `dashboard list` too)), and `POST /api/upload`
 (multipart file → streamed to the persistent, project-relative `App.uploadDir` =
 `.turntable/data` (gitignored), created in `serve()`; kept across restarts so a
 file source saved to the config keeps resolving. Stored under the original

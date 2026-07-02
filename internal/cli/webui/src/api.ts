@@ -141,6 +141,7 @@ export interface DashboardPanel {
 export interface Dashboard {
   name: string;
   description?: string;
+  refresh?: number; // seconds between automatic panel re-runs (0/absent = manual)
   variables?: Record<string, DashboardVariable>;
   panels: DashboardPanel[];
 }

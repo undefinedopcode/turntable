@@ -621,6 +621,11 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.repl(ctx)
 	}
 
+	// `turntable dashboard list|render …` is a subcommand, not a query.
+	if rest := fs.Args(); len(rest) > 0 && rest[0] == "dashboard" {
+		return a.dashboardCmd(ctx, rest[1:])
+	}
+
 	// Determine the query text.
 	var query string
 	switch {
