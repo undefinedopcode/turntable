@@ -70,6 +70,17 @@ func (p *Parser) startsAsofJoin() bool {
 	return false
 }
 
+// startsQualifiedStar reports whether the cursor sits at `ident . *` — a
+// qualified star select item (alias.*).
+func (p *Parser) startsQualifiedStar() bool {
+	if p.cur().Kind != TKIdent || p.pos+2 >= len(p.toks) {
+		return false
+	}
+	dot, star := p.toks[p.pos+1], p.toks[p.pos+2]
+	return dot.Kind == TKOperator && dot.Value == "." &&
+		star.Kind == TKOperator && star.Value == "*"
+}
+
 // word matches a bare word whether it lexed as a keyword or an identifier —
 // used for the non-reserved noise words of the window-frame grammar (ROWS,
 // PRECEDING, UNBOUNDED, …) so they don't have to be reserved.
@@ -528,6 +539,13 @@ func (p *Parser) parseSelectList() ([]SelectItem, error) {
 		if p.op("*") {
 			p.advance()
 			items = append(items, SelectItem{Star: true})
+		} else if p.startsQualifiedStar() {
+			// alias.* — a qualified star, expanded by the planner to the
+			// columns of that FROM relation.
+			q := p.advance().Value // alias
+			p.advance()            // .
+			p.advance()            // *
+			items = append(items, SelectItem{Star: true, StarQualifier: q})
 		} else {
 			e, err := p.parseExpr()
 			if err != nil {
@@ -683,18 +701,27 @@ func (p *Parser) parseSourceString() (string, error) {
 	// collect a path-like token: idents, dots, slashes, dashes, digits. Dashes
 	// appear in filenames (my-data.csv) and Claude Code project slugs
 	// (-home-april-projects-x). (A "--" run still lexes as a comment.)
+	//
+	// The lexer discards whitespace, so adjacent tokens are only part of the
+	// same path when they are contiguous in the source (token Pos): a gap ends
+	// the path, letting `FROM csv:./orders.csv o` keep `o` as the table alias
+	// instead of fusing it into "orders.csvo".
 	var b strings.Builder
+	end := -1 // byte offset the next path token must start at (-1 = first)
 	for {
 		t := p.cur()
+		if end >= 0 && t.Pos != end {
+			break
+		}
 		if t.Kind == TKIdent || t.Kind == TKInt || t.Kind == TKFloat {
 			b.WriteString(t.Value)
-			p.advance()
 		} else if t.Kind == TKOperator && (t.Value == "." || t.Value == "/" || t.Value == "-") {
 			b.WriteString(t.Value)
-			p.advance()
 		} else {
 			break
 		}
+		end = t.Pos + len(t.Value)
+		p.advance()
 	}
 	if b.Len() == 0 {
 		return "", p.errf("expected source after ':'")

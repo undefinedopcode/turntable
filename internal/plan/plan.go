@@ -807,7 +807,7 @@ func (bc *buildCtx) buildSelect(stmt *sql.SelectStmt) (Node, engine.Schema, erro
 		if len(stmt.OrderBy) > 0 {
 			projectBase = &Sort{Child: projectBase, Terms: stmt.OrderBy}
 		}
-		outs, sch, err := bc.buildProjection(stmt, baseSchema)
+		outs, sch, err := bc.buildProjection(stmt, baseSchema, baseAliasRanges(base, baseSchema))
 		if err != nil {
 			return nil, engine.Schema{}, err
 		}
@@ -1431,13 +1431,14 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 	// a bare `ORDER BY r` must be substituted with the rewritten expression to
 	// evaluate against the aggregate's rows.
 	aliasExpr := map[string]sql.Expr{}
+	names := tableAliases(stmt)
 	for _, it := range stmt.Items.Items {
 		if it.Star {
 			return nil, nil, engine.Schema{}, nil, fmt.Errorf("SELECT * not valid with aggregation; name columns explicitly")
 		}
 		name := it.As
 		if name == "" {
-			name = inferExprName(it.Expr)
+			name = inferExprName(it.Expr, names)
 		}
 		switch {
 		case isTopLevelAgg(it.Expr):
@@ -1460,9 +1461,27 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 		}
 	}
 
+	// HAVING and ORDER BY evaluate over the aggregate's output rows, where a
+	// group key lives under its (unqualified) output name — a qualified
+	// reference like `ORDER BY o.region` would no longer resolve there. Rewrite
+	// each occurrence of a group-key expression to a reference to its output
+	// column (after ext.rewrite has already pulled the aggregates out).
+	rewriteKeyRefs := func(e sql.Expr) sql.Expr {
+		if e == nil {
+			return nil
+		}
+		return mapExpr(e, func(sub sql.Expr) sql.Expr {
+			for i, k := range keys {
+				if exprsEqual(sub, k) {
+					return &sql.ColRef{Name: keyCols[i].Name}
+				}
+			}
+			return nil
+		})
+	}
 	having := stmt.Having
 	if having != nil {
-		having = ext.rewrite(having)
+		having = rewriteKeyRefs(ext.rewrite(having))
 	}
 	var orderTerms []sql.OrderTerm
 	for _, ot := range stmt.OrderBy {
@@ -1472,7 +1491,7 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 				expr = repl
 			}
 		}
-		orderTerms = append(orderTerms, sql.OrderTerm{Expr: ext.rewrite(expr), Desc: ot.Desc})
+		orderTerms = append(orderTerms, sql.OrderTerm{Expr: rewriteKeyRefs(ext.rewrite(expr)), Desc: ot.Desc})
 	}
 
 	// The AggregateIter emits [group keys..., aggregates...]; the intermediate
@@ -1654,7 +1673,8 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 	if len(stmt.OrderBy) > 0 {
 		node = &Sort{Child: node, Terms: stmt.OrderBy}
 	}
-	outs, projSchema, err := bc.buildProjection(stmt, schema)
+	// No alias ranges: stars were rejected above, so none are expanded here.
+	outs, projSchema, err := bc.buildProjection(stmt, schema, nil)
 	if err != nil {
 		return nil, engine.Schema{}, false, err
 	}
@@ -1756,19 +1776,23 @@ func isTopLevelAgg(e sql.Expr) bool {
 // over the window output, which still carries every base column.
 func (bc *buildCtx) buildWindow(stmt *sql.SelectStmt, base Node, baseSchema engine.Schema) (Node, []engine.ProjectedExpr, engine.Schema, []sql.OrderTerm, error) {
 	win := &winExtractor{in: baseSchema}
+	names := tableAliases(stmt)
 	var outs []engine.ProjectedExpr
 	for _, it := range stmt.Items.Items {
 		if it.Star {
 			// Expand to the base relation's columns (window outputs are named
-			// select items, not part of *).
-			for _, c := range baseSchema.Columns {
-				outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: c.Name}, Name: c.Name})
+			// select items, not part of *); alias.* expands to that relation's
+			// columns only.
+			so, _, err := expandStar(it, baseSchema, baseAliasRanges(base, baseSchema))
+			if err != nil {
+				return nil, nil, engine.Schema{}, nil, err
 			}
+			outs = append(outs, so...)
 			continue
 		}
 		name := it.As
 		if name == "" {
-			name = inferExprName(it.Expr)
+			name = inferExprName(it.Expr, names)
 		}
 		outs = append(outs, engine.ProjectedExpr{Expr: win.rewrite(it.Expr), Name: name})
 	}
@@ -2351,50 +2375,66 @@ func (x *winExtractor) rewrite(e sql.Expr) sql.Expr {
 }
 
 // buildProjection expands a non-aggregate select list into engine.ProjectedExpr
-// entries and computes the output schema. (Aggregate queries build their
-// projection in buildAggregate, where aggregate calls are rewritten to column
-// references first.)
-func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema) ([]engine.ProjectedExpr, engine.Schema, error) {
-	// Handle SELECT * (and alias.*).
-	if len(stmt.Items.Items) == 1 && stmt.Items.Items[0].Star {
-		var outs []engine.ProjectedExpr
-		var cols []engine.Column
-		for _, c := range inSchema.Columns {
-			c := c
-			outs = append(outs, engine.ProjectedExpr{
-				Expr: &sql.ColRef{Name: c.Name},
-				Name: c.Name,
-				Type: c.Type,
-			})
-			cols = append(cols, c)
-		}
-		return outs, engine.Schema{Columns: cols}, nil
-	}
-
+// entries and computes the output schema. aliases carries the FROM relations'
+// column ranges so a qualified star (o.*) expands to just that relation's
+// columns. (Aggregate queries build their projection in buildAggregate, where
+// aggregate calls are rewritten to column references first.)
+func (bc *buildCtx) buildProjection(stmt *sql.SelectStmt, inSchema engine.Schema, aliases []engine.AliasRange) ([]engine.ProjectedExpr, engine.Schema, error) {
+	names := tableAliases(stmt)
 	var outs []engine.ProjectedExpr
 	var cols []engine.Column
 	for _, it := range stmt.Items.Items {
 		if it.Star {
-			for _, c := range inSchema.Columns {
-				c := c
-				outs = append(outs, engine.ProjectedExpr{
-					Expr: &sql.ColRef{Name: c.Name},
-					Name: c.Name,
-					Type: c.Type,
-				})
-				cols = append(cols, c)
+			so, sc, err := expandStar(it, inSchema, aliases)
+			if err != nil {
+				return nil, engine.Schema{}, err
 			}
+			outs = append(outs, so...)
+			cols = append(cols, sc...)
 			continue
 		}
 		name := it.As
 		if name == "" {
-			name = inferExprName(it.Expr)
+			name = inferExprName(it.Expr, names)
 		}
 		typ := exprType(it.Expr, inSchema)
 		outs = append(outs, engine.ProjectedExpr{Expr: it.Expr, Name: name, Type: typ})
 		cols = append(cols, engine.Column{Name: name, Type: typ, Nullable: true})
 	}
 	return outs, engine.Schema{Columns: cols}, nil
+}
+
+// expandStar returns the projected columns of one star select item: every
+// input column for a bare *, or one FROM relation's columns for a qualified
+// alias.* (located by its alias range; the projected refs stay qualified so
+// same-named columns on the other side of a join cannot shadow them).
+func expandStar(it sql.SelectItem, inSchema engine.Schema, aliases []engine.AliasRange) ([]engine.ProjectedExpr, []engine.Column, error) {
+	var outs []engine.ProjectedExpr
+	var cols []engine.Column
+	appendCol := func(c engine.Column, qual string) {
+		outs = append(outs, engine.ProjectedExpr{
+			Expr: &sql.ColRef{Qualifier: qual, Name: c.Name},
+			Name: c.Name,
+			Type: c.Type,
+		})
+		cols = append(cols, c)
+	}
+	if it.StarQualifier == "" {
+		for _, c := range inSchema.Columns {
+			appendCol(c, "")
+		}
+		return outs, cols, nil
+	}
+	for _, ar := range aliases {
+		if !strings.EqualFold(ar.Alias, it.StarQualifier) {
+			continue
+		}
+		for i := ar.Start; i < ar.End && i < len(inSchema.Columns); i++ {
+			appendCol(inSchema.Columns[i], it.StarQualifier)
+		}
+		return outs, cols, nil
+	}
+	return nil, nil, fmt.Errorf("unknown table alias %q in %s.*", it.StarQualifier, it.StarQualifier)
 }
 
 // exprType infers the result type of a projection expression against the input
@@ -2665,11 +2705,15 @@ func isNumeric(t engine.Type) bool { return t == engine.TypeInt || t == engine.T
 // isTemporal reports whether t is a time or a duration.
 func isTemporal(t engine.Type) bool { return t == engine.TypeTime || t == engine.TypeDuration }
 
-// inferExprName derives a default column name for an expression.
-func inferExprName(e sql.Expr) string {
+// inferExprName derives a default column name for an expression. aliases is
+// the query's FROM alias set (tableAliases): a qualifier naming a relation is
+// dropped from the output name (SELECT o.amount → column "amount", standard
+// SQL), while a qualifier that is not an alias is a dotted source attribute
+// (service.name) whose dot is part of the column's real name and stays.
+func inferExprName(e sql.Expr, aliases map[string]bool) string {
 	switch ex := e.(type) {
 	case *sql.ColRef:
-		if ex.Qualifier != "" {
+		if ex.Qualifier != "" && !aliasFold(aliases, ex.Qualifier) {
 			return ex.Qualifier + "." + ex.Name
 		}
 		return ex.Name
@@ -2681,6 +2725,19 @@ func inferExprName(e sql.Expr) string {
 		return "string"
 	}
 	return "expr"
+}
+
+// aliasFold reports whether q case-insensitively matches a FROM alias.
+func aliasFold(aliases map[string]bool, q string) bool {
+	if aliases[q] {
+		return true
+	}
+	for a := range aliases {
+		if strings.EqualFold(a, q) {
+			return true
+		}
+	}
+	return false
 }
 
 // exprHasAgg reports whether the expression tree contains an aggregate call.

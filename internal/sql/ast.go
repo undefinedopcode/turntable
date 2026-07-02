@@ -129,9 +129,10 @@ type SelectList struct {
 
 // SelectItem is one element of the projection.
 type SelectItem struct {
-	Star bool   // * or alias.*
-	Expr Expr   // non-star item
-	As   string // optional alias
+	Star          bool   // * or alias.*
+	StarQualifier string // the alias of a qualified star (o.*); empty for bare *
+	Expr          Expr   // non-star item
+	As            string // optional alias
 }
 
 // TableRef identifies a source in the FROM clause.

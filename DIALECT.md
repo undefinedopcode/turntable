@@ -31,9 +31,15 @@ SELECT [DISTINCT] <select_list>
   source.
 - A trailing `;` is accepted. Only one statement per query (except `UNION`).
 - `FROM` is optional: `SELECT 1 + 1` evaluates a single row (handy in the REPL).
-- `SELECT *` and `alias.*` expand all columns (not allowed with aggregation).
+- `SELECT *` expands all columns; `alias.*` expands just that FROM relation's
+  columns (`SELECT o.*, c.name FROM orders o JOIN customers c ON …`). Neither
+  is allowed with aggregation.
 - Column aliases work with or without `AS`: `COUNT(*) AS n` or `COUNT(*) n`
   (an alias that is a reserved word still needs `AS`). Table aliases too.
+- An unaliased qualified column names its output by the **column only**
+  (standard SQL): `SELECT o.amount …` yields a column `amount`, so views and
+  derived tables expose clean names. A dotted **source attribute** whose real
+  name contains the dot (e.g. Honeycomb's `service.name`) keeps its full name.
 - `GROUP BY` / `ORDER BY` accept **positional references**: a bare integer `N`
   means the `N`-th select item (`ORDER BY 2 DESC`, `GROUP BY 1`). An
   out-of-range position is an error.
@@ -302,6 +308,7 @@ for the query-scoped equivalent.
 | `users` | a source registered in config / `.use` / the web UI |
 | `users AS u`, `users u` | with an alias |
 | `csv:./data/sales.csv` | qualified connector ref (prefix = connector name) |
+| `csv:./sales.csv s`, `… AS s` | inline refs take aliases too (path ends at whitespace) |
 | `excel:./report.xlsx` | file connector ref |
 | `http://host/data.json` | inline URL ref (`http`/`https` → the http connector) |
 | `sql:postgres://…/db` | the whole DSN is captured as the source |
