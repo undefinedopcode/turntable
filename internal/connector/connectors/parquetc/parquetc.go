@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/sql"
 	"github.com/parquet-go/parquet-go"
 )
 
@@ -176,11 +178,22 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 		return nil, err
 	}
 	schema, units := schemaOf(pf.Schema())
-	reader := parquet.NewReader(pf)
+
+	// Row-group pruning: use the footer's per-chunk min/max statistics to skip
+	// row groups that provably cannot contain a matching row. It is a pure
+	// superset optimization — the engine re-applies the full WHERE regardless —
+	// but on a time-partitioned sensor file a `WHERE ts > …` skips most of the
+	// file without reading it.
+	groups := pf.RowGroups()
+	if req.Predicate != nil {
+		if bounds := extractBounds(req.Predicate, schema); len(bounds) > 0 {
+			groups = pruneRowGroups(groups, bounds, schema, units)
+		}
+	}
 
 	// Honor Limit only when there is no predicate to push residual filtering to
-	// the engine; with a predicate present, return all rows so the engine can
-	// apply WHERE before LIMIT.
+	// the engine; with a predicate present, return all (surviving) rows so the
+	// engine can apply WHERE before LIMIT.
 	var limit *int
 	if req.Predicate == nil {
 		limit = req.Limit
@@ -188,7 +201,7 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 
 	return &parquetIter{
 		f:      f,
-		reader: reader,
+		groups: groups,
 		schema: schema,
 		units:  units,
 		limit:  limit,
@@ -197,13 +210,14 @@ func (Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine.Ro
 
 type parquetIter struct {
 	f      *os.File
-	reader *parquet.Reader
+	groups []parquet.RowGroup // row groups to read (post-pruning)
+	gi     int                // next group to open
+	rows   parquet.Rows       // reader over the current group (nil = open next)
 	schema engine.Schema
 	units  []tsUnit
 
 	buf    []parquet.Row // batch buffer
 	bi     int           // index into buf
-	eof    bool
 	closed bool
 
 	limit   *int
@@ -218,26 +232,32 @@ func (it *parquetIter) Next() (engine.Row, bool, error) {
 		return engine.Row{}, false, nil
 	}
 
-	// Refill the batch buffer if exhausted.
-	if it.bi >= len(it.buf) {
-		if it.eof {
-			return engine.Row{}, false, nil
+	// Refill the batch buffer, advancing across row groups as each drains.
+	for it.bi >= len(it.buf) {
+		if it.rows == nil {
+			if it.gi >= len(it.groups) {
+				return engine.Row{}, false, nil
+			}
+			it.rows = it.groups[it.gi].Rows()
+			it.gi++
 		}
 		if it.buf == nil {
 			it.buf = make([]parquet.Row, 64)
 		}
-		n, err := it.reader.ReadRows(it.buf)
+		it.buf = it.buf[:cap(it.buf)]
+		n, err := it.rows.ReadRows(it.buf)
 		it.buf = it.buf[:n]
 		it.bi = 0
-		if err != nil {
-			if err == io.EOF {
-				it.eof = true
-			} else {
-				return engine.Row{}, false, err
-			}
+		if err != nil && err != io.EOF {
+			return engine.Row{}, false, err
 		}
-		if n == 0 {
-			return engine.Row{}, false, nil
+		if err == io.EOF || n == 0 {
+			// This group is drained; close it and move to the next.
+			it.rows.Close()
+			it.rows = nil
+			if n == 0 {
+				continue
+			}
 		}
 	}
 
@@ -320,10 +340,204 @@ func (it *parquetIter) Close() error {
 		return nil
 	}
 	it.closed = true
-	err1 := it.reader.Close()
+	var err1 error
+	if it.rows != nil {
+		err1 = it.rows.Close()
+		it.rows = nil
+	}
 	err2 := it.f.Close()
 	if err1 != nil {
 		return err1
 	}
 	return err2
+}
+
+// ---- row-group pruning ---------------------------------------------------------
+
+// bound is one provable per-column condition extracted from the pushed WHERE:
+// `column OP literal` with OP in =, <, <=, >, >=.
+type bound struct {
+	col int // schema column index
+	op  string
+	val engine.Value
+}
+
+// extractBounds pulls prunable conditions out of the predicate's top-level AND
+// conjuncts: column-vs-literal comparisons and BETWEEN. Anything else (OR, <>,
+// LIKE, expressions, …) is simply skipped — it cannot help pruning, but the
+// remaining conjuncts still can, and the engine applies the full WHERE anyway.
+func extractBounds(pred connector.Expr, schema engine.Schema) []bound {
+	var out []bound
+	var walk func(e connector.Expr)
+	walk = func(e connector.Expr) {
+		switch ex := e.(type) {
+		case *sql.BinaryOp:
+			if ex.Op == "AND" {
+				walk(ex.Left)
+				walk(ex.Right)
+				return
+			}
+			switch ex.Op {
+			case "=", "<", "<=", ">", ">=":
+			default:
+				return
+			}
+			if col, val, ok := colLit(ex.Left, ex.Right, schema); ok {
+				out = append(out, bound{col: col, op: ex.Op, val: val})
+			} else if col, val, ok := colLit(ex.Right, ex.Left, schema); ok {
+				out = append(out, bound{col: col, op: flipCmp(ex.Op), val: val})
+			}
+		case *sql.BetweenExpr:
+			if ex.Negate {
+				return
+			}
+			if col, lo, ok := colLit(ex.Expr, ex.Low, schema); ok {
+				out = append(out, bound{col: col, op: ">=", val: lo})
+				if _, hi, ok := colLit(ex.Expr, ex.High, schema); ok {
+					out = append(out, bound{col: col, op: "<=", val: hi})
+				}
+			}
+		}
+	}
+	walk(pred)
+	return out
+}
+
+func flipCmp(op string) string {
+	switch op {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	}
+	return op
+}
+
+// colLit resolves (column-expr, literal-expr) to a schema column index and an
+// engine literal value comparable against that column's chunk statistics. A
+// string literal against a time column is parsed to a time.
+func colLit(colExpr, litExpr connector.Expr, schema engine.Schema) (int, engine.Value, bool) {
+	cr, ok := colExpr.(*sql.ColRef)
+	if !ok {
+		return 0, engine.Value{}, false
+	}
+	col := -1
+	for i, c := range schema.Columns {
+		if strings.EqualFold(c.Name, cr.Name) {
+			col = i
+			break
+		}
+	}
+	if col < 0 {
+		return 0, engine.Value{}, false
+	}
+	var v engine.Value
+	switch lit := litExpr.(type) {
+	case *sql.LitInt:
+		v = engine.IntVal(lit.V)
+	case *sql.LitFloat:
+		v = engine.FloatVal(lit.V)
+	case *sql.LitString:
+		v = engine.StringVal(lit.V)
+		if schema.Columns[col].Type == engine.TypeTime {
+			t, err := parseTimeLit(lit.V)
+			if err != nil {
+				return 0, engine.Value{}, false
+			}
+			v = engine.TimeVal(t)
+		}
+	default:
+		return 0, engine.Value{}, false
+	}
+	return col, v, true
+}
+
+func parseTimeLit(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unparseable time %q", s)
+}
+
+// pruneRowGroups keeps only the groups whose chunk statistics could satisfy
+// every bound. A chunk with no usable statistics never causes pruning.
+func pruneRowGroups(groups []parquet.RowGroup, bounds []bound, schema engine.Schema, units []tsUnit) []parquet.RowGroup {
+	kept := groups[:0:0]
+	for _, rg := range groups {
+		if groupMayMatch(rg, bounds, schema, units) {
+			kept = append(kept, rg)
+		}
+	}
+	return kept
+}
+
+// groupMayMatch reports whether a row group could contain a row satisfying
+// every bound, judged by per-chunk [min, max]. Rows where the column is NULL
+// fail a comparison predicate anyway, so nulls in a chunk never block pruning.
+func groupMayMatch(rg parquet.RowGroup, bounds []bound, schema engine.Schema, units []tsUnit) bool {
+	chunks := rg.ColumnChunks()
+	for _, b := range bounds {
+		if b.col >= len(chunks) || b.col >= len(units) {
+			continue
+		}
+		lo, hi, ok := chunkBounds(chunks[b.col], schema.Columns[b.col].Type, units[b.col])
+		if !ok {
+			continue // no statistics: cannot prune on this column
+		}
+		match := true
+		switch b.op {
+		case "=":
+			match = engine.Compare(b.val, lo) >= 0 && engine.Compare(b.val, hi) <= 0
+		case "<":
+			match = engine.Compare(lo, b.val) < 0
+		case "<=":
+			match = engine.Compare(lo, b.val) <= 0
+		case ">":
+			match = engine.Compare(hi, b.val) > 0
+		case ">=":
+			match = engine.Compare(hi, b.val) >= 0
+		}
+		if !match {
+			return false
+		}
+	}
+	return true
+}
+
+// chunkBounds returns the [min, max] of a column chunk from its page index,
+// converted to engine values. ok=false when the index is absent or every page
+// is null-only.
+func chunkBounds(chunk parquet.ColumnChunk, typ engine.Type, unit tsUnit) (lo, hi engine.Value, ok bool) {
+	idx, err := chunk.ColumnIndex()
+	if err != nil || idx == nil {
+		return engine.Value{}, engine.Value{}, false
+	}
+	for i := 0; i < idx.NumPages(); i++ {
+		if idx.NullPage(i) {
+			continue
+		}
+		mn, mx := idx.MinValue(i), idx.MaxValue(i)
+		if mn.IsNull() || mx.IsNull() {
+			continue
+		}
+		lov := toEngineValue(mn, typ, unit)
+		hiv := toEngineValue(mx, typ, unit)
+		if !ok {
+			lo, hi, ok = lov, hiv, true
+			continue
+		}
+		if engine.Compare(lov, lo) < 0 {
+			lo = lov
+		}
+		if engine.Compare(hiv, hi) > 0 {
+			hi = hiv
+		}
+	}
+	return lo, hi, ok
 }

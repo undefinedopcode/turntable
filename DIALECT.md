@@ -594,8 +594,11 @@ For a **single-table** scan the planner offers the `WHERE` predicate and a
 regardless of what the connector honors. SQL databases translate supported
 predicates into the query (`x > 1`, `IN (…)`, `LIKE`, `BETWEEN`, `IS NULL`);
 unsupported pieces (e.g. `LOWER(name) = 'x'`) and all `ORDER BY` run in the
-engine. Azure Tables translates predicates to an OData `$filter`. Run
-`turntable --explain '<query>'` to see what was pushed
+engine. Azure Tables translates predicates to an OData `$filter`. Parquet files
+use the footer's row-group statistics to **skip row groups** that provably
+cannot match the `WHERE` (comparisons/`BETWEEN` on plain columns, including
+time columns) — on a time-sorted file, `WHERE ts > …` reads only the matching
+tail. Run `turntable --explain '<query>'` to see what was pushed
 (`Scan inv [pushdown: predicate, limit=3]`).
 
 A single-table **`GROUP BY`/aggregate** query can be computed entirely at the
