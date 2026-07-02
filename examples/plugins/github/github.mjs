@@ -11,18 +11,25 @@
 //   repos    repositories of `owner` (user or org; default: the token's user)
 //            name, full_name, private, fork, archived, stars, forks,
 //            open_issues, language, default_branch, size_kb, pushed_at, created_at
-//   issues   issues of `repo` (owner/name, required) — excludes PRs
-//            number, title, state, author, labels, comments, created_at,
+//   issues   issues of `repo` — excludes PRs
+//            repo, number, title, state, author, labels, comments, created_at,
 //            updated_at, closed_at
-//   prs      pull requests of `repo` (required)
-//            number, title, state, author, draft, base, head, created_at,
+//   prs      pull requests of `repo`
+//            repo, number, title, state, author, draft, base, head, created_at,
 //            merged_at, closed_at
-//   runs     Actions workflow runs of `repo` (required) — great time-series data
-//            id, workflow, run_number, event, status, conclusion, branch,
+//   runs     Actions workflow runs of `repo` — great time-series data
+//            repo, id, workflow, run_number, event, status, conclusion, branch,
 //            sha, actor, created_at, updated_at, duration_s
 //
+// issues/prs/runs require `repo` — one "owner/name", or several comma-separated
+// — and tag every row with its repo, the JOIN key back to repos.full_name:
+//
+//   SELECT r.name, COUNT(p.number) AS open_prs
+//   FROM repos r LEFT JOIN prs p ON p.repo = r.full_name AND p.state = 'open'
+//   GROUP BY r.name
+//
 // Options: repo, owner, token, state (issues/prs: open|closed|all, default all),
-// max_pages (100 rows per page, default 5), api_url (GitHub Enterprise).
+// max_pages (100 rows per page per repo, default 5), api_url (GitHub Enterprise).
 //
 //   sources:
 //     gh:
@@ -80,13 +87,33 @@ async function api(path, options, params = {}) {
   return out;
 }
 
-function needRepo(options) {
-  const repo = options.repo;
-  if (!repo || !repo.includes("/")) {
-    throw new Error('this dataset needs a repo option like "owner/name"');
+// needRepos parses the repo option: one or more comma-separated "owner/name"
+// entries. issues/prs/runs fetch each and tag every row with its repo — the
+// join key back to repos.full_name.
+function needRepos(options) {
+  const repos = String(options.repo ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (repos.length === 0 || repos.some((r) => !r.includes("/"))) {
+    throw new Error('this dataset needs a repo option like "owner/name" (comma-separate several)');
   }
-  return repo;
+  return repos;
 }
+
+// perRepo fetches rows for each configured repo and prefixes each row with the
+// repo's full name.
+async function perRepo(options, fetchOne) {
+  const out = [];
+  for (const repo of needRepos(options)) {
+    for (const row of await fetchOne(repo)) {
+      out.push([repo, ...row]);
+    }
+  }
+  return out;
+}
+
+const repoCol = { name: "repo", type: "string" }; // joins to repos.full_name
 
 const date = (s) => (s ? new Date(s) : null);
 
@@ -124,6 +151,7 @@ serve({
     },
     issues: {
       columns: [
+        repoCol,
         { name: "number", type: "int" },
         { name: "title", type: "string" },
         { name: "state", type: "string" },
@@ -134,22 +162,23 @@ serve({
         { name: "updated_at", type: "time", nullable: true },
         { name: "closed_at", type: "time", nullable: true },
       ],
-      rows: async (req) => {
-        const repo = needRepo(req.options);
-        const issues = await api(`/repos/${repo}/issues`, req.options, {
-          state: req.options.state || "all",
-        });
-        return issues
-          .filter((i) => !i.pull_request) // the issues API interleaves PRs
-          .map((i) => [
-            i.number, i.title, i.state, i.user?.login ?? null,
-            i.labels?.map((l) => l.name).join(",") || null,
-            i.comments, date(i.created_at), date(i.updated_at), date(i.closed_at),
-          ]);
-      },
+      rows: (req) =>
+        perRepo(req.options, async (repo) => {
+          const issues = await api(`/repos/${repo}/issues`, req.options, {
+            state: req.options.state || "all",
+          });
+          return issues
+            .filter((i) => !i.pull_request) // the issues API interleaves PRs
+            .map((i) => [
+              i.number, i.title, i.state, i.user?.login ?? null,
+              i.labels?.map((l) => l.name).join(",") || null,
+              i.comments, date(i.created_at), date(i.updated_at), date(i.closed_at),
+            ]);
+        }),
     },
     prs: {
       columns: [
+        repoCol,
         { name: "number", type: "int" },
         { name: "title", type: "string" },
         { name: "state", type: "string" },
@@ -161,19 +190,20 @@ serve({
         { name: "merged_at", type: "time", nullable: true },
         { name: "closed_at", type: "time", nullable: true },
       ],
-      rows: async (req) => {
-        const repo = needRepo(req.options);
-        const prs = await api(`/repos/${repo}/pulls`, req.options, {
-          state: req.options.state || "all",
-        });
-        return prs.map((p) => [
-          p.number, p.title, p.state, p.user?.login ?? null, !!p.draft,
-          p.base?.ref, p.head?.ref, date(p.created_at), date(p.merged_at), date(p.closed_at),
-        ]);
-      },
+      rows: (req) =>
+        perRepo(req.options, async (repo) => {
+          const prs = await api(`/repos/${repo}/pulls`, req.options, {
+            state: req.options.state || "all",
+          });
+          return prs.map((p) => [
+            p.number, p.title, p.state, p.user?.login ?? null, !!p.draft,
+            p.base?.ref, p.head?.ref, date(p.created_at), date(p.merged_at), date(p.closed_at),
+          ]);
+        }),
     },
     runs: {
       columns: [
+        repoCol,
         { name: "id", type: "int" },
         { name: "workflow", type: "string" },
         { name: "run_number", type: "int" },
@@ -187,23 +217,23 @@ serve({
         { name: "updated_at", type: "time", nullable: true },
         { name: "duration_s", type: "int", nullable: true },
       ],
-      rows: async (req) => {
-        const repo = needRepo(req.options);
-        const runs = await api(`/repos/${repo}/actions/runs`, req.options);
-        return runs.map((r) => {
-          const start = date(r.run_started_at ?? r.created_at);
-          const end = date(r.updated_at);
-          const duration =
-            start && end && r.status === "completed"
-              ? Math.round((end - start) / 1000)
-              : null;
-          return [
-            r.id, r.name, r.run_number, r.event, r.status, r.conclusion,
-            r.head_branch, (r.head_sha ?? "").slice(0, 8), r.actor?.login ?? null,
-            date(r.created_at), date(r.updated_at), duration,
-          ];
-        });
-      },
+      rows: (req) =>
+        perRepo(req.options, async (repo) => {
+          const runs = await api(`/repos/${repo}/actions/runs`, req.options);
+          return runs.map((r) => {
+            const start = date(r.run_started_at ?? r.created_at);
+            const end = date(r.updated_at);
+            const duration =
+              start && end && r.status === "completed"
+                ? Math.round((end - start) / 1000)
+                : null;
+            return [
+              r.id, r.name, r.run_number, r.event, r.status, r.conclusion,
+              r.head_branch, (r.head_sha ?? "").slice(0, 8), r.actor?.login ?? null,
+              date(r.created_at), date(r.updated_at), duration,
+            ];
+          });
+        }),
     },
   },
 });
