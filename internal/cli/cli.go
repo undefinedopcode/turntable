@@ -368,6 +368,17 @@ func (a *App) registerPluginSource(ctx context.Context, name string, src config.
 		}
 		var registered []string
 		for _, d := range datasets {
+			// The source's options apply to every expanded dataset (the plugin
+			// reads them from the scan's dataset.options); anything the plugin
+			// advertised on the dataset itself wins on conflict.
+			merged := map[string]any{}
+			for k, v := range opts {
+				merged[k] = v
+			}
+			for k, v := range d.Options {
+				merged[k] = v
+			}
+			d.Options = merged
 			logical := d.Name
 			if _, ok := a.Reg.Resolve(logical); ok {
 				logical = name + "_" + d.Name

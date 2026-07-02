@@ -240,7 +240,9 @@ interfaces:
     plugins; `context`/`kubeconfig`/`namespace` options; `mqtt` = a bounded MQTT
     broker snapshot via paho — subscribe, collect for a `duration` window,
     return rows, retained messages arriving instantly; `pyfiles` = a directory
-    tree as a relation, Python; `nodeos` = live OS state cpus/net/host, Node)
+    tree as a relation, Python; `nodeos` = live OS state cpus/net/host, Node;
+    `github` = repos/issues/prs/workflow-runs over the GitHub REST API, Node —
+    token from `gh auth token`, falling back to GITHUB_TOKEN/`token` option)
     are each their **own module** using the SDK (kept separate so
     gopsutil/client-go/paho never enter turntable's or the SDK's dep graph; Go
     ones `replace`→`../../../sdk/go` locally, Python/Node ones import the SDK by
@@ -267,7 +269,14 @@ interfaces:
     (`~/.claude/projects/<slug>/*.jsonl`): text extraction from string-or-array
     `content`, a `path`/`project` option (or default to the cwd's project), and a
     `kind` option selecting one of three fixed schemas — `messages` (default; one
-    row per message), `tools` (one row per `tool_use` block), or `tool_results`
+    row per message, incl. `model`, the usage token columns
+    `input/output/cache_write/cache_read_tokens`, and `cost_usd` — an API
+    **list-price estimate** computed from a per-model-prefix price table in
+    `costUSD` (cache writes 1.25×/2× input by TTL — the `cache_creation`
+    breakdown is used when present — reads 0.1×; date-aware Sonnet 5 intro
+    pricing; unknown/synthetic models → NULL; update `modelPrices` as prices
+    change) so per-model API spend is `GROUP BY model` away), `tools` (one row
+    per `tool_use` block), or `tool_results`
     (one row per `tool_result` block; join `tool_use_id` to a tools-view
     `tool_id`). The iterator buffers the N rows a message produces. Its options
     route through

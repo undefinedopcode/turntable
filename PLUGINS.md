@@ -36,6 +36,7 @@ Reference plugins, one per SDK style, live under `examples/plugins/`:
 | [`mqtt`](examples/plugins/mqtt/main.go) | Go | bounded MQTT broker snapshot (paho) — subscribe, collect for a window, return rows |
 | [`pyfiles`](examples/plugins/pyfiles/pyfiles.py) | Python | a directory tree as a relation — no build step |
 | [`nodeos`](examples/plugins/nodeos/nodeos.mjs) | Node.js | live OS state (cpus/net/host) — no build step |
+| [`github`](examples/plugins/github/github.mjs) | Node.js | GitHub repos/issues/prs/workflow runs via the REST API — token from `gh auth token` (or GITHUB_TOKEN), async rows, pagination |
 
 Build the Go ones with `./examples/plugins/build.sh`; the Python/Node ones run
 from source (`command: ["python3", ".../pyfiles.py"]`).
