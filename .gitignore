@@ -6,10 +6,12 @@
 turntable.local.yaml
 /turntable.yaml
 /data/
-# web-UI uploads (persistent upload dir created by --serve). NB: only data/ —
-# .turntable/dashboards/ holds dashboard definitions, which are meant to be
-# committed and shared.
-.turntable/data/
+# .turntable/ is the per-project runtime dir (web-UI uploads under data/, plus
+# dashboard definitions). In turntable's own repo it holds only local dev/test
+# artifacts, so it's ignored wholesale — shareable example dashboards belong
+# under examples/. (The dashboards feature still writes committable YAML in a
+# real user's project; this rule is specific to this repo.)
+.turntable/
 
 # generated SQLite demo database (run examples/init_sqlite.sql to recreate)
 examples/data/*.db
