@@ -2,6 +2,7 @@ package azcostc
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/april/turntable/internal/connector"
@@ -13,12 +14,31 @@ type fakeCost struct {
 	rows      [][]any
 	lastScope string
 	lastDef   queryDef
+
+	// pages, when set, models a multi-page result: each element is one page's
+	// rows, returned in order with a synthetic NextLink until the last page. It
+	// takes precedence over rows. links records the nextLink each call received.
+	pages [][][]any
+	links []string
 }
 
-func (f *fakeCost) query(ctx context.Context, scope string, def queryDef) ([]costColumn, [][]any, error) {
+func (f *fakeCost) query(ctx context.Context, scope string, def queryDef, nextLink string) ([]costColumn, [][]any, string, error) {
 	f.lastScope = scope
 	f.lastDef = def
-	return f.cols, f.rows, nil
+	f.links = append(f.links, nextLink)
+	if f.pages != nil {
+		// nextLink of the form "page:N" selects the page; "" is page 0.
+		idx := 0
+		if nextLink != "" {
+			fmt.Sscanf(nextLink, "page:%d", &idx)
+		}
+		next := ""
+		if idx+1 < len(f.pages) {
+			next = fmt.Sprintf("page:%d", idx+1)
+		}
+		return f.cols, f.pages[idx], next, nil
+	}
+	return f.cols, f.rows, "", nil
 }
 
 func drain(t *testing.T, it engine.RowIterator) []engine.Row {
@@ -92,6 +112,43 @@ func TestScanTypedColumnsAndRows(t *testing.T) {
 	}
 	if rows[0].Values[2].V != "Virtual Machines" {
 		t.Errorf("service = %v", rows[0].Values[2].V)
+	}
+}
+
+// TestScanFollowsNextLink verifies the scan walks the NextLink chain and
+// concatenates every page's rows (the Query API caps a single response at ~5000).
+func TestScanFollowsNextLink(t *testing.T) {
+	f := &fakeCost{
+		cols: []costColumn{{"cost", engine.TypeFloat}, {"ServiceName", engine.TypeString}},
+		pages: [][][]any{
+			{{1.0, "A"}, {2.0, "B"}},
+			{{3.0, "C"}},
+			{{4.0, "D"}, {5.0, "E"}},
+		},
+	}
+	c := newWithClient(f)
+	ds := connector.Dataset{Options: map[string]any{"subscription": "abc"}}
+	rows := drain(t, mustScan(t, c, connector.ScanRequest{Dataset: ds}))
+
+	if len(rows) != 5 {
+		t.Fatalf("rows = %d, want 5 (all pages concatenated)", len(rows))
+	}
+	// First page's first row and last page's last row both present, in order.
+	if v, _ := rows[0].Values[0].AsFloat(); v != 1.0 {
+		t.Errorf("row[0] cost = %v, want 1.0", rows[0].Values[0].V)
+	}
+	if rows[4].Values[1].V != "E" {
+		t.Errorf("row[4] service = %v, want E", rows[4].Values[1].V)
+	}
+	// Three calls: the first with no link, then each page's synthetic NextLink.
+	wantLinks := []string{"", "page:1", "page:2"}
+	if len(f.links) != len(wantLinks) {
+		t.Fatalf("made %d calls, want %d", len(f.links), len(wantLinks))
+	}
+	for i, want := range wantLinks {
+		if f.links[i] != want {
+			t.Errorf("call %d nextLink = %q, want %q", i, f.links[i], want)
+		}
 	}
 }
 
