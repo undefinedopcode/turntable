@@ -64,7 +64,12 @@ type queryDef struct {
 // costAPI is the connector's narrow view of Cost Management. The real client
 // wraps armcostmanagement; tests inject a fake.
 type costAPI interface {
-	query(ctx context.Context, scope string, def queryDef) ([]costColumn, [][]any, error)
+	// query runs one page of the Cost Management query. nextLink is "" for the
+	// first page; on a follow-up it is the previous page's NextLink. It returns
+	// the page's columns, rows, and the next page's link ("" when there are no
+	// more pages). The API caps a single response (~5000 rows), so a full scan
+	// walks the NextLink chain — the Azure analogue of azrgraph's SkipToken loop.
+	query(ctx context.Context, scope string, def queryDef, nextLink string) (cols []costColumn, rows [][]any, next string, err error)
 }
 
 // Connector queries Azure Cost Management.
@@ -133,7 +138,7 @@ func (c *Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.S
 	if err != nil {
 		return engine.Schema{}, err
 	}
-	cols, _, err := api.query(ctx, scope, queryFor(ds.Options))
+	cols, _, _, err := api.query(ctx, scope, queryFor(ds.Options), "")
 	if err != nil {
 		return engine.Schema{}, fmt.Errorf("azcost resolve: %w", err)
 	}
@@ -150,9 +155,25 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 	if err != nil {
 		return nil, err
 	}
-	cols, rawRows, err := api.query(ctx, scope, queryFor(ds.Options))
-	if err != nil {
-		return nil, fmt.Errorf("azcost query: %w", err)
+	// Walk the NextLink chain: the Query API caps one response at ~5000 rows, so a
+	// larger result set arrives across several pages (columns repeat each page).
+	def := queryFor(ds.Options)
+	var cols []costColumn
+	var rawRows [][]any
+	next := ""
+	for {
+		pageCols, pageRows, n, err := api.query(ctx, scope, def, next)
+		if err != nil {
+			return nil, fmt.Errorf("azcost query: %w", err)
+		}
+		if cols == nil {
+			cols = pageCols
+		}
+		rawRows = append(rawRows, pageRows...)
+		if n == "" {
+			break
+		}
+		next = n
 	}
 	schema := schemaFromColumns(cols)
 	rows := make([]engine.Row, len(rawRows))
