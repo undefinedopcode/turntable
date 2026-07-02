@@ -1,0 +1,20 @@
+name: My System State
+panels:
+    - kind: chart
+      title: User process hierarchy
+      query: "WITH process_names AS \n  (SELECT pid, name FROM processes)\n\nSELECT pid, ppid, name, pn.name AS parent_name, mem_rss, cpu_percent \n  FROM processes p \n  LEFT JOIN process_names pn ON pn.pid = p.ppid\nWHERE username = 'april'\n--AND (pn.name = 'claude' or name = 'claude' or pn.name = 'zsh')"
+      view:
+        chart:
+            agg: none
+            color: name
+            graphSource: edges
+            label: name
+            levels:
+                - pid
+                - ppid
+            link: ppid
+            node: pid
+            size: mem_rss
+            type: graph
+            x: pid
+            "y": []

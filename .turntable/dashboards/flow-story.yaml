@@ -1,0 +1,49 @@
+name: Flow Story
+description: 'narrative demo: markdown + stats + chart + pivot'
+variables:
+    m:
+        default: "7"
+        options_query: SELECT 5 AS m UNION SELECT 7 UNION SELECT 11
+panels:
+    - kind: markdown
+      text: |-
+        # Flow analysis
+        This story demonstrates the dashboard building blocks:
+        - a **stat** pair below
+        - a *time-series* chart with a `{{m}}` variable
+        - a pivot cross-tab
+
+        See [the design doc](https://example.com) for details.
+    - kind: stat
+      title: Average flow
+      width: half
+      query: SELECT ROUND(AVG(flow), 2) AS avg_flow FROM (SELECT EXTRACT(hour FROM t) + MOD(EXTRACT(minute FROM t), {{m:raw}}) AS flow FROM generate_series(CAST('2026-01-01' AS timestamp), CAST('2026-01-02' AS timestamp), INTERVAL '5 minutes') AS g(t)) sub
+    - kind: stat
+      title: Readings
+      width: half
+      query: SELECT COUNT(*) AS readings FROM generate_series(CAST('2026-01-01' AS timestamp), CAST('2026-01-02' AS timestamp), INTERVAL '5 minutes') AS g(t)
+    - kind: chart
+      title: Flow over time
+      query: SELECT t, EXTRACT(hour FROM t) + MOD(EXTRACT(minute FROM t), {{m:raw}}) AS flow FROM generate_series(CAST('2026-01-01' AS timestamp), CAST('2026-01-02' AS timestamp), INTERVAL '5 minutes') AS g(t)
+      view:
+        chart:
+            agg: none
+            type: area
+            x: t
+            "y":
+                - flow
+    - kind: pivot
+      title: Hour × minute-bucket
+      width: half
+      query: SELECT EXTRACT(hour FROM t) AS hr, MOD(EXTRACT(minute FROM t), {{m:raw}}) AS bucket, COUNT(*) AS n FROM generate_series(CAST('2026-01-01' AS timestamp), CAST('2026-01-02' AS timestamp), INTERVAL '5 minutes') AS g(t) GROUP BY hr, bucket
+      view:
+        pivot:
+            agg: sum
+            color: true
+            cols: bucket
+            rows: hr
+            value: "n"
+    - kind: table
+      title: Sample rows
+      width: half
+      query: SELECT t, EXTRACT(hour FROM t) AS hr FROM generate_series(CAST('2026-01-01' AS timestamp), CAST('2026-01-02' AS timestamp), INTERVAL '5 minutes') AS g(t) LIMIT 8

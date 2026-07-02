@@ -1,0 +1,62 @@
+name: Sales Overview
+description: Orders (CSV) joined with customers (JSON) and products (YAML) — revenue, trend, and regional mix
+variables:
+    status:
+        default: paid
+        options_query: SELECT DISTINCT status FROM orders ORDER BY status
+panels:
+    - kind: markdown
+      text: |-
+        # Sales Overview
+        Three sources, one dashboard: **orders.csv** joined with **customers.json** and **products.yaml**. The *status* variable filters the product table and regional chart (default: `paid`).
+    - kind: stat
+      title: Paid revenue
+      width: half
+      query: SELECT ROUND(SUM(amount), 2) AS usd FROM orders WHERE status = 'paid'
+    - kind: stat
+      title: Orders
+      width: half
+      query: SELECT COUNT(*) AS orders FROM orders
+    - kind: chart
+      title: Monthly revenue and order count
+      query: SELECT SUBSTR(placed_at, 1, 7) AS month, ROUND(SUM(amount), 2) AS revenue, COUNT(*) AS orders FROM orders GROUP BY SUBSTR(placed_at, 1, 7) ORDER BY month
+      view:
+        chart:
+            type: bar
+            x: month
+            "y":
+                - revenue
+            y2:
+                - orders
+    - kind: chart
+      title: Revenue by region ({{status}})
+      width: half
+      query: SELECT c.region, ROUND(SUM(o.amount), 2) AS revenue FROM orders AS o JOIN customers AS c ON o.customer_id = c.id WHERE o.status = {{status}} GROUP BY c.region ORDER BY revenue DESC
+      view:
+        chart:
+            type: bar
+            x: region
+            "y":
+                - revenue
+    - kind: chart
+      title: Revenue by category
+      width: half
+      query: SELECT p.category, ROUND(SUM(o.amount), 2) AS revenue FROM orders AS o JOIN products AS p ON o.product_id = p.id GROUP BY p.category
+      view:
+        chart:
+            type: pie
+            x: category
+            "y":
+                - revenue
+    - kind: pivot
+      title: Orders by region × status
+      query: SELECT c.region, o.status, COUNT(*) AS n FROM orders AS o JOIN customers AS c ON o.customer_id = c.id GROUP BY c.region, o.status
+      view:
+        pivot:
+            agg: sum
+            cols: status
+            rows: region
+            value: "n"
+    - kind: table
+      title: Top products ({{status}} orders)
+      query: SELECT p.name AS product, p.category, SUM(o.quantity) AS units, ROUND(SUM(o.amount), 2) AS revenue FROM orders AS o JOIN products AS p ON o.product_id = p.id WHERE o.status = {{status}} GROUP BY p.name, p.category ORDER BY revenue DESC
