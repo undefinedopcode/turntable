@@ -20,6 +20,13 @@
 //   runs     Actions workflow runs of `repo` — great time-series data
 //            repo, id, workflow, run_number, event, status, conclusion, branch,
 //            sha, actor, created_at, updated_at, duration_s
+//   commits  commit history of `repo` (default branch, or `branch`) — the
+//            activity-graph dataset; `since`/`until` (ISO dates) bound the window
+//            repo, sha, author, author_name, message, merge, committed_at
+//
+//   -- daily activity, chartable straight onto the time axis
+//   SELECT DATE_BIN('1 day', committed_at) AS day, COUNT(*) AS commits
+//   FROM commits GROUP BY day ORDER BY day
 //
 // issues/prs/runs require `repo` — one "owner/name", or several comma-separated
 // — and tag every row with its repo, the JOIN key back to repos.full_name:
@@ -29,7 +36,8 @@
 //   GROUP BY r.name
 //
 // Options: repo, owner, token, state (issues/prs: open|closed|all, default all),
-// max_pages (100 rows per page per repo, default 5), api_url (GitHub Enterprise).
+// branch + since/until (commits), max_pages (100 rows per page per repo,
+// default 5), api_url (GitHub Enterprise).
 //
 //   sources:
 //     gh:
@@ -198,6 +206,33 @@ serve({
           return prs.map((p) => [
             p.number, p.title, p.state, p.user?.login ?? null, !!p.draft,
             p.base?.ref, p.head?.ref, date(p.created_at), date(p.merged_at), date(p.closed_at),
+          ]);
+        }),
+    },
+    commits: {
+      columns: [
+        repoCol,
+        { name: "sha", type: "string" },
+        { name: "author", type: "string", nullable: true }, // GitHub login (null for unlinked emails)
+        { name: "author_name", type: "string", nullable: true }, // git author name
+        { name: "message", type: "string", nullable: true }, // first line
+        { name: "merge", type: "bool" },
+        { name: "committed_at", type: "time", nullable: true },
+      ],
+      rows: (req) =>
+        perRepo(req.options, async (repo) => {
+          const params = {};
+          if (req.options.branch) params.sha = req.options.branch;
+          if (req.options.since) params.since = req.options.since;
+          if (req.options.until) params.until = req.options.until;
+          const commits = await api(`/repos/${repo}/commits`, req.options, params);
+          return commits.map((c) => [
+            (c.sha ?? "").slice(0, 8),
+            c.author?.login ?? null,
+            c.commit?.author?.name ?? null,
+            (c.commit?.message ?? "").split("\n", 1)[0] || null,
+            (c.parents?.length ?? 0) > 1,
+            date(c.commit?.committer?.date ?? c.commit?.author?.date),
           ]);
         }),
     },
