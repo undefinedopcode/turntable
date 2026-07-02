@@ -427,13 +427,11 @@ func (a *App) cmdUse(name string, rest []string) ([]string, error) {
 
 // isFileConnector reports whether a connector locates its data by a local file
 // path (as opposed to a URL or API options). This governs how the .use command
-// interprets the "path" key.
+// interprets the "path" key. Derived from the connector spec table
+// (connspec.go), so adding a file connector there is the only registration.
 func isFileConnector(name string) bool {
-	switch name {
-	case "csv", "json", "yaml", "excel", "parquet", "log":
-		return true
-	}
-	return false
+	s := connectorSpecFor(name)
+	return s != nil && s.File
 }
 
 // connectorName returns the connector's short prefix for display.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/april/turntable/internal/config"
 	"github.com/april/turntable/internal/connector"
@@ -84,6 +85,11 @@ type App struct {
 	// plugins holds the external plugin subprocesses started for `plugin`
 	// sources, so Close can tear them down at shutdown.
 	plugins []*pluginc.Connector
+
+	// sessionMu serializes session statements (view/matview DDL) arriving over
+	// MCP, which mutate matViews and the registry; the web and REPL paths are
+	// effectively single-user and stay unlocked. See mcp.go.
+	sessionMu sync.Mutex
 }
 
 // NewApp builds an App with all built-in connectors registered.
@@ -635,6 +641,11 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	// `turntable dashboard list|render …` is a subcommand, not a query.
 	if rest := fs.Args(); len(rest) > 0 && rest[0] == "dashboard" {
 		return a.dashboardCmd(ctx, rest[1:])
+	}
+
+	// `turntable mcp` serves the MCP stdio server (see docs/mcp-server-design.md).
+	if rest := fs.Args(); len(rest) > 0 && rest[0] == "mcp" {
+		return a.mcpCmd(ctx, rest[1:])
 	}
 
 	// Determine the query text.

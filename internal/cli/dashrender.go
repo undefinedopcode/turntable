@@ -103,6 +103,18 @@ func substituteVars(q string, vars map[string]string) string {
 	})
 }
 
+// substituteVarsRaw replaces {{var}} references with the raw value (no SQL
+// quoting) — for panel titles, which are prose, not queries.
+func substituteVarsRaw(s string, vars map[string]string) string {
+	return varRef.ReplaceAllStringFunc(s, func(m string) string {
+		g := varRef.FindStringSubmatch(m)
+		if v, ok := vars[g[1]]; ok {
+			return v
+		}
+		return m
+	})
+}
+
 func (a *App) renderDashboard(ctx context.Context, slug, outPath string, overrides map[string]string) error {
 	d, err := a.loadDashboard(slug)
 	if err != nil {
@@ -173,20 +185,31 @@ func (a *App) renderPanel(ctx context.Context, idx int, p DashboardPanel, vars m
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, `<section class="panel %s">`, width)
-	defer b.WriteString("</section>\n")
+	// NB: written explicitly, not deferred — a deferred write would run after
+	// the return value's b.String() is taken and the closing tag would be lost,
+	// nesting every panel inside the previous one.
+	payload := a.renderPanelBody(&b, ctx, idx, p, vars)
+	b.WriteString("</section>\n")
+	return b.String(), payload
+}
 
+// renderPanelBody writes a panel's inner HTML and returns the chart payload
+// (empty for non-chart panels).
+func (a *App) renderPanelBody(b *strings.Builder, ctx context.Context, idx int, p DashboardPanel, vars map[string]string) string {
 	if p.Kind == "markdown" {
 		b.WriteString(`<div class="md">` + renderMarkdown(p.Text) + `</div>`)
-		return b.String(), ""
+		return ""
 	}
 
 	if p.Title != "" {
-		fmt.Fprintf(&b, `<h2>%s</h2>`, template.HTMLEscapeString(p.Title))
+		// Titles take {{var}} substitution too — as the raw value, not a quoted
+		// SQL literal ("Revenue by region (paid)").
+		fmt.Fprintf(b, `<h2>%s</h2>`, template.HTMLEscapeString(substituteVarsRaw(p.Title, vars)))
 	}
 	schema, rows, truncated, err := a.execQuery(ctx, substituteVars(p.Query, vars))
 	if err != nil {
-		fmt.Fprintf(&b, `<div class="err">%s</div>`, template.HTMLEscapeString(err.Error()))
-		return b.String(), ""
+		fmt.Fprintf(b, `<div class="err">%s</div>`, template.HTMLEscapeString(err.Error()))
+		return ""
 	}
 	meta := fmt.Sprintf("%d rows", len(rows))
 	if truncated {
@@ -202,8 +225,8 @@ func (a *App) renderPanel(ctx context.Context, idx int, p DashboardPanel, vars m
 	case "chart":
 		if pl, ok := buildChartPayload(schema, rows, subView(p.View, "chart")); ok {
 			payload = pl
-			fmt.Fprintf(&b, `<div class="chartbox"><canvas id="chart-%d"></canvas></div>`, idx)
-			fmt.Fprintf(&b, `<script type="application/json" data-chart="chart-%d">%s</script>`, idx, payload)
+			fmt.Fprintf(b, `<div class="chartbox"><canvas id="chart-%d"></canvas></div>`, idx)
+			fmt.Fprintf(b, `<script type="application/json" data-chart="chart-%d">%s</script>`, idx, payload)
 		} else {
 			// Chart types the report cannot draw (heatmap/graph/…) fall back
 			// to the data itself.
@@ -213,8 +236,8 @@ func (a *App) renderPanel(ctx context.Context, idx int, p DashboardPanel, vars m
 	default: // table
 		b.WriteString(renderTable(schema, rows))
 	}
-	fmt.Fprintf(&b, `<div class="meta">%s</div>`, template.HTMLEscapeString(meta))
-	return b.String(), payload
+	fmt.Fprintf(b, `<div class="meta">%s</div>`, template.HTMLEscapeString(meta))
+	return payload
 }
 
 // subView extracts a panel view sub-config (view.chart / view.pivot) as a map.

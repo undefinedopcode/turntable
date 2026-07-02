@@ -518,8 +518,14 @@ charts via the vendored Chart.js bundle in `reportjs/`; `dashboard list` too)), 
 file source saved to the config keeps resolving. Stored under the original
 sanitized name, `-N`-suffixed on clash via `createUpload`; the client then
 registers a file source at the returned relative path). The web add-source UI is a modal whose form adapts per
-connector via `connectorSpecs.ts` (file connectors get an upload). Field routing
-for both `.use` and the web form is shared via `applySourceField` in `cli.go`.
+connector via the spec table in **`connspec.go`** — the single source of truth
+for per-connector fields (required/sensitive/select options, `File` flag),
+served as `GET /api/connectors` (the frontend `connectorSpecs.ts` is just the
+fetch + types) and as the MCP `list_connectors` tool; `isFileConnector` derives
+from its `File` flag. File connectors get an upload; the `plugin` connector is
+deliberately absent (arbitrary exec — config-file only). Field routing
+for `.use`, the web form, and MCP `add_source` is shared via `applySourceField`
+in `cli.go`.
 Results are row-capped (`--max-rows`, default 5000) and it binds to localhost by
 default. The UI is **tabbed** (`TabBar.tsx` — each tab an independent query
 workspace with its own editor text + result, persisted to localStorage by
@@ -569,7 +575,31 @@ The frontend is a **React + Vite + TypeScript** app under
 `//go:embed all:webui/dist` and served with `http.FileServerFS`. `go build`
 needs no Node; after editing `webui/src/**` run `npm run build` (or `go generate
 ./internal/cli`) and commit the updated `dist/`. Dev: `npm run dev` (HMR on
-:5173, proxies `/api` to the Go server). See `webui/README.md`. **`internal/config`** loads
+:5173, proxies `/api` to the Go server). See `webui/README.md`.
+`mcp.go` (`turntable mcp` subcommand, official
+`modelcontextprotocol/go-sdk`) is the **MCP server** — a third transport over
+the same App methods for AI-agent clients (Claude Code), stdio JSON-RPC. Tools:
+`query` (per-call row cap, default 200 — a token budget, not the web's 5000
+render guard; session view statements return `notice`; errors go back in-band
+as `IsError` results so the model self-corrects), `list_sources`,
+`describe_source`, `list_functions`, plus source management: `list_connectors`
+(the `connspec.go` table), `add_source` (same validation/interpolation/wildcard
+path as `.use` and the web form via `registerRuntimeSource`; rejects the
+`plugin` connector — arbitrary exec is config-file only; `save=true` persists
+the declared, secret-free form), and `remove_source` (registry-only undo;
+matviews/views are rejected with a pointer to their DROP statements), and
+dashboards: `list/get/save/delete_dashboard` (the YAML store, validation shared
+with the web POST via `saveDashboardChecked`) + `render_dashboard` (the
+headless dashrender path; returns the written HTML's absolute path). It shares
+serve.go's helpers
+(`execStmtCapped`, `sourceList`, `apiColumns`, `fileMeta`,
+`sessionStmtResponse`); session statements are serialized by `App.sessionMu`
+(MCP clients call tools concurrently; web/REPL are single-user and unlocked).
+Nothing in MCP mode may write to `App.Out` (stdout is the protocol channel).
+Tests drive a real client over the SDK's in-memory transport
+(`mcp_test.go`). Design/roadmap: `docs/mcp-server-design.md` (steps 1–3
+shipped; step 4 — dialect/plugins resources, infer_log_format — remains).
+**`internal/config`** loads
 `turntable.yaml` with `${ENV_VAR}` / `${VAR:-default}` interpolation (`Parse` →
 `InterpolateSource`), and also reads a `.env` at startup (`LoadDotEnv`; real env
 wins) so those refs resolve without manual exports.
@@ -611,10 +641,12 @@ it for the engine.
 4. Add a `*_test.go` with its own testdata; mirror existing connectors. For
    API connectors, inject the network client behind an interface so tests use a
    fake (see `cwlogsc`/`cwmetricsc`) or an `httptest` server (see `httpc`).
-5. If it is a local-file connector, add its name to `isFileConnector` in
-   `repl.go` — that list controls whether the `.use` command treats `path=` as
-   a file path (file connectors) or as a pass-through connector option (URL/API
-   connectors, where e.g. `path` is httpc's JSON pointer). Config secrets and
+5. Add a spec to the table in `connspec.go` (fields, required/sensitive flags,
+   `File: true` for a local-file connector). That one entry drives the web
+   add-source form, the MCP `list_connectors`/`add_source` tools, and
+   `isFileConnector` — which controls whether `.use`/`add_source` treat `path=`
+   as a file path (file connectors) or as a pass-through connector option
+   (URL/API connectors, where e.g. `path` is httpc's JSON pointer). Config secrets and
    `${ENV_VAR}` work in any string option (`config.go` interpolates the
    `Options` map), and the `url:` config/`.use` field flows to `Dataset.Source`.
 

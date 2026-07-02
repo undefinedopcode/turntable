@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   addSource,
   loginfer,
@@ -7,7 +7,7 @@ import {
   type LoginferResult,
 } from "../api";
 import {
-  CONNECTOR_SPECS,
+  fetchConnectorSpecs,
   specFor,
   type ConnectorSpec,
   type FieldSpec,
@@ -62,11 +62,12 @@ export function AddSourceModal({
   onClose: () => void;
   onAdded: () => void;
 }) {
-  const [connector, setConnector] = useState(CONNECTOR_SPECS[0].name);
+  // Specs come from GET /api/connectors (fetched once, cached module-wide);
+  // until they arrive the modal renders a loading hint.
+  const [specs, setSpecs] = useState<ConnectorSpec[] | null>(null);
+  const [connector, setConnector] = useState("");
   const [name, setName] = useState("");
-  const [values, setValues] = useState<Record<string, string>>(() =>
-    seedValues(CONNECTOR_SPECS[0]),
-  );
+  const [values, setValues] = useState<Record<string, string>>({});
   const [file, setFile] = useState<File | null>(null);
   // File connectors can either upload a copy or point at a path on the server's
   // own filesystem (read live on each query — good for logs/CSVs being updated).
@@ -83,7 +84,24 @@ export function AddSourceModal({
   const [selected, setSelected] = useState<number | null>(null);
   const [tplNames, setTplNames] = useState<string[]>([]);
 
-  const spec = useMemo(() => specFor(connector)!, [connector]);
+  useEffect(() => {
+    if (!open || specs) return;
+    fetchConnectorSpecs()
+      .then((s) => {
+        setSpecs(s);
+        if (s.length && !connector) {
+          setConnector(s[0].name);
+          setValues(seedValues(s[0]));
+        }
+      })
+      .catch((e) => setMsg({ kind: "err", text: `load connectors: ${e}` }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, specs]);
+
+  const spec = useMemo(
+    () => (specs ? specFor(specs, connector) : undefined),
+    [specs, connector],
+  );
 
   const resetInference = () => {
     setUploadedPath(null);
@@ -93,7 +111,7 @@ export function AddSourceModal({
   };
 
   const reset = () => {
-    setValues(seedValues(spec));
+    setValues(spec ? seedValues(spec) : {});
     setFile(null);
     setServerPath("");
     setMsg({ kind: "", text: "" });
@@ -102,7 +120,8 @@ export function AddSourceModal({
 
   const pickConnector = (c: string) => {
     setConnector(c);
-    setValues(seedValues(specFor(c)!));
+    const s = specs ? specFor(specs, c) : undefined;
+    setValues(s ? seedValues(s) : {});
     setFile(null);
     setServerPath("");
     setMsg({ kind: "", text: "" });
@@ -166,6 +185,7 @@ export function AddSourceModal({
   };
 
   const submit = async () => {
+    if (!spec) return;
     if (!name.trim()) {
       setMsg({ kind: "err", text: "name is required" });
       return;
@@ -251,13 +271,23 @@ export function AddSourceModal({
 
   const isLog = connector === "log";
 
+  if (!specs || !spec) {
+    return (
+      <Modal open={open} title="Add source" onClose={onClose}>
+        <div className={msg.kind === "err" ? "msg err" : "hint"}>
+          {msg.kind === "err" ? msg.text : "loading connectors…"}
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal open={open} title="Add source" onClose={onClose}>
       <div className="form">
         <div>
           <label>Connector</label>
           <select value={connector} onChange={(e) => pickConnector(e.target.value)}>
-            {CONNECTOR_SPECS.map((c) => (
+            {specs.map((c) => (
               <option key={c.name} value={c.name}>
                 {c.label}
               </option>

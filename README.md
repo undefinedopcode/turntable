@@ -184,14 +184,56 @@ scratch directory is removed on shutdown); nothing is written back to
 The API: `POST /api/query` (`{"query": "...", "explain": false}` →
 `{columns, rows, count, elapsed_ms, ...}`), `GET /api/sources`,
 `POST /api/sources` (`{"name", "connector", "fields": {...}}` → `{registered}`),
-`POST /api/upload` (multipart `file` → `{path, filename, size}`), and
-`GET /api/schema?source=<name>`.
+`POST /api/upload` (multipart `file` → `{path, filename, size}`),
+`GET /api/schema?source=<name>`, and `GET /api/connectors` (the per-connector
+field specs that drive the add-source form).
 
 It binds to `localhost` by default. Queries are read-only SQL, but they — and
 runtime-added sources — run with this process's file and network access (a
 qualified ref or a new source can read local files and reach internal URLs), so
 binding to a non-local address prints a warning. Only serve on a trusted
 network.
+
+### MCP server
+
+`turntable mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io)
+over stdio, so an AI agent (Claude Code, for example) can explore and query
+your sources conversationally. Flags go before the subcommand, and the config's
+declared sources are all available:
+
+```bash
+turntable -c turntable.yaml mcp
+```
+
+Register it in Claude Code with a project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "turntable": {
+      "command": "turntable",
+      "args": ["mcp", "-c", "turntable.yaml"]
+    }
+  }
+}
+```
+
+Tools: `query` (run SQL — including `CREATE VIEW` / `CREATE MATERIALIZED VIEW`
+session statements; results default to 200 rows with a `truncated` flag, capped
+by `--max-rows`), `list_sources`, `describe_source` (columns/types, plus file
+freshness for file sources), `list_functions` (the live dialect surface),
+`list_connectors` (every connector's fields, with required/sensitive flags),
+`add_source` (register a source at runtime — the `.use` equivalent, with the
+same secret rules: credentials must be `${ENV_VAR}` references; `save: true`
+persists the declared form to the config; the `plugin` connector is refused —
+declare those in `turntable.yaml`), `remove_source`, and the dashboard suite:
+`list_dashboards` / `get_dashboard` / `save_dashboard` / `delete_dashboard`
+(the same YAML store as the web UI) plus `render_dashboard`, which executes a
+dashboard's panels headlessly and writes a self-contained HTML report — so an
+agent can build a dashboard *and hand you the artifact* without `--serve`.
+Query errors come back in-band so the agent can read and self-correct. The
+same access caveat as the web UI applies: queries run with this process's file
+and network access. See `docs/mcp-server-design.md` for the roadmap.
 
 ### Streaming and safety flags
 

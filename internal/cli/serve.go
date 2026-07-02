@@ -76,6 +76,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/schema", a.handleSchema)
 	mux.HandleFunc("/api/upload", a.handleUpload)
 	mux.HandleFunc("/api/functions", a.handleFunctions)
+	mux.HandleFunc("/api/connectors", a.handleConnectors)
 	mux.HandleFunc("/api/loginfer", a.handleLoginfer)
 	mux.HandleFunc("/api/dashboards", a.handleDashboards)
 	mux.HandleFunc("/api/dashboards/", a.handleDashboardItem)
@@ -207,21 +208,11 @@ func (a *App) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := queryResponse{
-		Columns:   make([]apiColumn, len(schema.Columns)),
-		Rows:      make([][]any, len(rows)),
+		Columns:   apiColumns(schema),
+		Rows:      jsonRows(rows),
 		Count:     len(rows),
 		Truncated: truncated,
 		ElapsedMs: time.Since(start).Milliseconds(),
-	}
-	for i, c := range schema.Columns {
-		resp.Columns[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
-	}
-	for i, row := range rows {
-		cells := make([]any, len(row.Values))
-		for j, v := range row.Values {
-			cells[j] = jsonValue(v)
-		}
-		resp.Rows[i] = cells
 	}
 	writeJSON(w, resp)
 }
@@ -294,6 +285,16 @@ func (a *App) execQuery(ctx context.Context, query string) (engine.Schema, []eng
 // execStmt plans and executes a SELECT, returning the schema and rows (capped).
 // The row cap honors --max-rows, else defaultServeMaxRows.
 func (a *App) execStmt(ctx context.Context, stmt sql.Statement) (engine.Schema, []engine.Row, bool, error) {
+	rowCap := a.maxRows
+	if rowCap <= 0 {
+		rowCap = defaultServeMaxRows
+	}
+	return a.execStmtCapped(ctx, stmt, rowCap)
+}
+
+// execStmtCapped plans and executes a SELECT, returning the schema and up to
+// rowCap rows, plus whether the result was truncated at the cap.
+func (a *App) execStmtCapped(ctx context.Context, stmt sql.Statement, rowCap int) (engine.Schema, []engine.Row, bool, error) {
 	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
 	if err != nil {
 		return engine.Schema{}, nil, false, fmt.Errorf("plan error: %w", err)
@@ -303,10 +304,6 @@ func (a *App) execStmt(ctx context.Context, stmt sql.Statement) (engine.Schema, 
 		return engine.Schema{}, nil, false, fmt.Errorf("exec error: %w", err)
 	}
 
-	rowCap := a.maxRows
-	if rowCap <= 0 {
-		rowCap = defaultServeMaxRows
-	}
 	// Read one past the cap so we can report truncation.
 	readLimit := rowCap + 1
 	capped := engine.NewLimitIter(it, &readLimit, 0)
@@ -351,10 +348,17 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) listSources(w http.ResponseWriter, r *http.Request) {
-	type srcInfo struct {
-		Name      string `json:"name"`
-		Connector string `json:"connector"`
-	}
+	writeJSON(w, a.sourceList())
+}
+
+// srcInfo is one source-list entry, shared by the web API and the MCP server.
+type srcInfo struct {
+	Name      string `json:"name"`
+	Connector string `json:"connector" jsonschema:"the connector prefix, or view for a regular view"`
+}
+
+// sourceList returns the registered sources plus regular views, sorted by name.
+func (a *App) sourceList() []srcInfo {
 	sources := a.Reg.Sources()
 	out := make([]srcInfo, 0, len(sources))
 	for _, s := range sources {
@@ -364,7 +368,7 @@ func (a *App) listSources(w http.ResponseWriter, r *http.Request) {
 		out = append(out, srcInfo{Name: v, Connector: "view"})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	writeJSON(w, out)
+	return out
 }
 
 type addSourceRequest struct {
@@ -436,11 +440,19 @@ func (a *App) handleSchema(w http.ResponseWriter, r *http.Request) {
 	a.writeSchemaJSON(w, name, schema, fileMeta(s))
 }
 
-// fileMeta returns the source file's last-modified time (RFC3339) and size when
-// the source is a local-file connector with a stat-able path — so the UI can
-// show how fresh a file source is (it is read live on every query). Empty for
-// non-file or unreachable sources.
-func fileMeta(s connector.Source) map[string]any {
+// fileMetaInfo describes the backing file of a local-file source: its path,
+// last-modified time (RFC3339), and size in bytes.
+type fileMetaInfo struct {
+	Path     string
+	Modified string
+	Size     int64
+}
+
+// fileMeta returns the source file's metadata when the source is a local-file
+// connector with a stat-able path — so clients can show how fresh a file
+// source is (it is read live on every query). Nil for non-file or unreachable
+// sources.
+func fileMeta(s connector.Source) *fileMetaInfo {
 	if !isFileConnector(s.Conn.Name()) {
 		return nil
 	}
@@ -448,25 +460,38 @@ func fileMeta(s connector.Source) map[string]any {
 	if err != nil || fi.IsDir() {
 		return nil
 	}
-	return map[string]any{
-		"path":     s.Dataset.Source,
-		"modified": fi.ModTime().UTC().Format(time.RFC3339),
-		"size":     fi.Size(),
+	return &fileMetaInfo{
+		Path:     s.Dataset.Source,
+		Modified: fi.ModTime().UTC().Format(time.RFC3339),
+		Size:     fi.Size(),
 	}
 }
 
-// writeSchemaJSON writes a source/view schema as the columns response, merging
-// any extra fields (e.g. file modified-time/size).
-func (a *App) writeSchemaJSON(w http.ResponseWriter, name string, schema engine.Schema, extra map[string]any) {
+// apiColumns converts an engine schema's columns to the JSON column shape.
+func apiColumns(schema engine.Schema) []apiColumn {
 	cols := make([]apiColumn, len(schema.Columns))
 	for i, c := range schema.Columns {
 		cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
 	}
-	resp := map[string]any{"source": name, "columns": cols}
-	for k, v := range extra {
-		resp[k] = v
+	return cols
+}
+
+// writeSchemaJSON writes a source/view schema as the columns response, merging
+// the file metadata (modified-time/size) when present.
+func (a *App) writeSchemaJSON(w http.ResponseWriter, name string, schema engine.Schema, fm *fileMetaInfo) {
+	resp := map[string]any{"source": name, "columns": apiColumns(schema)}
+	if fm != nil {
+		resp["path"] = fm.Path
+		resp["modified"] = fm.Modified
+		resp["size"] = fm.Size
 	}
 	writeJSON(w, resp)
+}
+
+// handleConnectors lists the connector field specs (connspec.go) that drive
+// the add-source modal and the MCP list_connectors tool.
+func (a *App) handleConnectors(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, connectorSpecs)
 }
 
 // handleFunctions lists the SQL functions available in the dialect (the same
@@ -533,12 +558,8 @@ func (a *App) handleLoginfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if name != "raw" {
-		cols := make([]apiColumn, len(schema.Columns))
-		for i, c := range schema.Columns {
-			cols[i] = apiColumn{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
-		}
 		rows, _ := a.logPreviewRows(r.Context(), req.Path, nil, 5)
-		writeJSON(w, loginferResponse{Detected: &detectedFormat{Format: name, Columns: cols, Rows: rows}})
+		writeJSON(w, loginferResponse{Detected: &detectedFormat{Format: name, Columns: apiColumns(schema), Rows: rows}})
 		return
 	}
 
@@ -664,6 +685,19 @@ func sanitizeFilename(name string) string {
 	out := strings.TrimLeft(b.String(), ".") // no leading dots (hidden/relative)
 	if out == "" {
 		return "upload"
+	}
+	return out
+}
+
+// jsonRows converts engine rows to positional JSON-encodable cell arrays.
+func jsonRows(rows []engine.Row) [][]any {
+	out := make([][]any, len(rows))
+	for i, row := range rows {
+		cells := make([]any, len(row.Values))
+		for j, v := range row.Values {
+			cells[j] = jsonValue(v)
+		}
+		out[i] = cells
 	}
 	return out
 }

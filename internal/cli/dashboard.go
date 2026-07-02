@@ -140,6 +140,24 @@ func (a *App) saveDashboard(slug string, d *Dashboard) error {
 	return os.WriteFile(a.dashPath(slug), data, 0o644)
 }
 
+// saveDashboardChecked validates and saves a dashboard, deriving the slug from
+// the name when none is given (an upsert — same-slug saves overwrite). Shared
+// by the web POST /api/dashboards and the MCP save_dashboard tool.
+func (a *App) saveDashboardChecked(slug string, d *Dashboard) (string, error) {
+	if err := d.validate(); err != nil {
+		return "", err
+	}
+	if slug == "" {
+		slug = slugify(d.Name)
+	} else if !slugRe.MatchString(slug) {
+		return "", fmt.Errorf("bad dashboard slug %q", slug)
+	}
+	if err := a.saveDashboard(slug, d); err != nil {
+		return "", err
+	}
+	return slug, nil
+}
+
 // dashboardSummary is one list entry. A file that fails to parse is still
 // listed (name = slug) with its error, so a bad hand edit is visible rather
 // than silently vanishing.
@@ -201,18 +219,8 @@ func (a *App) handleDashboards(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := req.Dashboard.validate(); err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
-			return
-		}
-		slug := req.Slug
-		if slug == "" {
-			slug = slugify(req.Dashboard.Name)
-		} else if !slugRe.MatchString(slug) {
-			writeJSON(w, map[string]any{"error": fmt.Sprintf("bad dashboard slug %q", slug)})
-			return
-		}
-		if err := a.saveDashboard(slug, &req.Dashboard); err != nil {
+		slug, err := a.saveDashboardChecked(req.Slug, &req.Dashboard)
+		if err != nil {
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
