@@ -10,15 +10,31 @@ A plugin implements the same contract as a built-in connector
 (`Datasets`/`Resolve`/`Scan`), just across a process boundary. Everything
 downstream — the planner, the engine, pushdown — is identical to a built-in.
 
-**Writing one in Go? Use the SDK** (`github.com/april/turntable/sdk/go/ttplugin`)
-— it implements everything in this document, so you only declare datasets and a
-row function. See [Go SDK](#go-sdk) below. The protocol spec here remains the
-source of truth, and is what you implement directly in any other language.
+**Use an SDK** — each implements everything in this document (framing,
+dispatch, cursors, predicate evaluation, cell encoding), so you only declare
+datasets and a row function:
 
-Two reference plugins, both built on the SDK, live under `examples/plugins/`:
-[`sysinfo`](examples/plugins/sysinfo/main.go) (live env + Go-runtime stats,
-dependency-free) and [`procinfo`](examples/plugins/procinfo/main.go) (the live
-process table, via gopsutil). Build them with `./examples/plugins/build.sh`.
+- **Go**: `github.com/april/turntable/sdk/go/ttplugin` — see [Go SDK](#go-sdk)
+- **Python**: [`sdk/python`](sdk/python/README.md) — a single stdlib-only module
+- **Node.js**: [`sdk/node`](sdk/node/README.md) — a single dependency-free ES module
+
+The protocol spec here remains the source of truth, and is what you implement
+directly in any other language. (The SDK directories are expected to graduate
+into their own repositories/packages eventually.)
+
+Reference plugins, one per SDK style, live under `examples/plugins/`:
+
+| Plugin | Language | What it shows |
+| ------ | -------- | ------------- |
+| [`sysinfo`](examples/plugins/sysinfo/main.go) | Go | live env + Go-runtime stats, dependency-free |
+| [`procinfo`](examples/plugins/procinfo/main.go) | Go | the live process table (gopsutil) |
+| [`k8s`](examples/plugins/k8s) | Go | Kubernetes resources (client-go) |
+| [`mqtt`](examples/plugins/mqtt/main.go) | Go | bounded MQTT broker snapshot (paho) — subscribe, collect for a window, return rows |
+| [`pyfiles`](examples/plugins/pyfiles/pyfiles.py) | Python | a directory tree as a relation — no build step |
+| [`nodeos`](examples/plugins/nodeos/nodeos.mjs) | Node.js | live OS state (cpus/net/host) — no build step |
+
+Build the Go ones with `./examples/plugins/build.sh`; the Python/Node ones run
+from source (`command: ["python3", ".../pyfiles.py"]`).
 
 ## Registering a plugin
 
@@ -107,6 +123,60 @@ example under `examples/plugins/` is its own module (like a real external plugin
 depending only on the SDK (and, for `procinfo`, gopsutil); they resolve the SDK
 locally via a `replace` directive while in this repo.
 
+## Python SDK
+
+[`sdk/python/ttplugin.py`](sdk/python/ttplugin.py) is a single stdlib-only
+module with the same shape — declare `Column`s, `Dataset`s with a rows
+function, and `serve()`:
+
+```python
+import ttplugin
+
+ttplugin.serve(ttplugin.Plugin(
+    name="envinfo",
+    datasets={
+        "env": ttplugin.Dataset(
+            columns=[ttplugin.Column("name", "string"),
+                     ttplugin.Column("value", "string", nullable=True)],
+            rows=lambda req: [[k, v] for k, v in os.environ.items()],
+        ),
+    },
+))
+```
+
+Cells: int, float, str, bool, `datetime` (time), `timedelta` (duration),
+`bytes`, `None`. Automatic `WHERE`/`LIMIT` application like the Go SDK
+(`manual_pushdown=True` + `eval_predicate` to take over). Register with
+`command: ["python3", "./envinfo.py"]` — no build step.
+
+## Node.js SDK
+
+[`sdk/node/ttplugin.js`](sdk/node/ttplugin.js) is a single dependency-free ES
+module; rows functions may be async:
+
+```js
+import { serve } from "ttplugin"; // or a relative path to ttplugin.js
+
+serve({
+  name: "osinfo",
+  datasets: {
+    cpus: {
+      columns: [{ name: "model", type: "string" }, { name: "speed_mhz", type: "int" }],
+      rows: () => os.cpus().map((c) => [c.model, c.speed]),
+    },
+  },
+});
+```
+
+Cells: number, string, boolean, `Date` (time), `Buffer` (bytes), `null`.
+Automatic `WHERE`/`LIMIT` (`manualPushdown: true` + `evalPredicate` to take
+over). Register with `command: ["node", "./osinfo.mjs"]`.
+
+Both SDKs are held to the Go client's behavior by conformance tests
+(`internal/connector/connectors/pluginc/sdkconform_test.go`) that drive the
+fixtures under `testdata/` through the real subprocess path; they skip when
+the interpreter is not installed.
+
 Authors in other languages implement the wire protocol directly; the rest of this
 document is that protocol.
 
@@ -189,7 +259,7 @@ advertised.
 ```jsonc
 // params
 {
-  "dataset":   { "name": "env" },
+  "dataset":   { "name": "env", "options": { "root": "." } },  // the source's options
   "columns":   ["name"],          // projection hint (omitted unless capable)
   "limit":     100,               // omitted unless capable
   "predicate": { ...subset... },  // omitted unless capable; see below

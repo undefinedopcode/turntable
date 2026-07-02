@@ -210,11 +210,14 @@ func (s *server) datasetList() []map[string]string {
 
 func (s *server) scan(params json.RawMessage) (any, error) {
 	var p struct {
-		Dataset   struct{ Name string } `json:"dataset"`
-		Columns   []string              `json:"columns"`
-		Limit     *int                  `json:"limit"`
-		Predicate *Predicate            `json:"predicate"`
-		Options   map[string]any        `json:"options"`
+		Dataset struct {
+			Name    string         `json:"name"`
+			Options map[string]any `json:"options"`
+		} `json:"dataset"`
+		Columns   []string       `json:"columns"`
+		Limit     *int           `json:"limit"`
+		Predicate *Predicate     `json:"predicate"`
+		Options   map[string]any `json:"options"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, err
@@ -227,12 +230,25 @@ func (s *server) scan(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("dataset %q has no Rows function", p.Dataset.Name)
 	}
 
+	// Turntable sends the source's options on the dataset itself; a top-level
+	// options object (if a host ever sends one) is merged underneath.
+	opts := p.Options
+	if len(p.Dataset.Options) > 0 {
+		if opts == nil {
+			opts = p.Dataset.Options
+		} else {
+			for k, v := range p.Dataset.Options {
+				opts[k] = v
+			}
+		}
+	}
+
 	rows, err := ds.Rows(Request{
 		Dataset:   p.Dataset.Name,
 		Columns:   p.Columns,
 		Limit:     p.Limit,
 		Predicate: p.Predicate,
-		Options:   p.Options,
+		Options:   opts,
 	})
 	if err != nil {
 		return nil, err

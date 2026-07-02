@@ -213,23 +213,35 @@ interfaces:
     `${ENV}`-interpolated; arbitrary exec, so deliberately *not* exposed via the
     web add-source UI). Protocol is specified in **PLUGINS.md**. Tests:
     pipe-based codec/iterator (`client_test.go`) + an exec-self real-subprocess
-    e2e (`pluginc_test.go`, via `TestMain`). A **Go SDK** for plugin *authors*
-    lives in a separate, dependency-free module `sdk/go` (package `ttplugin`,
-    import `github.com/april/turntable/sdk/go/ttplugin`) — it mirrors this
+    e2e (`pluginc_test.go`, via `TestMain`). **Author SDKs exist in three
+    languages**, each expected to graduate into its own repo eventually: **Go**
+    (`sdk/go`, package `ttplugin`, dependency-free module) — mirrors this
     connector across the wire, implementing framing/dispatch/cursor/predicate-eval/
     cell-encoding so an author writes only `Plugin{Name, Datasets}` (each
-    `Dataset` = a `Schema` + a `Rows` func); it auto-applies the pushed
-    `WHERE`/`LIMIT` unless `ManualPushdown`. The reference plugins under
+    `Dataset` = a `Schema` + a `Rows` func); **Python** (`sdk/python/ttplugin.py`,
+    single stdlib-only module) and **Node.js** (`sdk/node/ttplugin.js`, single
+    dependency-free ES module, async rows OK) with the same shape. All three
+    auto-apply the pushed `WHERE`/`LIMIT` unless manual-pushdown is set, and the
+    Python/Node ones are held to the Go client's behavior by conformance tests
+    (`sdkconform_test.go` + `testdata/conform.{py,mjs}`, driven through the real
+    subprocess path, skipped when the interpreter is absent). NB the wire detail
+    that bit once: per-source options ride **inside the scan's `dataset` object**
+    (`dataset.options`), not top-level. The reference plugins under
     `examples/plugins/` (`sysinfo` = env + Go-runtime stats, dependency-free;
     `procinfo` = the live process table via gopsutil; `k8s` = Kubernetes
     resources via client-go — flattened datasets for pods/deployments/
     statefulsets/daemonsets/nodes/services/namespaces/events, plus a generic
     `resource` dataset for any kind/CRD; auth via kubeconfig incl. AKS/EKS exec
-    plugins; `context`/`kubeconfig`/`namespace` options) are each their **own
-    module** using the SDK (kept separate so gopsutil/client-go never enter
-    turntable's or the SDK's dep graph; they `replace`→`../../../sdk/go`
-    locally). Build them with `examples/plugins/build.sh` — being separate
-    modules, they are **not** compiled by `go build ./...` from the repo root.
+    plugins; `context`/`kubeconfig`/`namespace` options; `mqtt` = a bounded MQTT
+    broker snapshot via paho — subscribe, collect for a `duration` window,
+    return rows, retained messages arriving instantly; `pyfiles` = a directory
+    tree as a relation, Python; `nodeos` = live OS state cpus/net/host, Node)
+    are each their **own module** using the SDK (kept separate so
+    gopsutil/client-go/paho never enter turntable's or the SDK's dep graph; Go
+    ones `replace`→`../../../sdk/go` locally, Python/Node ones import the SDK by
+    relative path and need no build). Build the Go ones with
+    `examples/plugins/build.sh` — being separate modules, they are **not**
+    compiled by `go build ./...` from the repo root.
   - **File** (`jsonc`, `csvc`, `yamlc`, `excelc`, `parquetc`): locate data by a
     local path; infer schema from a sample/footer; push down only columns/limit.
     `logc` is a plain-text log reader that **auto-detects** the format by

@@ -1,0 +1,10 @@
+{
+  "name": "ttplugin",
+  "version": "0.1.0",
+  "description": "SDK for writing turntable plugin connectors in Node.js",
+  "type": "module",
+  "main": "ttplugin.js",
+  "exports": "./ttplugin.js",
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}

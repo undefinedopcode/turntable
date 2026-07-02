@@ -29,3 +29,7 @@ docs/DIALECT.html
 docs/DIALECT.pdf
 # scratch notes — never committed
 LLAMINGTON.md
+
+# python bytecode (sdk/python, plugin scripts)
+__pycache__/
+*.pyc
