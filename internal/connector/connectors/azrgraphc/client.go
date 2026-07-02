@@ -4,9 +4,21 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resourcegraph/armresourcegraph"
+
+	"github.com/april/turntable/internal/connector/connectors/azcommon"
 )
+
+// retryOptions wraps the shared Azure retry policy (see azcommon.RetryOptions —
+// tuned for ARM throttling on dashboard refreshes) as ARM client options.
+func retryOptions() *arm.ClientOptions {
+	return &arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{Retry: azcommon.RetryOptions()},
+	}
+}
 
 // resolveClient lazily builds the real Resource Graph client. Auth is Azure AD
 // via DefaultAzureCredential (environment, managed identity, or az login), like
@@ -21,7 +33,7 @@ func (c *Connector) resolveClient() (graphAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure credential: %w", err)
 	}
-	gc, err := armresourcegraph.NewClient(cred, nil)
+	gc, err := armresourcegraph.NewClient(cred, retryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("azrgraph client: %w", err)
 	}

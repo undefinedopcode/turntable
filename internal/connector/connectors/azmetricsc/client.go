@@ -8,9 +8,13 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
+
+	"github.com/april/turntable/internal/connector/connectors/azcommon"
 )
 
 // resolveClient lazily builds the real Azure client (once, holding the
@@ -53,7 +57,9 @@ func (r *realClient) armClient(subscription string) (*armmonitor.MetricsClient, 
 	if mc, ok := r.arm[subscription]; ok {
 		return mc, nil
 	}
-	mc, err := armmonitor.NewMetricsClient(subscription, r.cred, nil)
+	mc, err := armmonitor.NewMetricsClient(subscription, r.cred, &arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{Retry: azcommon.RetryOptions()},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("azmetrics client: %w", err)
 	}
@@ -117,7 +123,9 @@ func (r *realClient) batchClient(region string) (*azmetrics.Client, error) {
 		return bc, nil
 	}
 	endpoint := "https://" + region + ".metrics.monitor.azure.com"
-	bc, err := azmetrics.NewClient(endpoint, r.cred, nil)
+	bc, err := azmetrics.NewClient(endpoint, r.cred, &azmetrics.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Retry: azcommon.RetryOptions()},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("azmetrics batch client: %w", err)
 	}

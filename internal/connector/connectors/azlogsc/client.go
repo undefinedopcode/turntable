@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azlogs"
+	"github.com/april/turntable/internal/connector/connectors/azcommon"
 	"github.com/april/turntable/internal/engine"
 )
 
@@ -21,7 +23,9 @@ func (c *Connector) resolveClient() (logsAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure credential: %w", err)
 	}
-	lc, err := azlogs.NewClient(cred, nil)
+	lc, err := azlogs.NewClient(cred, &azlogs.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Retry: azcommon.RetryOptions()},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("azlogs client: %w", err)
 	}

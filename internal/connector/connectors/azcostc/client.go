@@ -5,11 +5,23 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement"
+
+	"github.com/april/turntable/internal/connector/connectors/azcommon"
 )
 
 const dateLayout = "2006-01-02"
+
+// retryOptions wraps the shared Azure retry policy (see azcommon.RetryOptions —
+// tuned for ARM throttling on dashboard refreshes) as ARM client options.
+func retryOptions() *arm.ClientOptions {
+	return &arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{Retry: azcommon.RetryOptions()},
+	}
+}
 
 // resolveClient lazily builds the real Cost Management client. Auth is Azure AD
 // via DefaultAzureCredential (env / managed identity / az login).
@@ -23,7 +35,7 @@ func (c *Connector) resolveClient() (costAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure credential: %w", err)
 	}
-	qc, err := armcostmanagement.NewQueryClient(cred, nil)
+	qc, err := armcostmanagement.NewQueryClient(cred, retryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("azcost client: %w", err)
 	}

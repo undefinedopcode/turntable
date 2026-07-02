@@ -44,6 +44,7 @@
 package azdevopsc
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -586,28 +587,82 @@ func (h *httpClient) fetchBatch(ctx context.Context, ids []int, reqFields []stri
 	return out, nil
 }
 
+// Retry tuning for Azure DevOps throttling. Unlike the SDK-based Azure
+// connectors (which get azcommon.RetryOptions via the azcore pipeline), this one
+// speaks raw HTTP, so it retries 429/503 itself — honoring the Retry-After
+// header, which Azure DevOps sets on throttled responses, and falling back to
+// exponential backoff otherwise. maxRetries/maxRetryDelay mirror the shared
+// policy so a mixed dashboard behaves uniformly.
+const (
+	maxRetries    = 6
+	maxRetryDelay = 2 * time.Minute
+)
+
 func (h *httpClient) do(ctx context.Context, method, url string, body []byte, out any) error {
-	var rdr io.Reader
-	if body != nil {
-		rdr = strings.NewReader(string(body))
+	for attempt := 0; ; attempt++ {
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", h.auth)
+		req.Header.Set("Accept", "application/json")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := h.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		// Retry throttling (429) and transient unavailability (503), honoring the
+		// server's Retry-After; other statuses fall through to be handled below.
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) && attempt < maxRetries {
+			delay := retryDelay(resp, attempt)
+			resp.Body.Close()
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		}
+		return json.NewDecoder(resp.Body).Decode(out)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
-	if err != nil {
-		return err
+}
+
+// retryDelay derives the wait before the next attempt: the response's Retry-After
+// header when present (a delta-seconds count or an HTTP-date), else exponential
+// backoff from a 2s base. The result is clamped to maxRetryDelay so a very large
+// server-directed value still bounds the wait rather than stalling a refresh.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+			return clampDelay(time.Duration(secs) * time.Second)
+		}
+		if t, err := http.ParseTime(ra); err == nil {
+			if d := time.Until(t); d > 0 {
+				return clampDelay(d)
+			}
+			return 0
+		}
 	}
-	req.Header.Set("Authorization", h.auth)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	return clampDelay(2 * time.Second << attempt) // 2s, 4s, 8s, …
+}
+
+func clampDelay(d time.Duration) time.Duration {
+	if d > maxRetryDelay {
+		return maxRetryDelay
 	}
-	resp, err := h.hc.Do(req)
-	if err != nil {
-		return err
+	if d < 0 {
+		return 0
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return d
 }
