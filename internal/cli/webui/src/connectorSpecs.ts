@@ -130,6 +130,19 @@ export const CONNECTOR_SPECS: ConnectorSpec[] = [
     note: "events supports only aggregate queries (GROUP BY / COUNT / SUM / …) — Honeycomb has no raw-event read API.",
   },
   {
+    name: "prom",
+    label: "Prometheus",
+    fields: [
+      { key: "url", label: "Server URL", required: true, placeholder: "http://localhost:9090" },
+      { key: "metric", label: "Metric", placeholder: "node_cpu_seconds_total", help: "a plain metric selector (or use Query)" },
+      { key: "query", label: "Query (PromQL)", placeholder: "rate(http_requests_total[5m])", help: "takes precedence over Metric" },
+      { key: "time_range", label: "Time range (s)", placeholder: "3600", help: "lookback window; default 1h" },
+      { key: "step", label: "Step (s)", placeholder: "auto", help: "sample resolution; default ~250 points across the window" },
+      { key: "bearer", label: "Bearer token", sensitive: true, placeholder: "${PROM_TOKEN}", help: "optional Authorization: Bearer" },
+    ],
+    note: "rows are (ts, one column per label, value) — one row per series sample. Reduce at the source with PromQL (rate, sum by (…)).",
+  },
+  {
     name: "azmetrics",
     label: "Azure Monitor Metrics",
     fields: [

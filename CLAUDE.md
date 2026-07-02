@@ -341,6 +341,16 @@ interfaces:
     Plan note: the events **Query Data API** is gated to paid Honeycomb plans, so
     on a free plan the query POST returns 403 (`enterpriseHint` wraps it with an
     explanation); the metadata datasets work on any plan.
+    `promc` (Prometheus) evaluates a PromQL `query` (or plain `metric`
+    selector; a qualified ref `prom:up` carries the selector in Source) over a
+    window (`time_range`/`start`/`end`, `step` defaulting to ~250 points) via
+    `/api/v1/query_range`, exposing rows as (`ts`, one string column per label
+    — sorted union across series, missing → NULL, colliding `ts`/`value`
+    label names prefixed `label_` — and float `value`; NaN/±Inf → NULL).
+    Schema is response-derived like `dynamodbc` (Resolve and Scan each run the
+    query — two calls per SQL query). `url` = server base; optional `bearer`
+    (sensitive). No pushdown: reduce at the source with PromQL (`rate`,
+    `sum by (…)`); the engine does the rest. Tests use `httptest`.
     `awsconfigc` (AWS Config Advanced Query) is the AWS analogue of `azrgraphc`:
     account/region resource inventory (every type Config records) via Config's
     SQL `SELECT` surface. Table mode exposes a **fixed** top-level schema

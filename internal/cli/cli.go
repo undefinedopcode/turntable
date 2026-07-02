@@ -31,6 +31,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
 	"github.com/april/turntable/internal/connector/connectors/linearc"
+	"github.com/april/turntable/internal/connector/connectors/promc"
 	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/connector/connectors/memc"
 	"github.com/april/turntable/internal/connector/connectors/parquetc"
@@ -114,6 +115,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(azdevopsc.New())
 	_ = reg.RegisterConnector(claudelogsc.New())
 	_ = reg.RegisterConnector(honeycombc.New())
+	_ = reg.RegisterConnector(promc.New())
 	mem := memc.New()
 	_ = reg.RegisterConnector(mem) // also serves "mem:<view>" qualified refs
 	return &App{
