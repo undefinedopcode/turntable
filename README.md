@@ -1,19 +1,27 @@
 # Turntable
 
-Query heterogeneous data sources — JSON, CSV, YAML, Excel, Parquet, SQL
-databases, HTTP/REST APIs, Linear, Trello, Azure DevOps Boards, AWS CloudWatch,
-DynamoDB, Azure Table Storage, and AWS Athena — using a single SQL-style query
-language.
+Query heterogeneous data sources — JSON, CSV, YAML, Excel, Parquet, and log
+files; SQL databases; and a broad set of URL/API connectors (HTTP/REST, Linear,
+Trello, Azure DevOps Boards, Prometheus, Honeycomb, AWS CloudWatch / Athena /
+Config / Cost Explorer, DynamoDB, Azure Table Storage, Azure Monitor metrics &
+logs, Azure Resource Graph, Azure Cost Management) — plus your own via an
+external-process plugin protocol, all through a single SQL-style query language.
 
-> **Status:** v0.4. File connectors (JSON, CSV, YAML, Excel, Parquet), SQL
-> databases (with predicate/limit/order pushdown via `database/sql`), and
-> URL/API connectors (HTTP/REST, Linear's GraphQL API, CloudWatch logs &
-> metrics) are implemented. Cross-source joins work (e.g. join a Postgres table
-> against a CSV file, or a REST endpoint against a Parquet file). The expression
-> layer covers `CASE WHEN`/`CAST`/`EXTRACT`, a rich string/time function
-> library, an interactive REPL, streaming result rendering (bounded memory),
-> and a `--strict` mode. See [DESIGN.md](./DESIGN.md) for the architecture,
-> supported dialect, and roadmap.
+> **Status:** active development. Implemented: file connectors (JSON, CSV, YAML,
+> Excel, Parquet, logs), SQL databases (SQLite / Postgres / MySQL / SQL Server,
+> with predicate/limit/order **and aggregate** pushdown), and a wide range of
+> URL/API connectors (see the sections below). Cross-source joins work (e.g.
+> join a Postgres table against a CSV file, or a REST endpoint against a Parquet
+> file). The SQL layer covers `CASE`/`CAST`/`EXTRACT`, a rich string / numeric /
+> date-time function library, aggregates, **window functions** (with
+> `ROWS`/`RANGE` frames), CTEs (`WITH`), **views** and in-memory **materialized
+> views**, set operations (`UNION`/`INTERSECT`/`EXCEPT`), `ASOF` joins, table
+> functions (`generate_series`), and subqueries (`IN`/`EXISTS`/scalar/
+> correlated). Beyond the one-shot CLI there is an interactive **REPL**, a **web
+> UI** (query editor, charts, pivots, dashboards), and an **MCP server** for AI
+> agents. Streaming result rendering keeps memory bounded, and `--strict` turns
+> coercion failures into errors. See [DESIGN.md](./DESIGN.md) for the
+> architecture and [DIALECT.md](./DIALECT.md) for the full language reference.
 
 ## Install
 
@@ -44,7 +52,7 @@ turntable -c examples/turntable.yaml \
 
 ### Expressions: CASE, CAST, EXTRACT
 
-The v0.3 expression layer adds SQL-standard conditionals and date parts:
+The expression layer provides SQL-standard conditionals and date parts:
 
 ```sql
 -- conditional logic
@@ -61,7 +69,7 @@ SELECT order_id, EXTRACT(MONTH FROM placed_at) AS month FROM orders
 SELECT POSITION('parse' IN 'turntable') AS pos
 ```
 
-### Subqueries and UNION
+### Subqueries and set operations
 
 A `FROM`-clause subquery (derived table) must be aliased; the outer query reads
 its output columns like any table — including across connectors:
@@ -78,18 +86,26 @@ JOIN (SELECT user_id, SUM(amount) AS total FROM csv:./orders.csv GROUP BY user_i
   ON t.user_id = u.id
 ```
 
-A `WHERE x IN (SELECT ...)` / `NOT IN (SELECT ...)` subquery is also supported.
-The subquery must be non-correlated and return a single column; it is executed
-once and folded into a value set, so it works across connectors and can even be
-pushed into a SQL source:
+`IN (SELECT ...)`, `EXISTS`/`NOT EXISTS`, and scalar `(SELECT ...)` subqueries
+are supported in `WHERE` and the select list, in both non-correlated and
+correlated forms. A non-correlated `IN` is executed once and folded into a value
+set (so it works across connectors and can even be pushed into a SQL source);
+a correlated `EXISTS` with an equality correlation is decorrelated into a
+semi/anti-join:
 
 ```sql
 SELECT name FROM users
 WHERE id IN (SELECT user_id FROM csv:./orders.csv WHERE amount > 100)
+
+-- correlated scalar subquery in the select list
+SELECT name, (SELECT COUNT(*) FROM ord o WHERE o.emp_id = e.id) AS orders
+FROM emp e
 ```
 
-`UNION` (deduplicated) and `UNION ALL` (kept) combine branches with matching
-column counts. A trailing `ORDER BY`/`LIMIT` applies to the whole result:
+`UNION`, `INTERSECT`, and `EXCEPT` combine branches with matching column counts,
+each with an `ALL` form (`UNION` dedupes, `UNION ALL` keeps all). `INTERSECT`
+binds tighter than `UNION`/`EXCEPT`. A trailing `ORDER BY`/`LIMIT` applies to
+the whole result:
 
 ```sql
 SELECT id, name FROM csv:./current.csv
@@ -98,10 +114,9 @@ SELECT id, name FROM csv:./archive.csv
 ORDER BY name LIMIT 50
 ```
 
-Not yet supported: scalar and `EXISTS` subqueries, correlated subqueries, and
-`INTERSECT`/`EXCEPT`. An `IN` subquery's column must be a scalar type (int,
-float, string, bool). In a chain mixing `UNION` and `UNION ALL`, the presence of
-any plain `UNION` deduplicates the whole result.
+See [DIALECT.md](./DIALECT.md) for the precise semantics and the remaining
+limits (e.g. a subquery in the `SELECT` list / `ORDER BY` of a grouped query,
+recursive CTEs, and parenthesized set-op grouping are not yet supported).
 
 ### SQL dialect & functions
 
@@ -165,21 +180,32 @@ turntable -c examples/turntable.yaml --serve            # http://localhost:8080
 turntable -c examples/turntable.yaml --serve --addr localhost:9000
 ```
 
-The page has a SQL editor (`Ctrl`/`⌘`+`Enter` to run), a sidebar listing
-sources (click to expand columns or insert a name), a results table, an
-**Explain** button, and CSV export. Results are capped (per `--max-rows`,
-default 5000) and the response notes truncation.
+The page is **tabbed** — each tab an independent query workspace (its editor
+text, result, and view settings persist in the browser). Each has a CodeMirror
+SQL editor (`Ctrl`/`⌘`+`Enter` to run, with source/column/function
+autocomplete), a sidebar listing sources (click to expand columns or insert a
+name), query history and saved queries, and an **Explain** button. The results
+pane has three views: a **table** (client-side sort/filter, cell copy/expand,
+CSV/JSON/NDJSON export), a **chart** (Chart.js — bar/line/area/scatter/bubble/
+heatmap/pie plus node-link graph & tree, with time axes and dual-axis support),
+and a **pivot** table. Results and views can be **pinned** into **dashboards** —
+named panel lists (markdown/table/pivot/chart/stat) stored as YAML, with
+toolbar variables and optional auto-refresh; a dashboard can also be rendered to
+a self-contained HTML report headlessly (`turntable dashboard render <slug>`).
+Results are capped (per `--max-rows`, default 5000) and the response notes
+truncation.
 
 The **Add source** button opens a modal that registers a source at runtime —
 the browser equivalent of the REPL's `.use`, going through the same registration
 path (so wildcards like `table=*`, option routing, and validation behave
 identically). The form adapts to the chosen connector: SQL shows driver/DSN/
 table, an API connector shows its URL/keys, and so on. For **file** connectors
-(CSV, JSON, YAML, Excel, Parquet) it offers a **file upload** — the file is
-streamed to a per-session scratch directory on the server and the new source
-points at it. Registrations and uploads live for the life of the process (the
-scratch directory is removed on shutdown); nothing is written back to
-`turntable.yaml`.
+(CSV, JSON, YAML, Excel, Parquet, log) it offers a **file upload** — the file is
+streamed to a persistent, project-relative directory (`.turntable/data`) and the
+new source points at it. Uploads are kept across restarts; runtime source
+registrations are in-memory by default, but the add-source form has a **Save to
+config file** option that appends the (secret-free) source to `turntable.yaml`,
+so a saved file source keeps resolving on the next run.
 
 The API: `POST /api/query` (`{"query": "...", "explain": false}` →
 `{columns, rows, count, elapsed_ms, ...}`), `GET /api/sources`,
@@ -275,22 +301,27 @@ sources:
     table: "*"                  # wildcard: register every user table in the DB
 ```
 
-Three drivers are compiled in: **`sqlite`** (`modernc.org/sqlite`, pure Go),
-**`postgres`** (`github.com/lib/pq`), and **`mysql`**
-(`github.com/go-sql-driver/mysql`). The `driver` field selects which one.
+Four drivers are compiled in: **`sqlite`** (`modernc.org/sqlite`, pure Go),
+**`postgres`** (`github.com/lib/pq`), **`mysql`**
+(`github.com/go-sql-driver/mysql`), and **`sqlserver`**
+(`github.com/microsoft/go-mssqldb`). The `driver` field selects which one.
 
 The `sql` connector discovers schema via `PRAGMA table_info` (SQLite),
-`information_schema.columns` (Postgres/MySQL), or `DESCRIBE` (MySQL). For a
-single-table query the planner pushes the `WHERE` and `LIMIT` into the database
-(`ORDER BY` is applied by the engine); pushdown is a pure optimization, so the
-engine re-applies the filter and limit and the result is correct even when only
-part of the predicate is pushed. Pushdown is dialect-aware: identifiers are
-quoted with double quotes for SQLite/Postgres and backticks for MySQL, and
-discovery uses `$1`-style bind parameters for Postgres and `?` elsewhere.
-Unsupported predicates (e.g. scalar functions like `LOWER(name)`) are not pushed
-and are applied in memory by the engine instead — and the `LIMIT` is then held
-back too, so the engine still sees every matching row. Run `turntable --explain`
-to see what was pushed (e.g. `Scan inv [pushdown: predicate, limit=3]`).
+`information_schema.columns` (Postgres/MySQL/SQL Server), or `DESCRIBE` (MySQL).
+For a single-table query the planner pushes the `WHERE`, `ORDER BY`, and `LIMIT`
+into the database; pushdown is a pure optimization, so the engine re-applies the
+filter, sort, and limit and the result is correct even when only part of the
+predicate is pushed. Pushdown is dialect-aware: identifiers are quoted with
+double quotes for SQLite/Postgres, backticks for MySQL, and `[brackets]` for SQL
+Server; bind parameters are `$1`-style for Postgres, `@pN` for SQL Server, and
+`?` elsewhere; the row limit is `LIMIT n` except on SQL Server, which uses
+`SELECT TOP (n)`. Unsupported predicates (e.g. scalar functions like
+`LOWER(name)`) are not pushed and are applied in memory by the engine instead —
+and the `LIMIT` is then held back too, so the engine still sees every matching
+row. A single-table `GROUP BY`/aggregate query can also be **pushed whole** to
+the database (group-bys, `DATE_BIN` time buckets, and `COUNT`/`SUM`/`AVG`/`MIN`/
+`MAX`). Run `turntable --explain` to see what was pushed (e.g. `Scan inv
+[pushdown: predicate, limit=3, order]`).
 
 A `table: "*"` source enumerates every user table in the database (via
 `PRAGMA table_list` / `information_schema.tables`, filtering out system tables)
@@ -640,6 +671,128 @@ it (comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`); anything else (`LIKE`,
 point `endpoint`/`connection_string` at the [Azurite](https://github.com/Azure/Azurite)
 emulator.
 
+### Prometheus
+
+The `prom` connector evaluates a PromQL `query` (or a bare `metric` selector)
+over a time window via `/api/v1/query_range`, returning one row per
+(`ts`, series) with a `value` and one column per label. Reduce at the source
+with PromQL (`rate`, `sum by (…)`); the engine does the rest. There is no
+predicate pushdown.
+
+```yaml
+sources:
+  http_rate:
+    connector: prom
+    url: http://localhost:9090
+    options:
+      query: 'rate(http_requests_total[5m])'   # or metric: http_requests_total
+      time_range: 3600        # lookback seconds (default 1h); or start/end + step
+      # bearer: ${PROM_TOKEN}
+```
+
+### Honeycomb
+
+The `honeycomb` connector exposes dataset/column/environment **metadata** plus a
+per-dataset **`events`** table selected by the `kind` option. Honeycomb has no
+raw-event read API, so `events` is aggregate-only — it computes
+`GROUP BY`/aggregates at the source via the Query Data API (a paid-plan
+feature); the metadata datasets work on any plan. Auth: `api_key`
+(`${HONEYCOMB_API_KEY}`), or `management_key` for `environments`.
+
+```yaml
+sources:
+  events:
+    connector: honeycomb
+    options:
+      kind: events            # events | datasets | columns | environments
+      dataset: my-service     # * for every dataset
+      api_key: ${HONEYCOMB_API_KEY}
+      time_range: 7200        # events query window seconds (default 2h)
+```
+
+### Azure Monitor, Resource Graph & Cost
+
+A family of Azure connectors, all authenticating with `DefaultAzureCredential`
+(environment / managed identity / `az login`) and retrying on ARM throttling:
+
+- **`azmetrics`** — Azure Monitor metrics for one `resource` (or a `resources`
+  batch across a `region`), by `metric` + `aggregation` + `interval`, optionally
+  split by `dimension`.
+- **`azlogs`** — Azure Monitor Logs / Log Analytics: a `workspace` queried by
+  `table` (or a raw KQL `query`), with `WHERE`/`ORDER BY`/`LIMIT` pushed down as
+  KQL.
+- **`azrgraph`** — Azure Resource Graph, fleet inventory across `subscriptions`;
+  schema inferred from a sample, KQL pushdown, paginated.
+- **`azcost`** — Azure Cost Management (pre-aggregated by `metric` /
+  `granularity` / `group_by`), paginated across the full result set.
+
+```yaml
+sources:
+  vm_cpu:
+    connector: azmetrics
+    options:
+      resource: /subscriptions/…/providers/Microsoft.Compute/virtualMachines/vm1
+      metric: Percentage CPU
+      aggregation: Average
+      interval: PT5M
+  inventory:
+    connector: azrgraph
+    options:
+      table: Resources        # or a raw KQL `query`
+      # subscriptions: sub-1, sub-2   (default: all)
+  spend:
+    connector: azcost
+    options:
+      subscription: ${AZURE_SUBSCRIPTION_ID}
+      group_by: ServiceName
+      granularity: Daily
+      timeframe: MonthToDate
+```
+
+### AWS Config & Cost Explorer
+
+Two AWS account connectors using the standard credential chain
+(`region`/`profile` options):
+
+- **`awsconfig`** — resource inventory via AWS Config Advanced Query. A fixed
+  top-level schema with `WHERE`/`LIMIT` pushed down as a Config `SELECT`, or a
+  raw `query`; `aggregator` targets a multi-account aggregator.
+- **`awscost`** — AWS Cost Explorer (`GetCostAndUsage`), by `granularity` /
+  `metric` / `group_by` (`SERVICE`, `REGION`, `TAG:key`; ≤2) over a `start`/`end`
+  window.
+
+```yaml
+sources:
+  resources:
+    connector: awsconfig
+    options: { region: us-east-1 }        # or query: "SELECT resourceId, resourceType WHERE …"
+  aws_spend:
+    connector: awscost
+    options:
+      granularity: DAILY
+      group_by: SERVICE
+      # start: 2026-06-01   end: 2026-07-01
+```
+
+### External-process plugins
+
+Beyond the built-in connectors, a **plugin** connector runs an external program
+as a data source, speaking a small JSON-RPC protocol over stdio. Author SDKs
+exist for **Go**, **Python**, and **Node.js** (`sdk/`), so a plugin is just a
+schema plus a rows function; the reference plugins under `examples/plugins/`
+(system info, process table, Kubernetes, MQTT, GitHub, …) show the shape.
+Because a plugin is arbitrary code, it is declared in `turntable.yaml` only (not
+via the web add-source form):
+
+```yaml
+sources:
+  procs:
+    connector: plugin
+    command: ["./examples/plugins/procinfo/procinfo"]   # ${ENV} interpolated
+```
+
+See **PLUGINS.md** for the protocol and `sdk/` for the language SDKs.
+
 ### Claude Code transcripts
 
 The `claudelogs` connector reads Claude Code's JSONL session logs (under
@@ -705,17 +858,25 @@ single-session qualified ref are the easiest ways to point at one.
 ## Layout
 
 ```
-DESIGN.md            Architecture and SQL dialect
+DESIGN.md            Architecture and roadmap
+DIALECT.md           SQL language reference
 cmd/turntable/      CLI entrypoint
-internal/cli         flag handling, wiring, REPL
+internal/cli         flag handling, wiring, REPL, web UI, MCP server
 internal/sql         lexer, parser, AST
 internal/plan        resolution, validation, pushdown
 internal/engine      types, rows, operator pipeline
 internal/connector   Connector interface + Registry
-internal/connector/connectors/{jsonc,csvc,yamlc,excelc,parquetc,logc,sqlc,httpc,linearc,trelloc,azdevopsc,cwlogsc,cwmetricsc,dynamodbc,aztablesc,claudelogsc}
+internal/connector/connectors/
+  files   jsonc csvc yamlc excelc parquetc logc claudelogsc
+  sql     sqlc                       (sqlite/postgres/mysql/sqlserver)
+  api     httpc linearc trelloc azdevopsc cwlogsc cwmetricsc dynamodbc
+          aztablesc athenac awsconfigc awscostc promc honeycombc
+          azrgraphc azmetricsc azlogsc azcostc
+  plugin  pluginc                    (external-process connectors; sdk/ + examples/plugins/)
+  mem     memc                       (backs materialized views)
 internal/render       output formatters
 internal/config       turntable.yaml loader
-examples/             sample config, data, and run.sh demo script
+examples/             sample config, data, run.sh demo script, plugins/
 ```
 
 ## Examples

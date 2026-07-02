@@ -29,7 +29,8 @@ SELECT [DISTINCT] <select_list>
   [materialized views](#materialized-views) (`CREATE/REFRESH/DROP MATERIALIZED
   VIEW`) — they register named queries/results in the session but never modify a
   source.
-- A trailing `;` is accepted. Only one statement per query (except `UNION`).
+- A trailing `;` is accepted. Only one statement per query (a set-operation
+  chain — `UNION`/`INTERSECT`/`EXCEPT` — is still one statement).
 - `FROM` is optional: `SELECT 1 + 1` evaluates a single row (handy in the REPL).
 - `SELECT *` expands all columns; `alias.*` expands just that FROM relation's
   columns (`SELECT o.*, c.name FROM orders o JOIN customers c ON …`). Neither
@@ -314,9 +315,17 @@ for the query-scoped equivalent.
 | `sql:postgres://…/db` | the whole DSN is captured as the source |
 | `(SELECT …) AS g` | derived table |
 
-The connector prefix is the connector's name: `csv`, `json`, `yaml`, `excel`,
-`parquet`, `log`, `sql`, `http`, `linear`, `trello`, `azuredevops`, `dynamodb`,
-`azuretables`, `cloudwatchlogs`, `cloudwatch`.
+The connector prefix is the connector's name:
+
+- **files:** `csv`, `json`, `yaml`, `excel`, `parquet`, `log`, `claudelogs`
+- **SQL:** `sql` (SQLite/Postgres/MySQL/SQL Server, by `driver`)
+- **URL/API:** `http`, `linear`, `trello`, `azuredevops`, `dynamodb`,
+  `azuretables`, `cloudwatchlogs`, `cloudwatch`, `athena`, `awsconfig`,
+  `awscost`, `prom` (Prometheus), `honeycomb`, `azrgraph` (Azure Resource
+  Graph), `azmetrics`, `azlogs`, `azcost`
+
+A plugin connector (an external program) registers under its own advertised
+name. `mem` is reserved for materialized views.
 
 ---
 
