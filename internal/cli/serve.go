@@ -138,8 +138,13 @@ type apiColumn struct {
 }
 
 type queryResponse struct {
-	Columns   []apiColumn `json:"columns,omitempty"`
-	Rows      [][]any     `json:"rows,omitempty"`
+	Columns []apiColumn `json:"columns,omitempty"`
+	// NB: no omitempty — a zero-row result must still serialize "rows": [] (the
+	// success path always builds a non-nil slice). Omitting it left the web
+	// UI's result.rows undefined, crashing the results pane on any empty
+	// result. Error/notice/explain responses serialize "rows": null, which the
+	// frontend never reads (isTable is false).
+	Rows [][]any `json:"rows"`
 	Count     int         `json:"count"`
 	ElapsedMs int64       `json:"elapsed_ms"`
 	Truncated bool        `json:"truncated,omitempty"`

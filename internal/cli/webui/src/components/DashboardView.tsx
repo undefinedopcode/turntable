@@ -219,9 +219,9 @@ function DashPanel({
   } else if (panel.kind === "stat") {
     body = <Stat result={result} />;
   } else if (panel.kind === "chart") {
-    body = <Chart columns={result.columns} rows={result.rows} config={panel.view?.chart} />;
+    body = <Chart columns={result.columns} rows={result.rows ?? []} config={panel.view?.chart} />;
   } else if (panel.kind === "pivot") {
-    body = <PivotTable columns={result.columns} rows={result.rows} config={panel.view?.pivot} />;
+    body = <PivotTable columns={result.columns} rows={result.rows ?? []} config={panel.view?.pivot} />;
   } else {
     body = <PanelTable result={result} />;
   }
@@ -251,7 +251,7 @@ const fmtStat = (n: number) =>
 // Stat renders the first cell of the first row, big, captioned by its column
 // name — the classic dashboard "big number".
 function Stat({ result }: { result: QueryResult }) {
-  const v = result.rows[0]?.[0];
+  const v = result.rows?.[0]?.[0];
   const label = result.columns[0]?.name ?? "";
   const text =
     v === null || v === undefined ? "—" : typeof v === "number" ? fmtStat(v) : String(v);
@@ -267,7 +267,8 @@ function Stat({ result }: { result: QueryResult }) {
 // table lives in the Results pane; a dashboard panel just shows the data).
 const PANEL_ROW_CAP = 200;
 function PanelTable({ result }: { result: QueryResult }) {
-  const rows = result.rows.slice(0, PANEL_ROW_CAP);
+  const all = result.rows ?? [];
+  const rows = all.slice(0, PANEL_ROW_CAP);
   return (
     <>
       <div className="table-wrap">
@@ -302,7 +303,7 @@ function PanelTable({ result }: { result: QueryResult }) {
           </tbody>
         </table>
       </div>
-      {result.rows.length > PANEL_ROW_CAP && (
+      {all.length > PANEL_ROW_CAP && (
         <div className="hint" style={{ padding: "4px 2px" }}>
           showing first {PANEL_ROW_CAP} of {result.count} rows.
         </div>

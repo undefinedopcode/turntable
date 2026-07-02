@@ -485,3 +485,27 @@ func TestCreateUploadCollision(t *testing.T) {
 		f.Close()
 	}
 }
+
+// Regression: a zero-row result must still serialize "rows": [] — omitting the
+// key left the web UI's result.rows undefined, crashing the results pane on
+// any empty result (first hit in practice by empty GitHub plugin datasets).
+func TestHandleQueryZeroRowsKeepsRowsField(t *testing.T) {
+	a := NewApp()
+	req := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"query":"SELECT 1 AS n WHERE 1 = 2"}`))
+	rec := httptest.NewRecorder()
+	a.handleQuery(rec, req)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rows, ok := raw["rows"]
+	if !ok {
+		t.Fatalf("rows key missing from zero-row response: %s", rec.Body.String())
+	}
+	if string(rows) != "[]" {
+		t.Errorf("rows = %s, want []", rows)
+	}
+	if _, ok := raw["columns"]; !ok {
+		t.Errorf("columns missing: %s", rec.Body.String())
+	}
+}

@@ -73,7 +73,7 @@ export function Results({
   // Derive the displayed rows: filter (substring over all cells), then sort.
   const rows = useMemo(() => {
     if (!isTable || !result) return [];
-    let rs = result.rows;
+    let rs = result.rows ?? []; // older servers omit rows on empty results
     const f = filter.trim().toLowerCase();
     if (f) {
       rs = rs.filter((row) => row.some((c) => cellText(c).toLowerCase().includes(f)));
