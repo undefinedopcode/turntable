@@ -1424,6 +1424,13 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 	var keyCols []engine.Column
 	var outs []engine.ProjectedExpr
 
+	// aliasExpr records each scalar-of-aggregate select item's rewritten
+	// expression by its alias, so ORDER BY can reference it. Such an alias
+	// (e.g. ROUND(SUM(x), 2) AS r) is NOT a column of the aggregate output —
+	// the projection above computes it — but the Sort runs between the two, so
+	// a bare `ORDER BY r` must be substituted with the rewritten expression to
+	// evaluate against the aggregate's rows.
+	aliasExpr := map[string]sql.Expr{}
 	for _, it := range stmt.Items.Items {
 		if it.Star {
 			return nil, nil, engine.Schema{}, nil, fmt.Errorf("SELECT * not valid with aggregation; name columns explicitly")
@@ -1440,7 +1447,11 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 			outs = append(outs, engine.ProjectedExpr{Expr: &sql.ColRef{Name: name}, Name: name})
 		case exprHasAgg(it.Expr):
 			// A scalar expression wrapping one or more aggregates.
-			outs = append(outs, engine.ProjectedExpr{Expr: ext.rewrite(it.Expr), Name: name})
+			rewritten := ext.rewrite(it.Expr)
+			if it.As != "" {
+				aliasExpr[strings.ToLower(it.As)] = rewritten
+			}
+			outs = append(outs, engine.ProjectedExpr{Expr: rewritten, Name: name})
 		default:
 			// No aggregate: a group key. The projection reads the key column back.
 			keys = append(keys, it.Expr)
@@ -1455,7 +1466,13 @@ func (bc *buildCtx) buildAggregate(stmt *sql.SelectStmt, base Node, baseSchema e
 	}
 	var orderTerms []sql.OrderTerm
 	for _, ot := range stmt.OrderBy {
-		orderTerms = append(orderTerms, sql.OrderTerm{Expr: ext.rewrite(ot.Expr), Desc: ot.Desc})
+		expr := ot.Expr
+		if cr, ok := expr.(*sql.ColRef); ok && cr.Qualifier == "" {
+			if repl, ok := aliasExpr[strings.ToLower(cr.Name)]; ok {
+				expr = repl
+			}
+		}
+		orderTerms = append(orderTerms, sql.OrderTerm{Expr: ext.rewrite(expr), Desc: ot.Desc})
 	}
 
 	// The AggregateIter emits [group keys..., aggregates...]; the intermediate
@@ -1547,6 +1564,10 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 	// leaving the fallback path an unmodified statement if we decline.
 	ext := newPushAggExtractor(scan.Alias)
 	newItems := make([]sql.SelectItem, len(stmt.Items.Items))
+	// Scalar-of-aggregate aliases for ORDER BY substitution — same reasoning as
+	// buildAggregate's aliasExpr (the Sort runs below the projection that
+	// computes the alias).
+	aliasExpr := map[string]sql.Expr{}
 	for i, it := range stmt.Items.Items {
 		if it.Star {
 			return nil, engine.Schema{}, false, nil
@@ -1559,6 +1580,9 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 			it.Expr = ext.register(fc, it.As)
 		} else {
 			it.Expr = rewriteBuckets(ext.rewrite(it.Expr))
+			if it.As != "" && exprHasAgg(stmt.Items.Items[i].Expr) {
+				aliasExpr[strings.ToLower(it.As)] = it.Expr
+			}
 		}
 		newItems[i] = it
 	}
@@ -1568,7 +1592,13 @@ func (bc *buildCtx) buildPushedAggregate(stmt *sql.SelectStmt, scan *Scan) (Node
 	}
 	newOrder := make([]sql.OrderTerm, len(stmt.OrderBy))
 	for i, ot := range stmt.OrderBy {
-		ot.Expr = rewriteBuckets(ext.rewrite(ot.Expr))
+		expr := ot.Expr
+		if cr, ok := expr.(*sql.ColRef); ok && cr.Qualifier == "" {
+			if repl, ok := aliasExpr[strings.ToLower(cr.Name)]; ok {
+				expr = repl
+			}
+		}
+		ot.Expr = rewriteBuckets(ext.rewrite(expr))
 		newOrder[i] = ot
 	}
 	if !ext.ok {

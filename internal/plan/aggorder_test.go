@@ -94,3 +94,24 @@ func colNames(s engine.Schema) []string {
 	}
 	return out
 }
+
+// Regression: ORDER BY on the alias of a scalar-wrapped aggregate
+// (ROUND(SUM(x), 2) AS r … ORDER BY r) silently didn't sort — the Sort runs
+// between the Aggregate and the projection that computes the alias, so the
+// bare column reference resolved to NULL. The planner now substitutes the
+// alias with its rewritten expression.
+func TestOrderByScalarAggAlias(t *testing.T) {
+	rows := runQuery(t, ordersRegistry(t),
+		"SELECT currency, ROUND(SUM(amount), 2) AS total FROM orders GROUP BY currency ORDER BY total DESC")
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	first, _ := rows[0].Values[1].AsFloat()
+	second, _ := rows[1].Values[1].AsFloat()
+	if !(first > second) {
+		t.Errorf("not sorted desc: %v then %v", first, second)
+	}
+	if rows[0].Values[0].AsString() != "USD" { // USD 119.49 > EUR 50
+		t.Errorf("first currency = %v, want USD", rows[0].Values[0].V)
+	}
+}
