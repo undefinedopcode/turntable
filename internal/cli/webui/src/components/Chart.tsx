@@ -39,6 +39,7 @@ import {
   type Agg,
   AGGS,
   applyAgg,
+  calendarize,
   heatColor,
   labelOf,
   nodesEdges,
@@ -101,6 +102,7 @@ const TYPES: ChartType[] = [
   "scatter",
   "bubble",
   "heatmap",
+  "calendar",
   "pie",
   "graph",
   "tree",
@@ -311,9 +313,12 @@ export function Chart({
   const isScatter = type === "scatter";
   const isBubble = type === "bubble";
   const isPoint = isScatter || isBubble; // x must be numeric (or a time) for point charts
+  const isCalendar = type === "calendar"; // contribution-graph: needs a time x
   const xChoices = isPoint
     ? columns.map((_, i) => i).filter((i) => numericIdx.includes(i) || timeIdx.includes(i))
-    : columns.map((_, i) => i);
+    : isCalendar
+      ? timeIdx
+      : columns.map((_, i) => i);
   const x = xChoices.includes(xIdx) ? xIdx : (xChoices[0] ?? 0);
   // A time-typed X gets a real time axis (see the line/point branches below).
   const xIsTime = columns[x]?.type === "time";
@@ -321,7 +326,9 @@ export function Chart({
   const y2s = y2Sel.filter(
     (i) => numericIdx.includes(i) && i !== (isPoint ? x : -1) && !ys.includes(i),
   );
-  if (ys.length === 0 && y2s.length === 0) ys = numericIdx.filter((i) => i !== x).slice(0, 1);
+  // The calendar counts rows when no measure is chosen, so don't auto-pick one.
+  if (ys.length === 0 && y2s.length === 0 && !isCalendar)
+    ys = numericIdx.filter((i) => i !== x).slice(0, 1);
   const allY = [...ys, ...y2s];
   // Pie and bubble show a single Y series.
   const series = type === "pie" || isBubble ? allY.slice(0, 1) : allY;
@@ -340,9 +347,9 @@ export function Chart({
   // A heatmap is a pivot too: X × (series-by → Y) coloured by one measure.
   const heatActive = isHeatmap && seriesBy >= 0 && seriesBy < columns.length && seriesBy !== x;
   const yMeasure = series[0];
-  // Aggregation applies to the grouped/pivoted cartesian views (heatmap does its
-  // own pivot; point charts plot raw rows).
-  const grouping = agg !== "none" && !isPoint && !isHeatmap;
+  // Aggregation applies to the grouped/pivoted cartesian views (heatmap and
+  // calendar do their own binning; point charts plot raw rows).
+  const grouping = agg !== "none" && !isPoint && !isHeatmap && !isCalendar;
 
   // Secondary axis: only the category cartesian charts, and only when a series
   // is actually assigned right. A chip cycles off → left → right (see cycleY).
@@ -520,10 +527,11 @@ export function Chart({
     );
   }
 
-  if (numeric.length === 0) {
-    // The axis-based charts need a numeric column, but graph/tree do not (they map
-    // a node + link column). Keep the type selector visible so those stay
-    // reachable without a dummy numeric column.
+  if (numeric.length === 0 && !isCalendar) {
+    // The axis-based charts need a numeric column, but graph/tree do not (they
+    // map a node + link column) and neither does the calendar (it can count
+    // rows per day). Keep the type selector visible so those stay reachable
+    // without a dummy numeric column.
     return (
       <div className="chart">
         <div className="chart-controls">
@@ -893,6 +901,84 @@ export function Chart({
       };
       chart = <ReactChart type="matrix" data={matrixData} options={opts} />;
     }
+  } else if (isCalendar) {
+    // GitHub-style contribution calendar: rows binned by local day from the
+    // time X, laid out weekday (Sunday top) × week, coloured by count or an
+    // aggregated measure. Built on the same matrix controller as the heatmap.
+    const cal = xIsTime ? calendarize(rows, x, yMeasure ?? -1, agg) : null;
+    if (!cal) {
+      chart = (
+        <div className="hint" style={{ padding: 12 }}>
+          the calendar needs a <b>time</b> x column (e.g. <code>committed_at</code>, or a{" "}
+          <code>DATE_BIN</code> bucket) — it bins rows per day.
+        </div>
+      );
+    } else {
+      const weekLabels = Array.from({ length: cal.weeks }, (_, i) => String(i));
+      const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const calData: any = {
+        datasets: [
+          {
+            label: yMeasure != null ? columns[yMeasure]?.name : "rows",
+            data: cal.cells.map((c) => ({ x: String(c.week), y: DAY_LABELS[c.day], v: c.v, d: c.date })),
+            backgroundColor: (c: { raw?: { v: number | null } }) =>
+              c.raw?.v == null
+                ? "rgba(138,147,167,0.08)" // a day in range with no data
+                : heatColor(c.raw.v, cal.lo, cal.hi),
+            borderColor: "rgba(23,26,33,0.7)",
+            borderWidth: 1,
+            borderRadius: 2,
+            width: (c: { chart: { chartArea?: { width: number } } }) =>
+              (c.chart.chartArea?.width ?? 0) / cal.weeks - 2,
+            height: (c: { chart: { chartArea?: { height: number } } }) =>
+              (c.chart.chartArea?.height ?? 0) / 7 - 2,
+          },
+        ],
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const opts: any = {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: () => "",
+              label: (c: { raw: { d: string; v: number | null } }) =>
+                `${c.raw.d}: ${c.raw.v ?? "—"}`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: "category",
+            labels: weekLabels,
+            offset: true,
+            grid: { display: false },
+            ticks: {
+              maxRotation: 0,
+              autoSkip: false,
+              // Month names at the weeks where a month begins; blank elsewhere.
+              callback: (_v: unknown, i: number) => cal.monthLabels[i] ?? "",
+            },
+          },
+          y: {
+            type: "category",
+            labels: DAY_LABELS,
+            offset: true,
+            reverse: true, // Sunday at the top, GitHub-style
+            grid: { display: false },
+            ticks: {
+              // Mon/Wed/Fri only, like the original.
+              callback: (_v: unknown, i: number) =>
+                i === 1 || i === 3 || i === 5 ? DAY_LABELS[i] : "",
+            },
+          },
+        },
+      };
+      chart = <ReactChart type="matrix" data={calData} options={opts} />;
+    }
   } else if (timeSers) {
     const filled = type === "area";
     const timeData = {
@@ -1026,19 +1112,37 @@ export function Chart({
             </select>
           </label>
         )}
-        {!isPoint && (
+        {!isPoint && !(isCalendar && yMeasure == null) && (
           <label className="chart-field">
             aggregate
             <select value={agg} onChange={(e) => setAgg(e.target.value as Agg)}>
               {AGGS.map((a) => (
                 <option key={a} value={a}>
-                  {a === "none" ? "none (raw rows)" : a}
+                  {a === "none" ? (isCalendar ? "sum" : "none (raw rows)") : a}
                 </option>
               ))}
             </select>
           </label>
         )}
-        {splitting || isHeatmap ? (
+        {isCalendar ? (
+          <label className="chart-field" title="colour by row count per day, or a per-day aggregate of a measure">
+            value
+            <select
+              value={yMeasure ?? -1}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setYSel(v < 0 ? [] : [v]);
+              }}
+            >
+              <option value={-1}>(count of rows)</option>
+              {numeric.map(({ c, i }) => (
+                <option key={i} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : splitting || isHeatmap ? (
           <label className="chart-field">
             value
             <select value={yMeasure} onChange={(e) => setYSel([Number(e.target.value)])}>
@@ -1093,7 +1197,7 @@ export function Chart({
             </select>
           </label>
         )}
-        {!isHeatmap && type !== "pie" && (
+        {!isHeatmap && !isCalendar && type !== "pie" && (
           <label className="chart-field" title="horizontal reference lines, comma-separated (e.g. alarm levels)">
             threshold
             <input

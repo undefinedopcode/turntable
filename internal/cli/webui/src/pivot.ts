@@ -350,6 +350,117 @@ export function nodesEdgesFromPath(
   return finalizeGraph(nodes, edges, index, hasParent, mode, focus);
 }
 
+// ---- calendar (contribution-graph) binning -----------------------------------
+
+export interface CalendarCell {
+  week: number; // column index
+  day: number; // 0 = Sunday … 6 = Saturday
+  v: number | null; // null = a day in range with no data
+  date: string; // YYYY-MM-DD, for the tooltip
+}
+
+export interface Calendar {
+  cells: CalendarCell[];
+  weeks: number;
+  monthLabels: (string | null)[]; // per week column; label where a month starts
+  lo: number;
+  hi: number;
+  capped: boolean; // true when older weeks were dropped to fit maxWeeks
+}
+
+const dayKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// calendarize bins rows by LOCAL calendar day from a time column and lays the
+// days out GitHub-contribution-graph style: weekday rows (Sunday top) × week
+// columns. yIdx < 0 counts rows per day; otherwise the measure is reduced by
+// fn ("none" acts as sum — a calendar cell is inherently an aggregate). Days
+// inside the range with no rows render as null cells, so quiet days stay
+// visible. Returns null when no cell parses as a time.
+export function calendarize(
+  rows: Cell[][],
+  xIdx: number,
+  yIdx: number,
+  fn: Agg,
+  maxWeeks = 106,
+): Calendar | null {
+  const days = new Map<string, { date: Date; nums: number[]; count: number }>();
+  let min: Date | null = null;
+  let max: Date | null = null;
+  for (const r of rows) {
+    const t = Date.parse(String(r[xIdx] ?? ""));
+    if (Number.isNaN(t)) continue;
+    const d = new Date(t);
+    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const key = dayKey(day);
+    let e = days.get(key);
+    if (!e) {
+      e = { date: day, nums: [], count: 0 };
+      days.set(key, e);
+    }
+    e.count++;
+    if (yIdx >= 0) {
+      const v = numOrNull(r[yIdx]);
+      if (v !== null) e.nums.push(v);
+    }
+    if (!min || day < min) min = day;
+    if (!max || day > max) max = day;
+  }
+  if (!min || !max) return null;
+
+  // Snap the start back to a Sunday; cap to the most recent maxWeeks.
+  const start = new Date(min);
+  start.setDate(start.getDate() - start.getDay());
+  const end = new Date(max);
+  let totalDays = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+  let capped = false;
+  if (totalDays > maxWeeks * 7) {
+    capped = true;
+    start.setTime(end.getTime());
+    start.setDate(start.getDate() - start.getDay() - (maxWeeks - 1) * 7);
+    totalDays = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+  }
+
+  const reduce = (e: { nums: number[]; count: number }): number | null => {
+    if (yIdx < 0) return e.count;
+    const f: Agg = fn === "none" ? "sum" : fn;
+    return applyAgg(e.nums, f);
+  };
+
+  const cells: CalendarCell[] = [];
+  const monthLabels: (string | null)[] = [];
+  let lo = Infinity;
+  let hi = -Infinity;
+  const cursor = new Date(start);
+  for (let i = 0; i < totalDays; i++) {
+    const week = Math.floor(i / 7);
+    if (cursor.getDay() === 0) {
+      // Label the column where a month begins (its 1st falls in this week).
+      const weekEnd = new Date(cursor);
+      weekEnd.setDate(weekEnd.getDate() + 6);
+      monthLabels[week] =
+        cursor.getDate() <= 7
+          ? cursor.toLocaleString("default", { month: "short" })
+          : weekEnd.getDate() <= 7
+            ? weekEnd.toLocaleString("default", { month: "short" })
+            : null;
+    }
+    const e = days.get(dayKey(cursor));
+    const v = e ? reduce(e) : null;
+    if (v !== null) {
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+    cells.push({ week, day: cursor.getDay(), v, date: dayKey(cursor) });
+    cursor.setDate(cursor.getDate() + 1); // date-component step: DST-safe
+  }
+  if (!isFinite(lo)) {
+    lo = 0;
+    hi = 0;
+  }
+  return { cells, weeks: Math.ceil(totalDays / 7), monthLabels, lo, hi, capped };
+}
+
 // heatColor maps a value in [lo,hi] to a blue→accent→amber gradient (null →
 // faint). Three stops keep low/mid/high visually distinct on the dark UI. alpha
 // < 1 lets a colored cell sit over the dark table while keeping its text legible.

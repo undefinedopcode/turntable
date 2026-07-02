@@ -15,6 +15,7 @@ export type ChartType =
   | "scatter"
   | "bubble"
   | "heatmap"
+  | "calendar"
   | "pie"
   | "graph"
   | "tree";
