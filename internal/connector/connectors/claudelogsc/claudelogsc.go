@@ -6,7 +6,10 @@
 //
 // Three views are available via the `kind` option:
 //
-//	messages (default)  one row per conversation message (text + tool_uses count)
+//	messages (default)  one row per conversation message (text + tool_uses count,
+//	                    plus the assistant messages' model, token usage, and an
+//	                    estimated API cost_usd at list prices — so per-model API
+//	                    spend is a GROUP BY model away)
 //	tools               one row per tool_use block (tool_name, tool_id, the input
 //	                    re-encoded as JSON), so a message that calls N tools is N
 //	                    rows. Query tool usage, or grep tool inputs as strings.
@@ -57,7 +60,13 @@ func (Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sche
 	return schemaFor(kindOf(ds))
 }
 
-// messageColumns: one row per conversation message.
+// messageColumns: one row per conversation message. The token columns come
+// from the API usage block on assistant messages (NULL elsewhere); cost_usd is
+// computed from list prices — see costUSD for the estimate's caveats. Per-model
+// API spend is one GROUP BY away:
+//
+//	SELECT model, ROUND(SUM(cost_usd), 2) AS usd, SUM(output_tokens) AS out_tok
+//	FROM transcripts GROUP BY model ORDER BY usd DESC
 var messageColumns = []engine.Column{
 	{Name: "session_id", Type: engine.TypeString, Nullable: true},
 	{Name: "session_file", Type: engine.TypeString, Nullable: true},
@@ -69,6 +78,11 @@ var messageColumns = []engine.Column{
 	{Name: "timestamp", Type: engine.TypeTime, Nullable: true},
 	{Name: "text", Type: engine.TypeString, Nullable: true},
 	{Name: "tool_uses", Type: engine.TypeInt, Nullable: true},
+	{Name: "input_tokens", Type: engine.TypeInt, Nullable: true},
+	{Name: "output_tokens", Type: engine.TypeInt, Nullable: true},
+	{Name: "cache_write_tokens", Type: engine.TypeInt, Nullable: true},
+	{Name: "cache_read_tokens", Type: engine.TypeInt, Nullable: true},
+	{Name: "cost_usd", Type: engine.TypeFloat, Nullable: true},
 	{Name: "cwd", Type: engine.TypeString, Nullable: true},
 	{Name: "git_branch", Type: engine.TypeString, Nullable: true},
 }
@@ -230,7 +244,22 @@ type event struct {
 		Role    string          `json:"role"`
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
+		Usage   *usage          `json:"usage"` // present on assistant messages
 	} `json:"message"`
+}
+
+// usage is the API token accounting attached to assistant messages. The
+// cache_creation breakdown (per-TTL write tokens) appears in newer transcripts;
+// the flat cache_creation_input_tokens total is always present alongside it.
+type usage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 func (it *logIter) Next() (engine.Row, bool, error) {
@@ -317,6 +346,7 @@ func (it *logIter) rowsFor(ev event) []engine.Row {
 		return rows
 	}
 	text, tools := extractText(ev.Message.Content)
+	u := ev.Message.Usage
 	return []engine.Row{{Values: []engine.Value{
 		strOrNull(ev.SessionID),
 		strOrNull(file),
@@ -328,9 +358,21 @@ func (it *logIter) rowsFor(ev event) []engine.Row {
 		timeVal(ev.Timestamp),
 		strOrNull(text),
 		engine.IntVal(int64(tools)),
+		usageVal(u, func(u *usage) int64 { return u.InputTokens }),
+		usageVal(u, func(u *usage) int64 { return u.OutputTokens }),
+		usageVal(u, func(u *usage) int64 { return u.CacheCreationInputTokens }),
+		usageVal(u, func(u *usage) int64 { return u.CacheReadInputTokens }),
+		costUSD(ev.Message.Model, ev.Timestamp, u),
 		strOrNull(ev.Cwd),
 		strOrNull(ev.GitBranch),
 	}}}
+}
+
+func usageVal(u *usage, get func(*usage) int64) engine.Value {
+	if u == nil {
+		return engine.Null()
+	}
+	return engine.IntVal(get(u))
 }
 
 func (it *logIter) Close() error {
@@ -342,6 +384,85 @@ func (it *logIter) Close() error {
 		return it.f.Close()
 	}
 	return nil
+}
+
+// ---- cost estimation -----------------------------------------------------------
+
+// modelPrice is USD per million tokens at list price.
+type modelPrice struct{ in, out float64 }
+
+// modelPrices maps model-ID prefixes to list prices. Transcript model IDs may
+// carry date suffixes (claude-opus-4-5-20251101), so entries are prefixes,
+// matched in order — keep more specific prefixes before shorter ones.
+// Prices as of 2026-07 (source: Anthropic pricing docs); update as they change.
+var modelPrices = []struct {
+	prefix string
+	price  modelPrice
+}{
+	{"claude-fable-5", modelPrice{10, 50}},
+	{"claude-mythos", modelPrice{10, 50}},
+	{"claude-opus-4-8", modelPrice{5, 25}},
+	{"claude-opus-4-7", modelPrice{5, 25}},
+	{"claude-opus-4-6", modelPrice{5, 25}},
+	{"claude-opus-4-5", modelPrice{5, 25}},
+	{"claude-opus-4", modelPrice{15, 75}}, // opus 4.0 / 4.1 (incl. dated ids)
+	{"claude-3-opus", modelPrice{15, 75}},
+	{"claude-sonnet-5", modelPrice{3, 15}}, // intro pricing handled in priceFor
+	{"claude-sonnet-4", modelPrice{3, 15}}, // sonnet 4.6 / 4.5 / 4.0
+	{"claude-3-7-sonnet", modelPrice{3, 15}},
+	{"claude-3-5-sonnet", modelPrice{3, 15}},
+	{"claude-haiku-4-5", modelPrice{1, 5}},
+	{"claude-3-5-haiku", modelPrice{0.8, 4}},
+	{"claude-3-haiku", modelPrice{0.25, 1.25}},
+}
+
+// sonnet5IntroEnd is the end of Claude Sonnet 5's introductory pricing
+// ($2/$10 per MTok through 2026-08-31).
+var sonnet5IntroEnd = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+func priceFor(model string, ts time.Time) (modelPrice, bool) {
+	for _, e := range modelPrices {
+		if strings.HasPrefix(model, e.prefix) {
+			if e.prefix == "claude-sonnet-5" && !ts.IsZero() && ts.Before(sonnet5IntroEnd) {
+				return modelPrice{2, 10}, true
+			}
+			return e.price, true
+		}
+	}
+	return modelPrice{}, false
+}
+
+// costUSD estimates one message's API cost at list prices: input and output at
+// the model's per-MTok rate, cache writes at 1.25× input (5-minute TTL) or 2×
+// (1-hour TTL — the per-TTL breakdown is used when the transcript carries it,
+// else all writes are assumed 5-minute), cache reads at 0.1× input. NULL when
+// the message has no usage or the model is unknown/synthetic.
+//
+// It is an ESTIMATE of API list-price value, not a bill: subscription plans
+// don't meter per token, batch/priority tiers price differently, and prices
+// change over time (the table above is a snapshot).
+func costUSD(model, timestamp string, u *usage) engine.Value {
+	if u == nil || model == "" {
+		return engine.Null()
+	}
+	var ts time.Time
+	if t, err := time.Parse(time.RFC3339, timestamp); err == nil {
+		ts = t
+	}
+	p, ok := priceFor(model, ts)
+	if !ok {
+		return engine.Null()
+	}
+	write5m, write1h := u.CacheCreationInputTokens, int64(0)
+	if u.CacheCreation != nil {
+		write5m, write1h = u.CacheCreation.Ephemeral5m, u.CacheCreation.Ephemeral1h
+	}
+	cost := (float64(u.InputTokens)*p.in +
+		float64(u.OutputTokens)*p.out +
+		float64(write5m)*p.in*1.25 +
+		float64(write1h)*p.in*2 +
+		float64(u.CacheReadInputTokens)*p.in*0.1) / 1e6
+	return engine.FloatVal(cost)
 }
 
 // ---- helpers -----------------------------------------------------------------

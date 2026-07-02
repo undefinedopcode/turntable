@@ -51,7 +51,7 @@ func scanPath(t *testing.T, path string) []engine.Row {
 
 func TestSchema(t *testing.T) {
 	sc, _ := New().Resolve(context.Background(), connector.Dataset{})
-	want := []string{"session_id", "session_file", "uuid", "parent_uuid", "type", "role", "model", "timestamp", "text", "tool_uses", "cwd", "git_branch"}
+	want := []string{"session_id", "session_file", "uuid", "parent_uuid", "type", "role", "model", "timestamp", "text", "tool_uses", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_usd", "cwd", "git_branch"}
 	if len(sc.Columns) != len(want) {
 		t.Fatalf("cols = %d, want %d", len(sc.Columns), len(want))
 	}
@@ -73,7 +73,9 @@ func TestScanFileFiltersAndFlattens(t *testing.T) {
 		t.Fatalf("rows = %d, want 3 (bookkeeping events skipped)", len(rows))
 	}
 	// cols: session_id(0) session_file(1) uuid(2) parent(3) type(4) role(5)
-	//       model(6) timestamp(7) text(8) tool_uses(9) cwd(10) git_branch(11)
+	//       model(6) timestamp(7) text(8) tool_uses(9) input_tokens(10)
+	//       output_tokens(11) cache_write_tokens(12) cache_read_tokens(13)
+	//       cost_usd(14) cwd(15) git_branch(16)
 	r0 := rows[0].Values
 	if r0[4].V != "user" || r0[8].V != "hello there" {
 		t.Errorf("row0 type/text = %v / %v", r0[4].V, r0[8].V)
@@ -252,5 +254,72 @@ func TestMissingPathErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for a nonexistent path")
+	}
+}
+
+// costSample: assistant messages with usage — flat totals, the per-TTL cache
+// breakdown, Sonnet 5 intro pricing, and an unpriceable synthetic model.
+const costSample = `{"type":"user","uuid":"u1","timestamp":"2026-07-01T10:00:00Z","sessionId":"s1","message":{"role":"user","content":"q"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-07-01T10:00:05Z","sessionId":"s1","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":1000,"cache_read_input_tokens":5000}}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-07-01T10:00:10Z","sessionId":"s1","message":{"role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":1000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":600}}}}
+{"type":"assistant","uuid":"a3","timestamp":"2026-07-01T10:00:15Z","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":1000000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"assistant","uuid":"a4","timestamp":"2026-10-01T10:00:15Z","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":1000000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"assistant","uuid":"a5","timestamp":"2026-07-01T10:00:20Z","sessionId":"s1","message":{"role":"assistant","model":"<synthetic>","content":[],"usage":{"input_tokens":10,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+`
+
+func TestUsageAndCost(t *testing.T) {
+	dir := t.TempDir()
+	p := writeSession(t, dir, "s.jsonl", costSample)
+	rows := scanPath(t, p)
+	if len(rows) != 6 {
+		t.Fatalf("rows = %d, want 6", len(rows))
+	}
+	const (
+		colIn, colOut, colWrite, colRead, colCost = 10, 11, 12, 13, 14
+	)
+	approx := func(v engine.Value, want float64) bool {
+		f, ok := v.AsFloat()
+		return ok && f > want-1e-9 && f < want+1e-9
+	}
+
+	// User message: no usage -> all NULL.
+	for _, c := range []int{colIn, colOut, colWrite, colRead, colCost} {
+		if !rows[0].Values[c].IsNull() {
+			t.Errorf("user row col %d = %v, want NULL", c, rows[0].Values[c].V)
+		}
+	}
+
+	// Opus 4.8 flat usage: (100·5 + 200·25 + 1000·5·1.25 + 5000·5·0.1)/1e6.
+	a1 := rows[1].Values
+	if n, _ := a1[colIn].AsInt(); n != 100 {
+		t.Errorf("input_tokens = %v", a1[colIn].V)
+	}
+	if n, _ := a1[colWrite].AsInt(); n != 1000 {
+		t.Errorf("cache_write_tokens = %v", a1[colWrite].V)
+	}
+	if !approx(a1[colCost], 0.01425) {
+		t.Errorf("opus cost = %v, want 0.01425", a1[colCost].V)
+	}
+
+	// Per-TTL breakdown: 400·5·1.25 + 600·5·2 = 2500 + 6000 = 0.0085.
+	if !approx(rows[2].Values[colCost], 0.0085) {
+		t.Errorf("ttl-split cost = %v, want 0.0085", rows[2].Values[colCost].V)
+	}
+
+	// Sonnet 5: intro pricing ($2/MTok in) before 2026-09-01, list ($3) after.
+	if !approx(rows[3].Values[colCost], 2.0) {
+		t.Errorf("sonnet5 intro cost = %v, want 2.0", rows[3].Values[colCost].V)
+	}
+	if !approx(rows[4].Values[colCost], 3.0) {
+		t.Errorf("sonnet5 list cost = %v, want 3.0", rows[4].Values[colCost].V)
+	}
+
+	// Unknown model: tokens surface, cost is honest NULL.
+	a5 := rows[5].Values
+	if n, _ := a5[colIn].AsInt(); n != 10 {
+		t.Errorf("synthetic input_tokens = %v", a5[colIn].V)
+	}
+	if !a5[colCost].IsNull() {
+		t.Errorf("synthetic cost = %v, want NULL", a5[colCost].V)
 	}
 }
