@@ -789,6 +789,45 @@ func TestParseCreateMatViewFlags(t *testing.T) {
 	}
 }
 
+func TestParseCreateMatViewPersistent(t *testing.T) {
+	stmt, err := Parse("CREATE PERSISTENT MATERIALIZED VIEW v AS SELECT a, b FROM t WHERE a > 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := stmt.(*CreateMatViewStmt)
+	if !s.Persist {
+		t.Error("Persist = false, want true")
+	}
+	// QueryText is captured for reload/REFRESH — exactly the query after AS.
+	if want := "SELECT a, b FROM t WHERE a > 1"; s.QueryText != want {
+		t.Errorf("QueryText = %q, want %q", s.QueryText, want)
+	}
+	// A plain (omitted) matview is not persistent and captures its text too.
+	plain := Parse2t(t, "CREATE MATERIALIZED VIEW v AS SELECT 1 AS x WITH NO DATA")
+	if plain.Persist {
+		t.Error("plain matview Persist = true, want false")
+	}
+	if plain.QueryText != "SELECT 1 AS x" {
+		t.Errorf("QueryText = %q, want %q (trailing WITH NO DATA excluded)", plain.QueryText, "SELECT 1 AS x")
+	}
+}
+
+// Parse2t parses a CREATE MATERIALIZED VIEW statement, failing the test on error.
+func Parse2t(t *testing.T, src string) *CreateMatViewStmt {
+	t.Helper()
+	stmt, err := Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stmt.(*CreateMatViewStmt)
+}
+
+func TestParsePersistentOnlyMaterialized(t *testing.T) {
+	if _, err := Parse("CREATE PERSISTENT VIEW v AS SELECT 1"); err == nil {
+		t.Fatal("expected error: PERSISTENT applies only to materialized views")
+	}
+}
+
 func TestParseCreateMatViewWithCTE(t *testing.T) {
 	// The view body may itself be a WITH query.
 	stmt, err := Parse("CREATE MATERIALIZED VIEW v AS WITH x AS (SELECT a FROM t) SELECT a FROM x")

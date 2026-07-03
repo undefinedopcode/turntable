@@ -126,6 +126,79 @@ func TestMatViewDuplicateColumnRejected(t *testing.T) {
 	}
 }
 
+// TestMatViewPersist exercises the full PERSISTENT lifecycle across simulated
+// process restarts: a fresh App pointed at the same matViewDir reloads the
+// snapshot from disk, can query it without re-running the source, REFRESH it, and
+// DROP it (removing the file). A plain (session-only) view writes nothing.
+func TestMatViewPersist(t *testing.T) {
+	dir := t.TempDir()
+	mvDir := filepath.Join(dir, "matviews")
+	empPath := filepath.Join(dir, "emp.json")
+	if err := os.WriteFile(empPath, []byte(`[{"name":"Ann","dept":"eng"},{"name":"Di","dept":"sales"}]`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ref := "json:" + empPath
+
+	// newSession builds a fresh App over the same matViewDir and reloads persisted
+	// views from disk (as startup does), returning a statement runner.
+	newSession := func() func(q string) (string, string, int) {
+		app := NewApp()
+		app.matViewDir = mvDir
+		var out, errb bytes.Buffer
+		app.Out, app.Err = &out, &errb
+		app.loadPersistedMatViews()
+		return func(q string) (string, string, int) {
+			out.Reset()
+			errb.Reset()
+			code := app.runQueryInto(context.Background(), q, false, true, &out, &errb)
+			return out.String(), errb.String(), code
+		}
+	}
+	fileExists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(mvDir, name))
+		return err == nil
+	}
+
+	// Session 1: create a persistent view; a snapshot file appears.
+	s1 := newSession()
+	if _, e, code := s1("CREATE PERSISTENT MATERIALIZED VIEW eng AS SELECT name FROM " + ref + " WHERE dept='eng'"); code != 0 || !strings.Contains(e, "persisted") {
+		t.Fatalf("create: code=%d notice=%q", code, e)
+	}
+	if !fileExists("eng.parquet") {
+		t.Fatal("snapshot file was not written")
+	}
+
+	// Session 2 (fresh App): the view reloads and is queryable without re-running
+	// the source, and REFRESH works from the re-parsed definition.
+	s2 := newSession()
+	if o, _, code := s2("SELECT name FROM eng"); code != 0 || !strings.Contains(o, "Ann") || strings.Contains(o, "Di") {
+		t.Fatalf("reloaded query: code=%d out=%s", code, o)
+	}
+	if _, e, code := s2("REFRESH MATERIALIZED VIEW eng"); code != 0 || !strings.Contains(e, "refreshed") {
+		t.Errorf("refresh after reload: code=%d notice=%q", code, e)
+	}
+
+	// DROP removes the file; a later session no longer sees it.
+	if _, _, code := s2("DROP MATERIALIZED VIEW eng"); code != 0 {
+		t.Fatal("drop failed")
+	}
+	if fileExists("eng.parquet") {
+		t.Error("snapshot file should be gone after DROP")
+	}
+	s3 := newSession()
+	if _, _, code := s3("SELECT * FROM eng"); code == 0 {
+		t.Error("view should not exist after DROP + restart")
+	}
+
+	// A plain (omitted) materialized view persists nothing.
+	if _, _, code := s3("CREATE MATERIALIZED VIEW tmp AS SELECT 1 AS x"); code != 0 {
+		t.Fatal("plain create failed")
+	}
+	if fileExists("tmp.parquet") {
+		t.Error("a session-only materialized view must not write a snapshot file")
+	}
+}
+
 func TestMatViewDropIfExists(t *testing.T) {
 	_, seq := matViewApp(t)
 	// DROP IF EXISTS on a missing view is a no-op success.

@@ -12,6 +12,7 @@ import (
 type Parser struct {
 	toks []Token
 	pos  int
+	src  string // original source, for capturing sub-spans (e.g. a matview's query)
 }
 
 // NewParser returns a Parser over the given tokens.
@@ -29,7 +30,9 @@ func Parse(src string) (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewParser(toks).ParseStatement()
+	p := NewParser(toks)
+	p.src = src
+	return p.ParseStatement()
 }
 
 func (p *Parser) cur() Token    { return p.toks[p.pos] }
@@ -162,12 +165,20 @@ func (p *Parser) parseCreate() (Statement, error) {
 		}
 		orReplace = true
 	}
+	persist := false
+	if p.word("PERSISTENT") {
+		p.advance()
+		persist = true
+	}
 	if p.word("MATERIALIZED") {
 		if orReplace {
 			return nil, p.errf("OR REPLACE is not supported for materialized views")
 		}
 		p.advance() // MATERIALIZED
-		return p.parseCreateMatViewTail()
+		return p.parseCreateMatViewTail(persist)
+	}
+	if persist {
+		return nil, p.errf("PERSISTENT applies only to materialized views")
 	}
 	return p.parseCreateViewTail(orReplace)
 }
@@ -192,13 +203,13 @@ func (p *Parser) parseCreateViewTail(orReplace bool) (Statement, error) {
 	return &CreateViewStmt{Name: name, Query: q, OrReplace: orReplace}, nil
 }
 
-// parseCreateMatViewTail parses the tail after `CREATE MATERIALIZED`:
+// parseCreateMatViewTail parses the tail after `CREATE [PERSISTENT] MATERIALIZED`:
 // `VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]`.
-func (p *Parser) parseCreateMatViewTail() (Statement, error) {
+func (p *Parser) parseCreateMatViewTail(persist bool) (Statement, error) {
 	if err := p.expectWord("VIEW"); err != nil {
 		return nil, err
 	}
-	s := &CreateMatViewStmt{}
+	s := &CreateMatViewStmt{Persist: persist}
 	if p.word("IF") {
 		p.advance()
 		if err := p.expectWord("NOT"); err != nil {
@@ -217,11 +228,15 @@ func (p *Parser) parseCreateMatViewTail() (Statement, error) {
 	if err := p.expectWord("AS"); err != nil {
 		return nil, err
 	}
+	queryStart := p.cur().Pos
 	q, err := p.parseQuery()
 	if err != nil {
 		return nil, err
 	}
 	s.Query = q
+	// Capture the raw query text (from after AS to the next token — the trailing
+	// WITH or EOF) so a persisted view can be re-parsed and REFRESHed on reload.
+	s.QueryText = strings.TrimSpace(p.src[queryStart:p.cur().Pos])
 	nd, err := p.parseWithDataSuffix()
 	if err != nil {
 		return nil, err

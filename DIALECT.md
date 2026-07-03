@@ -268,7 +268,7 @@ data from several connectors (especially slow ones) once, then query and
 re-query the snapshot cheaply. The syntax follows PostgreSQL:
 
 ```sql
-CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]
+CREATE [PERSISTENT] MATERIALIZED VIEW [IF NOT EXISTS] name AS <query> [WITH [NO] DATA]
 REFRESH MATERIALIZED VIEW name [WITH [NO] DATA]
 DROP MATERIALIZED VIEW [IF EXISTS] name
 ```
@@ -294,11 +294,33 @@ SELECT region, SUM(amount) AS revenue FROM sales GROUP BY region;
 SELECT * FROM sales WHERE amount > 1000 ORDER BY amount DESC;
 ```
 
-Views are **session-scoped** (held in memory for the life of the REPL or process)
-and not persisted to disk. They are available in the REPL and one-shot CLI;
-`.tables` lists them with a `(mem)` tag. A view referenced multiple times in one
-query also materializes just once — see [Common table expressions](#common-table-expressions-with)
-for the query-scoped equivalent.
+By default a materialized view is **session-scoped** — held in memory for the
+life of the REPL or process, not persisted. `.tables` lists it with a `(mem)`
+tag. A view referenced multiple times in one query also materializes just once —
+see [Common table expressions](#common-table-expressions-with) for the
+query-scoped equivalent.
+
+### Persistent materialized views
+
+Add **`PERSISTENT`** to save the snapshot to disk so it survives a restart:
+
+```sql
+CREATE PERSISTENT MATERIALIZED VIEW daily AS
+  SELECT DATE_BIN('1 day', ts) AS day, COUNT(*) AS n FROM events GROUP BY day;
+```
+
+- The snapshot is written to `.turntable/matviews/<name>.parquet` — a single
+  self-contained Parquet file (columnar, compressed, and openable by any Parquet
+  tool). Its footer also carries the exact turntable schema and the defining SQL.
+- On the next start turntable reloads every such file: the view is immediately
+  queryable from the saved snapshot **without re-running its query** — the point
+  is to materialize a costly join of slow sources once, then keep it across
+  sessions. `REFRESH` (using the stored definition) and `DROP` (which deletes the
+  file) work as usual.
+- The file lives in the project's `.turntable/` dir (like uploads), so it is
+  per-project. A `PERSISTENT` view whose name collides with a configured source
+  is skipped on load with a warning.
+- Omit `PERSISTENT` for the in-memory default. The two are otherwise identical.
 
 ---
 

@@ -68,16 +68,21 @@ type WithStmt struct {
 
 func (*WithStmt) stmtNode() {}
 
-// CreateMatViewStmt is `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name AS <query>
-// [WITH [NO] DATA]`. It defines a session-scoped, in-memory materialized view:
-// the query is run once and its rows buffered, then exposed as a source named
-// Name. WithNoData defines the view without populating it (unscannable until a
-// REFRESH), mirroring PostgreSQL.
+// CreateMatViewStmt is `CREATE [PERSISTENT] MATERIALIZED VIEW [IF NOT EXISTS]
+// name AS <query> [WITH [NO] DATA]`. It defines a materialized view: the query is
+// run once and its rows buffered, then exposed as a source named Name. WithNoData
+// defines the view without populating it (unscannable until a REFRESH), mirroring
+// PostgreSQL. Persist opts the snapshot into surviving process restart (written
+// to disk under .turntable/matviews/); omitted, the view is session-scoped and
+// in-memory only, the default. QueryText is the raw SQL of <query>, captured so a
+// persisted view can be re-parsed and REFRESHed after a reload.
 type CreateMatViewStmt struct {
 	Name        string
 	Query       Statement // *SelectStmt, *SetOpStmt, or *WithStmt
+	QueryText   string
 	IfNotExists bool
 	WithNoData  bool
+	Persist     bool
 }
 
 func (*CreateMatViewStmt) stmtNode() {}

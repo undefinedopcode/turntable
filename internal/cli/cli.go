@@ -77,10 +77,12 @@ type App struct {
 	// default), or "" when none. Used to persist runtime-added sources.
 	configPath string
 
-	// mem backs session-scoped materialized views; matViews keeps each view's
-	// defining query (by name) so REFRESH can re-run it. See matview.go.
-	mem      *memc.Connector
-	matViews map[string]*matView
+	// mem backs materialized views; matViews keeps each view's defining query (by
+	// name) so REFRESH can re-run it. matViewDir is where PERSISTENT views' Parquet
+	// snapshots live (default matViewDirPath; overridable in tests). See matview.go.
+	mem        *memc.Connector
+	matViews   map[string]*matView
+	matViewDir string
 
 	// plugins holds the external plugin subprocesses started for `plugin`
 	// sources, so Close can tear them down at shutdown.
@@ -130,8 +132,9 @@ func NewApp() *App {
 		Reg:      reg,
 		Output:   render.FormatTable,
 		Funcs:    engine.NewFuncRegistry(),
-		mem:      mem,
-		matViews: map[string]*matView{},
+		mem:        mem,
+		matViews:   map[string]*matView{},
+		matViewDir: matViewDirPath,
 	}
 }
 
@@ -625,6 +628,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		cfg = &config.File{Sources: map[string]config.Source{}}
 	}
 	a.registerSources(cfg)
+	a.loadPersistedMatViews() // restore PERSISTENT materialized views from disk
 	defer a.Close() // tear down any plugin subprocesses on exit
 	if cfg.Defaults.Output != "" && output == "" {
 		a.Output = render.Format(cfg.Defaults.Output)
