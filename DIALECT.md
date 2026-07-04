@@ -320,6 +320,8 @@ CREATE PERSISTENT MATERIALIZED VIEW daily AS
 - The file lives in the project's `.turntable/` dir (like uploads), so it is
   per-project. A `PERSISTENT` view whose name collides with a configured source
   is skipped on load with a warning.
+- `.tables` tags a persistent view `(mem, persistent)` (a session-only one stays
+  `(mem)`).
 - Omit `PERSISTENT` for the in-memory default. The two are otherwise identical.
 
 ---

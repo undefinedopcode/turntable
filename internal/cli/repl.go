@@ -293,6 +293,11 @@ func (a *App) cmdTables(out io.Writer) {
 	for _, s := range srcs {
 		names = append(names, s.Name)
 		tag[s.Name] = connectorName(s)
+		// A persistent materialized view is mem-backed like any matview, but
+		// mark it so the on-disk snapshot is visible at a glance.
+		if mv, ok := a.matViews[s.Name]; ok && mv.persist {
+			tag[s.Name] = "mem, persistent"
+		}
 	}
 	for _, v := range views {
 		names = append(names, v)
