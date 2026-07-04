@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { Cell, QueryResult } from "../api";
+import { exportParquet, type Cell, type QueryResult } from "../api";
 import type { ViewConfig } from "../view";
 import { Modal } from "./Modal";
 import { Chart } from "./Chart";
@@ -8,6 +8,7 @@ import { PinModal } from "./PinModal";
 import {
   copyText,
   download,
+  downloadBlob,
   toCSV,
   toJSON,
   toNDJSON,
@@ -151,6 +152,17 @@ export function Results({
     download(text, `turntable.${ext}`, mime);
   };
 
+  // Parquet is binary, so it is encoded server-side from the same displayed rows.
+  const exportParquetFile = () => {
+    flash("encoding parquet…");
+    exportParquet(cols, rows)
+      .then((blob) => {
+        downloadBlob(blob, "turntable.parquet");
+        flash("parquet downloaded");
+      })
+      .catch((e) => flash(`parquet export failed: ${e}`));
+  };
+
   return (
     <div className="results">
       {result.truncated && (
@@ -206,6 +218,13 @@ export function Results({
           </button>
           <button className="ghost sm" onClick={() => exportAs("ndjson")}>
             NDJSON
+          </button>
+          <button
+            className="ghost sm"
+            title="download as Parquet (encoded server-side)"
+            onClick={exportParquetFile}
+          >
+            Parquet
           </button>
           <button
             className="ghost sm"

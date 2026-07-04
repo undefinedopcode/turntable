@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/parquet-go/parquet-go"
+
 	"github.com/april/turntable/internal/connector"
 	"github.com/april/turntable/internal/connector/connectors/csvc"
 )
@@ -30,6 +32,67 @@ func postQuery(t *testing.T, a *App, body string) queryResponse {
 		t.Fatalf("decode response: %v (body: %s)", err, rec.Body.String())
 	}
 	return resp
+}
+
+// TestHandleExportParquet posts a displayed result (typed columns + JSON cells,
+// including a time value and NULLs) to /api/export and checks the response is a
+// valid Parquet file whose rows round-trip — exercising decodeExportCell and the
+// shared parquetw encoder end to end.
+func TestHandleExportParquet(t *testing.T) {
+	a := NewApp()
+	body := `{"format":"parquet",
+	  "columns":[{"name":"n","type":"int"},{"name":"t","type":"time"},{"name":"s","type":"string"}],
+	  "rows":[[1,"2026-07-03T12:00:00Z","a"],[2,null,null]]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/export", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	a.handleExport(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/vnd.apache.parquet" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "turntable.parquet") {
+		t.Errorf("content-disposition = %q", cd)
+	}
+	raw := rec.Body.Bytes()
+	if len(raw) < 4 || string(raw[:4]) != "PAR1" {
+		t.Fatalf("body is not a parquet file (magic = %q)", raw[:min(4, len(raw))])
+	}
+
+	// Read it back with the parquet reader and confirm shape + a NULL survived.
+	pf, err := parquet.OpenFile(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("open exported parquet: %v", err)
+	}
+	if got := pf.NumRows(); got != 2 {
+		t.Errorf("rows = %d, want 2", got)
+	}
+	if got := len(pf.Schema().Columns()); got != 3 {
+		t.Errorf("columns = %d, want 3", got)
+	}
+}
+
+func TestHandleExportMethodNotAllowed(t *testing.T) {
+	a := NewApp()
+	req := httptest.NewRequest(http.MethodGet, "/api/export", nil)
+	rec := httptest.NewRecorder()
+	a.handleExport(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleExportUnsupportedFormat(t *testing.T) {
+	a := NewApp()
+	body := `{"format":"avro","columns":[{"name":"n","type":"int"}],"rows":[[1]]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/export", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	a.handleExport(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
 }
 
 func TestHandleQueryNoFrom(t *testing.T) {

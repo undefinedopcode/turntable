@@ -47,7 +47,12 @@ export function download(
   filename: string,
   mime = "text/plain",
 ): void {
-  const blob = new Blob([text], { type: mime });
+  downloadBlob(new Blob([text], { type: mime }), filename);
+}
+
+// downloadBlob triggers a browser download of an arbitrary Blob (e.g. the binary
+// Parquet returned by the export endpoint).
+export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

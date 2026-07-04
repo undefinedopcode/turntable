@@ -87,6 +87,22 @@ export function addSource(
   return postJSON("/api/sources", { name, connector, fields, save });
 }
 
+// exportParquet sends the displayed columns + rows to the server, which encodes
+// them as a Parquet file (the browser can't write Parquet itself) and returns the
+// bytes as a Blob.
+export async function exportParquet(
+  columns: Column[],
+  rows: Cell[][],
+): Promise<Blob> {
+  const res = await fetch("/api/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ format: "parquet", columns, rows }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `${res.status} ${res.statusText}`);
+  return res.blob();
+}
+
 export interface UploadResult {
   path?: string;
   filename?: string;

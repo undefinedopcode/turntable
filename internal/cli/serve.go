@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/engine"
 	"github.com/april/turntable/internal/loginfer"
+	"github.com/april/turntable/internal/parquetw"
 	"github.com/april/turntable/internal/plan"
 	"github.com/april/turntable/internal/sql"
 )
@@ -80,6 +84,7 @@ func (a *App) serve(ctx context.Context, addr string) int {
 	mux.HandleFunc("/api/loginfer", a.handleLoginfer)
 	mux.HandleFunc("/api/dashboards", a.handleDashboards)
 	mux.HandleFunc("/api/dashboards/", a.handleDashboardItem)
+	mux.HandleFunc("/api/export", a.handleExport)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -721,6 +726,126 @@ func jsonValue(v engine.Value) any {
 		}
 	}
 	return v.V
+}
+
+// exportRequest carries the displayed result (typed columns + the JSON cells the
+// browser already holds) to be encoded into a binary format the browser can't
+// produce itself — currently Parquet. Exporting the client's rows (rather than
+// re-running the query) keeps parity with the CSV/JSON/NDJSON exports, which also
+// serialize exactly what is shown (post filter/sort).
+type exportRequest struct {
+	Format  string      `json:"format"`
+	Columns []apiColumn `json:"columns"`
+	Rows    [][]any     `json:"rows"`
+}
+
+// handleExport encodes a result set into a downloadable binary file. Only Parquet
+// is served here; text formats are produced client-side.
+func (a *App) handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req exportRequest
+	// Generous limit: the payload is the full displayed result (up to --max-rows).
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Format != "" && req.Format != "parquet" {
+		http.Error(w, "unsupported export format "+strconv.Quote(req.Format), http.StatusBadRequest)
+		return
+	}
+
+	schema := engine.Schema{Columns: make([]engine.Column, len(req.Columns))}
+	for i, c := range req.Columns {
+		t, ok := engine.TypeFromString(c.Type)
+		if !ok {
+			t = engine.TypeAny // unknown/opaque -> carry as JSON
+		}
+		schema.Columns[i] = engine.Column{Name: c.Name, Type: t, Nullable: true}
+	}
+	rows := make([]engine.Row, len(req.Rows))
+	for i, r := range req.Rows {
+		vals := make([]engine.Value, len(schema.Columns))
+		for j := range schema.Columns {
+			var cell any
+			if j < len(r) {
+				cell = r[j]
+			}
+			vals[j] = decodeExportCell(schema.Columns[j].Type, cell)
+		}
+		rows[i] = engine.Row{Values: vals}
+	}
+
+	var buf bytes.Buffer
+	if err := parquetw.Write(&buf, schema, rows); err != nil {
+		http.Error(w, "encode parquet: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.apache.parquet")
+	w.Header().Set("Content-Disposition", `attachment; filename="turntable.parquet"`)
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	_, _ = w.Write(buf.Bytes())
+}
+
+// decodeExportCell reconstructs an engine.Value from a JSON cell (as produced by
+// jsonValue) guided by the column's engine type — the inverse of jsonValue for
+// the export path. Cells arrive JSON-decoded: numbers as float64, time as an
+// RFC3339 string, duration as nanosecond number, bytes as base64, any as the
+// nested value.
+func decodeExportCell(t engine.Type, cell any) engine.Value {
+	if cell == nil {
+		return engine.Null()
+	}
+	switch t {
+	case engine.TypeInt:
+		switch n := cell.(type) {
+		case float64:
+			return engine.IntVal(int64(n))
+		case string:
+			if i, err := strconv.ParseInt(n, 10, 64); err == nil {
+				return engine.IntVal(i)
+			}
+		}
+		return engine.Null()
+	case engine.TypeFloat:
+		if f, ok := cell.(float64); ok {
+			return engine.FloatVal(f)
+		}
+		return engine.Null()
+	case engine.TypeBool:
+		if b, ok := cell.(bool); ok {
+			return engine.BoolVal(b)
+		}
+		return engine.Null()
+	case engine.TypeString:
+		if s, ok := cell.(string); ok {
+			return engine.StringVal(s)
+		}
+		return engine.StringVal(fmt.Sprintf("%v", cell))
+	case engine.TypeTime:
+		if s, ok := cell.(string); ok {
+			if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				return engine.TimeVal(ts)
+			}
+		}
+		return engine.Null()
+	case engine.TypeDuration:
+		if f, ok := cell.(float64); ok {
+			return engine.Value{Type: engine.TypeDuration, V: time.Duration(int64(f))}
+		}
+		return engine.Null()
+	case engine.TypeBytes:
+		if s, ok := cell.(string); ok {
+			if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+				return engine.Value{Type: engine.TypeBytes, V: b}
+			}
+		}
+		return engine.Null()
+	default: // TypeAny and anything opaque
+		return engine.AnyVal(cell)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

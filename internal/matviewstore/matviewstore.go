@@ -32,6 +32,7 @@ import (
 	"github.com/parquet-go/parquet-go"
 
 	"github.com/april/turntable/internal/engine"
+	"github.com/april/turntable/internal/parquetw"
 )
 
 // Footer metadata keys.
@@ -59,7 +60,7 @@ type colJSON struct {
 // (written to a temp file then renamed). An unpopulated snapshot writes the
 // schema and zero rows.
 func Write(path string, schema engine.Schema, rows []engine.Row, meta Meta) error {
-	pschema, err := parquetSchema(schema)
+	pschema, err := parquetw.Schema(schema)
 	if err != nil {
 		return err
 	}
@@ -79,20 +80,16 @@ func Write(path string, schema engine.Schema, rows []engine.Row, meta Meta) erro
 	// On any failure below, don't leave the temp file behind.
 	defer func() { _ = os.Remove(tmpName) }()
 
+	// The sidecar (exact engine schema + defining query) rides in footer metadata
+	// on top of the standard Parquet the shared encoder produces.
 	w := parquet.NewWriter(tmp, pschema,
 		parquet.KeyValueMetadata(keySchema, string(sidecar)),
 		parquet.KeyValueMetadata(keyQuery, meta.Query),
 		parquet.KeyValueMetadata(keyCreatedAt, meta.CreatedAt.UTC().Format(time.RFC3339Nano)),
 		parquet.KeyValueMetadata(keyPopulated, fmt.Sprintf("%t", meta.Populated)),
 	)
-
-	leafIndex := leafIndexByName(pschema)
-	prows := make([]parquet.Row, len(rows))
-	for i, r := range rows {
-		prows[i] = encodeRow(schema, r, leafIndex)
-	}
-	if len(prows) > 0 {
-		if _, err := w.WriteRows(prows); err != nil {
+	if len(rows) > 0 {
+		if _, err := w.WriteRows(parquetw.EncodeRows(schema, rows, pschema)); err != nil {
 			tmp.Close()
 			return fmt.Errorf("write rows: %w", err)
 		}
@@ -161,52 +158,6 @@ func Read(path string) (engine.Schema, []engine.Row, Meta, error) {
 // Optional (engine columns are nullable). The physical/logical type is the
 // widest faithful Parquet carrier; exact engine types are recovered from the
 // sidecar on read, so e.g. duration and int both ride as INT64 here.
-func parquetSchema(schema engine.Schema) (*parquet.Schema, error) {
-	g := parquet.Group{}
-	for _, c := range schema.Columns {
-		node, err := parquetNode(c.Type)
-		if err != nil {
-			return nil, fmt.Errorf("column %q: %w", c.Name, err)
-		}
-		g[c.Name] = parquet.Optional(node)
-	}
-	return parquet.NewSchema("matview", g), nil
-}
-
-func parquetNode(t engine.Type) (parquet.Node, error) {
-	switch t {
-	case engine.TypeInt, engine.TypeDuration:
-		return parquet.Leaf(parquet.Int64Type), nil
-	case engine.TypeFloat:
-		return parquet.Leaf(parquet.DoubleType), nil
-	case engine.TypeBool:
-		return parquet.Leaf(parquet.BooleanType), nil
-	case engine.TypeString:
-		return parquet.String(), nil
-	case engine.TypeBytes:
-		return parquet.Leaf(parquet.ByteArrayType), nil
-	case engine.TypeTime:
-		// Microseconds: range-safe (±292k years) and enough precision for every
-		// source turntable reads; sub-µs is effectively never present.
-		return parquet.Timestamp(parquet.Microsecond), nil
-	case engine.TypeAny:
-		return parquet.JSON(), nil
-	default:
-		return nil, fmt.Errorf("cannot persist type %s", t)
-	}
-}
-
-// leafIndexByName maps each column name to its leaf index in the (name-sorted)
-// Parquet schema, so encodeRow can place values at the right column position.
-func leafIndexByName(s *parquet.Schema) map[string]int {
-	cols := s.Columns()
-	idx := make(map[string]int, len(cols))
-	for i, path := range cols {
-		idx[path[len(path)-1]] = i
-	}
-	return idx
-}
-
 func columnsJSON(schema engine.Schema) []colJSON {
 	out := make([]colJSON, len(schema.Columns))
 	for i, c := range schema.Columns {
@@ -218,7 +169,7 @@ func columnsJSON(schema engine.Schema) []colJSON {
 func schemaFromJSON(cols []colJSON) (engine.Schema, error) {
 	out := make([]engine.Column, len(cols))
 	for i, c := range cols {
-		t, ok := typeByName(c.Type)
+		t, ok := engine.TypeFromString(c.Type)
 		if !ok {
 			return engine.Schema{}, fmt.Errorf("unknown column type %q", c.Type)
 		}
@@ -227,96 +178,7 @@ func schemaFromJSON(cols []colJSON) (engine.Schema, error) {
 	return engine.Schema{Columns: out}, nil
 }
 
-func typeByName(s string) (engine.Type, bool) {
-	switch s {
-	case "int":
-		return engine.TypeInt, true
-	case "float":
-		return engine.TypeFloat, true
-	case "string":
-		return engine.TypeString, true
-	case "bool":
-		return engine.TypeBool, true
-	case "time":
-		return engine.TypeTime, true
-	case "duration":
-		return engine.TypeDuration, true
-	case "bytes":
-		return engine.TypeBytes, true
-	case "any":
-		return engine.TypeAny, true
-	case "null":
-		return engine.TypeNull, true
-	}
-	return engine.TypeInvalid, false
-}
-
-// --- row encode / decode -----------------------------------------------------
-
-// encodeRow turns an engine row into a Parquet row: one value per column placed
-// at its leaf index, with definition level 1 (present) or 0 (null) since every
-// column is Optional.
-func encodeRow(schema engine.Schema, r engine.Row, leafIndex map[string]int) parquet.Row {
-	prow := make(parquet.Row, len(schema.Columns))
-	for i, c := range schema.Columns {
-		col := leafIndex[c.Name]
-		var v engine.Value
-		if i < len(r.Values) {
-			v = r.Values[i]
-		}
-		prow[col] = encodeValue(c.Type, v).Level(0, definitionLevel(v), col)
-	}
-	return prow
-}
-
-func definitionLevel(v engine.Value) int {
-	if v.IsNull() || v.V == nil {
-		return 0
-	}
-	return 1
-}
-
-func encodeValue(t engine.Type, v engine.Value) parquet.Value {
-	if v.IsNull() || v.V == nil {
-		return parquet.NullValue()
-	}
-	switch t {
-	case engine.TypeInt:
-		n, _ := v.AsInt()
-		return parquet.Int64Value(n)
-	case engine.TypeDuration:
-		if d, ok := v.V.(time.Duration); ok {
-			return parquet.Int64Value(int64(d))
-		}
-		return parquet.NullValue()
-	case engine.TypeFloat:
-		f, _ := v.AsFloat()
-		return parquet.DoubleValue(f)
-	case engine.TypeBool:
-		b, _ := v.AsBool()
-		return parquet.BooleanValue(b)
-	case engine.TypeString:
-		return parquet.ByteArrayValue([]byte(v.AsString()))
-	case engine.TypeBytes:
-		if b, ok := v.V.([]byte); ok {
-			return parquet.ByteArrayValue(b)
-		}
-		return parquet.NullValue()
-	case engine.TypeTime:
-		if ts, ok := v.V.(time.Time); ok {
-			return parquet.Int64Value(ts.UnixMicro())
-		}
-		return parquet.NullValue()
-	case engine.TypeAny:
-		b, err := json.Marshal(v.V)
-		if err != nil {
-			return parquet.NullValue()
-		}
-		return parquet.ByteArrayValue(b)
-	default:
-		return parquet.NullValue()
-	}
-}
+// --- row decode --------------------------------------------------------------
 
 // readRows reads every Parquet row and maps cells back to engine values by
 // column name (via the file's leaf order) and the sidecar schema's types.

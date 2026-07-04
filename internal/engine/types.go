@@ -52,6 +52,33 @@ func (t Type) String() string {
 	return "unknown"
 }
 
+// TypeFromString is the inverse of Type.String(): it maps a type name back to a
+// Type, reporting whether the name was recognized. Handy for reconstructing a
+// schema from serialized column type names (e.g. the web export endpoint).
+func TypeFromString(s string) (Type, bool) {
+	switch s {
+	case "null":
+		return TypeNull, true
+	case "int":
+		return TypeInt, true
+	case "float":
+		return TypeFloat, true
+	case "string":
+		return TypeString, true
+	case "bool":
+		return TypeBool, true
+	case "time":
+		return TypeTime, true
+	case "duration":
+		return TypeDuration, true
+	case "bytes":
+		return TypeBytes, true
+	case "any":
+		return TypeAny, true
+	}
+	return TypeInvalid, false
+}
+
 // Value is a single typed cell. The concrete Go type corresponds to Type.
 type Value struct {
 	Type Type
