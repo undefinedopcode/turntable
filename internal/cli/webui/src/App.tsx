@@ -223,6 +223,29 @@ export function App() {
     [activeId, patchTab, run],
   );
 
+  // refreshMatView re-runs a materialized view's query. Unlike a preview it does
+  // not touch the editor — the notice just lands in the results pane — and it
+  // reloads the source list (row count/schema may have changed).
+  const refreshMatView = useCallback(
+    async (name: string) => {
+      const id = activeId;
+      patchTab(id, { running: true, status: "refreshing…" });
+      try {
+        const data = await runQuery(`REFRESH MATERIALIZED VIEW ${name}`, false);
+        patchTab(id, { result: data, status: data.error ? "" : `${data.elapsed_ms} ms` });
+        if (!data.error) setSourcesVersion((v) => v + 1);
+      } catch (e) {
+        patchTab(id, {
+          result: { columns: [], rows: [], count: 0, elapsed_ms: 0, error: String(e) },
+          status: "",
+        });
+      } finally {
+        patchTab(id, { running: false });
+      }
+    },
+    [activeId, patchTab],
+  );
+
   return (
     <div className="app">
       <header>
@@ -241,6 +264,7 @@ export function App() {
             setActiveDash(null);
             runNow(q);
           }}
+          onRefresh={refreshMatView}
           currentQuery={active.query}
           historyVersion={historyVersion}
           sourcesVersion={sourcesVersion}

@@ -26,6 +26,8 @@ export interface QueryResult {
 export interface Source {
   name: string;
   connector: string;
+  /** A materialized view (connector "mem") persisted to disk — survives restart. */
+  persistent?: boolean;
 }
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {

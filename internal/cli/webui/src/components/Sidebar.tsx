@@ -34,6 +34,7 @@ interface SidebarProps {
   onSourceAdded: () => void;
   onLoadQuery: (q: string) => void;
   onRunQuery: (q: string) => void;
+  onRefresh: (name: string) => void;
   currentQuery: string;
   historyVersion: number;
   sourcesVersion: number;
@@ -47,6 +48,7 @@ export function Sidebar({
   onSourceAdded,
   onLoadQuery,
   onRunQuery,
+  onRefresh,
   currentQuery,
   historyVersion,
   sourcesVersion,
@@ -109,6 +111,7 @@ export function Sidebar({
           source={s}
           onInsert={onInsert}
           onPreview={() => onRunQuery(`SELECT * FROM ${s.name} LIMIT 100`)}
+          onRefresh={() => onRefresh(s.name)}
         />
       ))}
 
@@ -127,11 +130,15 @@ function SourceItem({
   source,
   onInsert,
   onPreview,
+  onRefresh,
 }: {
   source: Source;
   onInsert: (text: string) => void;
   onPreview: () => void;
+  onRefresh: () => void;
 }) {
+  // Materialized views are mem-backed; only they can be REFRESHed.
+  const isMatView = source.connector === "mem";
   const [open, setOpen] = useState(false);
   const [cols, setCols] = useState<Column[] | null>(null);
   const [meta, setMeta] = useState<{ modified?: string; size?: number; path?: string }>({});
@@ -168,6 +175,18 @@ function SourceItem({
         >
           {source.name}
         </span>
+        {isMatView && (
+          <button
+            className="preview-btn"
+            title="REFRESH this materialized view"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRefresh();
+            }}
+          >
+            ⟳
+          </button>
+        )}
         <button
           className="preview-btn"
           title="SELECT * … LIMIT 100"
@@ -178,7 +197,16 @@ function SourceItem({
         >
           ▶
         </button>
-        <span className="conn">{source.connector}</span>
+        <span
+          className="conn"
+          title={
+            source.persistent
+              ? "materialized view — persisted to disk (survives restart)"
+              : undefined
+          }
+        >
+          {source.persistent ? `${source.connector} · persistent` : source.connector}
+        </span>
       </div>
       {open && (
         <ul className="cols">

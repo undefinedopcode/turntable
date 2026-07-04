@@ -355,6 +355,9 @@ func (a *App) listSources(w http.ResponseWriter, r *http.Request) {
 type srcInfo struct {
 	Name      string `json:"name"`
 	Connector string `json:"connector" jsonschema:"the connector prefix, or view for a regular view"`
+	// Persistent marks a materialized view (connector "mem") whose snapshot is
+	// saved to disk and survives restart; omitted for everything else.
+	Persistent bool `json:"persistent,omitempty"`
 }
 
 // sourceList returns the registered sources plus regular views, sorted by name.
@@ -362,7 +365,11 @@ func (a *App) sourceList() []srcInfo {
 	sources := a.Reg.Sources()
 	out := make([]srcInfo, 0, len(sources))
 	for _, s := range sources {
-		out = append(out, srcInfo{Name: s.Name, Connector: connectorName(s)})
+		si := srcInfo{Name: s.Name, Connector: connectorName(s)}
+		if mv, ok := a.matViews[s.Name]; ok && mv.persist {
+			si.Persistent = true
+		}
+		out = append(out, si)
 	}
 	for _, v := range a.Reg.ViewNames() {
 		out = append(out, srcInfo{Name: v, Connector: "view"})
