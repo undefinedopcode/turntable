@@ -233,7 +233,10 @@ interfaces:
     that bit once: per-source options ride **inside the scan's `dataset` object**
     (`dataset.options`), not top-level. The reference plugins under
     `examples/plugins/` (`sysinfo` = env + Go-runtime stats, dependency-free;
-    `procinfo` = the live process table via gopsutil; `k8s` = Kubernetes
+    `procinfo` = the live process table via gopsutil; `docker` = Docker Engine
+    state via the docker SDK — datasets containers/images/volumes/networks plus
+    `container_stats` (live cpu%/mem/net/io, sampled with a two-frame stats read,
+    concurrently, under a scan timeout); `k8s` = Kubernetes
     resources via client-go — flattened datasets for pods/deployments/
     statefulsets/daemonsets/nodes/services/namespaces/events, plus a generic
     `resource` dataset for any kind/CRD; auth via kubeconfig incl. AKS/EKS exec

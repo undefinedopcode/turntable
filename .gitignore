@@ -1,6 +1,7 @@
 # binaries
 /turntable
 /bin/
+examples/plugins/*/bin/
 
 # local config / data
 turntable.local.yaml

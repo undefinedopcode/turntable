@@ -788,7 +788,7 @@ Beyond the built-in connectors, a **plugin** connector runs an external program
 as a data source, speaking a small JSON-RPC protocol over stdio. Author SDKs
 exist for **Go**, **Python**, and **Node.js** (`sdk/`), so a plugin is just a
 schema plus a rows function; the reference plugins under `examples/plugins/`
-(system info, process table, Kubernetes, MQTT, GitHub, …) show the shape.
+(system info, process table, Docker, Kubernetes, MQTT, GitHub, …) show the shape.
 Because a plugin is arbitrary code, it is declared in `turntable.yaml` only (not
 via the web add-source form):
 
