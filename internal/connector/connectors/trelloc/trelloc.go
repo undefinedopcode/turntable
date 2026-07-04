@@ -116,6 +116,7 @@ type field struct {
 type datasetDef struct {
 	name       string
 	path       string // REST path; may contain {board}
+	query      string // optional query string appended to the path (no leading ?)
 	needsBoard bool
 	fields     []field
 }
@@ -128,16 +129,22 @@ func (d datasetDef) schema() engine.Schema {
 	return engine.Schema{Columns: cols}
 }
 
-// buildPath substitutes the board id into board-scoped paths.
+// buildPath substitutes the board id into board-scoped paths and appends the
+// dataset's fixed query string (e.g. a `fields=` list for endpoints whose default
+// response omits fields we expose).
 func (d datasetDef) buildPath(opts map[string]any) (string, error) {
-	if !d.needsBoard {
-		return d.path, nil
+	p := d.path
+	if d.needsBoard {
+		board := stringOpt(opts, "board")
+		if board == "" {
+			return "", fmt.Errorf("trello dataset %q requires a board option (board id)", d.name)
+		}
+		p = strings.ReplaceAll(p, "{board}", board)
 	}
-	board := stringOpt(opts, "board")
-	if board == "" {
-		return "", fmt.Errorf("trello dataset %q requires a board option (board id)", d.name)
+	if d.query != "" {
+		p += "?" + d.query
 	}
-	return strings.ReplaceAll(d.path, "{board}", board), nil
+	return p, nil
 }
 
 // datasets is the fixed registry of supported Trello datasets.
@@ -151,8 +158,14 @@ var datasets = map[string]datasetDef{
 			{"desc", "desc", engine.TypeString},
 			{"closed", "closed", engine.TypeBool},
 			{"url", "url", engine.TypeString},
+			{"short_url", "shortUrl", engine.TypeString},
+			{"short_link", "shortLink", engine.TypeString},
 			{"id_organization", "idOrganization", engine.TypeString},
+			{"starred", "starred", engine.TypeBool},
+			{"subscribed", "subscribed", engine.TypeBool},
+			{"pinned", "pinned", engine.TypeBool},
 			{"date_last_activity", "dateLastActivity", engine.TypeTime},
+			{"date_last_view", "dateLastView", engine.TypeTime},
 		},
 	},
 	"lists": {
@@ -163,30 +176,48 @@ var datasets = map[string]datasetDef{
 			{"closed", "closed", engine.TypeBool},
 			{"id_board", "idBoard", engine.TypeString},
 			{"pos", "pos", engine.TypeFloat},
+			{"subscribed", "subscribed", engine.TypeBool},
+			{"soft_limit", "softLimit", engine.TypeInt},
 		},
 	},
 	"cards": {
 		name: "cards", path: "/boards/{board}/cards", needsBoard: true,
 		fields: []field{
 			{"id", "id", engine.TypeString},
+			{"id_short", "idShort", engine.TypeInt},
 			{"name", "name", engine.TypeString},
 			{"desc", "desc", engine.TypeString},
 			{"closed", "closed", engine.TypeBool},
 			{"id_board", "idBoard", engine.TypeString},
 			{"id_list", "idList", engine.TypeString},
+			{"id_members", "idMembers", engine.TypeAny},
+			{"id_labels", "idLabels", engine.TypeAny},
+			{"labels", "labels", engine.TypeAny},
+			{"start", "start", engine.TypeTime},
 			{"due", "due", engine.TypeTime},
 			{"due_complete", "dueComplete", engine.TypeBool},
+			{"due_reminder", "dueReminder", engine.TypeInt},
 			{"url", "url", engine.TypeString},
+			{"short_url", "shortUrl", engine.TypeString},
+			{"short_link", "shortLink", engine.TypeString},
+			{"subscribed", "subscribed", engine.TypeBool},
+			{"badges", "badges", engine.TypeAny},
 			{"date_last_activity", "dateLastActivity", engine.TypeTime},
 			{"pos", "pos", engine.TypeFloat},
 		},
 	},
 	"members": {
+		// The board-members endpoint's default response is limited to
+		// id/fullName/username, so request the extra fields explicitly.
 		name: "members", path: "/boards/{board}/members", needsBoard: true,
+		query: "fields=id,fullName,username,initials,avatarUrl,confirmed",
 		fields: []field{
 			{"id", "id", engine.TypeString},
 			{"full_name", "fullName", engine.TypeString},
 			{"username", "username", engine.TypeString},
+			{"initials", "initials", engine.TypeString},
+			{"avatar_url", "avatarUrl", engine.TypeString},
+			{"confirmed", "confirmed", engine.TypeBool},
 		},
 	},
 }

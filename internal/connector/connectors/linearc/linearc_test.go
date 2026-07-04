@@ -35,13 +35,16 @@ func TestResolveSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"id", "identifier", "title", "priority", "state", "assignee", "team", "created_at", "updated_at", "url"}
-	if len(sc.Columns) != len(want) {
-		t.Fatalf("got %d cols, want %d", len(sc.Columns), len(want))
-	}
-	for i, n := range want {
-		if sc.Columns[i].Name != n {
-			t.Errorf("col %d = %q, want %q", i, sc.Columns[i].Name, n)
+	// Core columns plus the richer issue fields; looked up by name so the test
+	// survives added columns.
+	for _, n := range []string{
+		"id", "identifier", "title", "priority", "state", "assignee", "team",
+		"created_at", "updated_at", "url",
+		"number", "estimate", "state_type", "project", "cycle", "parent",
+		"completed_at", "started_at", "due_date", "priority_label", "creator",
+	} {
+		if sc.Index(n) < 0 {
+			t.Errorf("issues schema missing column %q", n)
 		}
 	}
 }
@@ -101,23 +104,30 @@ func TestScanIssuesPaginationAndFlatten(t *testing.T) {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
 
+	// Columns are addressed by name (schema grew richer over time).
+	sc, err := c.Resolve(context.Background(), ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	col := func(r []engine.Value, name string) engine.Value { return r[sc.Index(name)] }
+
 	// Row 0: priority coerced float64->int64; nested state flattened.
 	r0 := rows[0].Values
-	if r0[3].Type != engine.TypeInt || r0[3].V.(int64) != 2 {
-		t.Errorf("priority = %+v, want int 2", r0[3])
+	if p := col(r0, "priority"); p.Type != engine.TypeInt || p.V.(int64) != 2 {
+		t.Errorf("priority = %+v, want int 2", p)
 	}
-	if r0[4].V != "Todo" {
-		t.Errorf("state = %v, want Todo", r0[4].V)
+	if col(r0, "state").V != "Todo" {
+		t.Errorf("state = %v, want Todo", col(r0, "state").V)
 	}
-	if r0[5].V != "Ada" {
-		t.Errorf("assignee = %v, want Ada", r0[5].V)
+	if col(r0, "assignee").V != "Ada" {
+		t.Errorf("assignee = %v, want Ada", col(r0, "assignee").V)
 	}
-	if r0[7].Type != engine.TypeTime {
-		t.Errorf("created_at type = %v, want time", r0[7].Type)
+	if col(r0, "created_at").Type != engine.TypeTime {
+		t.Errorf("created_at type = %v, want time", col(r0, "created_at").Type)
 	}
 	// Row 1: null assignee flattens to NULL.
-	if !rows[1].Values[5].IsNull() {
-		t.Errorf("row1 assignee = %+v, want NULL", rows[1].Values[5])
+	if !col(rows[1].Values, "assignee").IsNull() {
+		t.Errorf("row1 assignee = %+v, want NULL", col(rows[1].Values, "assignee"))
 	}
 }
 

@@ -150,7 +150,7 @@ var connectorSpecs = []ConnectorSpec{
 			{Key: "resources", Label: "Resources (batch)", Placeholder: "id1, id2, … (≤50/call, same region+subscription)", Help: "many resources in one query; requires Region"},
 			{Key: "region", Label: "Region", Placeholder: "eastus (required for batch)"},
 			{Key: "metric", Label: "Metric(s)", Required: true, Placeholder: "Percentage CPU (comma-separated)"},
-			{Key: "aggregation", Label: "Aggregation", Type: "select", Options: []string{"Average", "Total", "Minimum", "Maximum", "Count"}},
+			{Key: "aggregation", Label: "Aggregation", Placeholder: "Average (comma-separated for several: Average,Maximum)", Help: "one row per aggregation; a single query returns them all"},
 			{Key: "interval", Label: "Interval", Placeholder: "PT5M (ISO-8601 duration)"},
 			{Key: "timespan", Label: "Timespan", Placeholder: "startISO/endISO (default: last hour)"},
 			{Key: "dimension", Label: "Split by dimension", Placeholder: "node (comma-separated; adds columns)"},

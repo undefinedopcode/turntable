@@ -61,12 +61,16 @@ type costRequest struct {
 }
 
 // costResult is one returned bucket: a time period, the group key values (aligned
-// to the request's groupBy), the per-metric amounts, and the currency/unit.
+// to the request's groupBy), the per-metric amounts, the per-metric units (each
+// metric carries its own unit — USD for a cost metric, GB/Hrs for UsageQuantity —
+// so they must not be collapsed to one), and whether the period's figures are
+// still estimated (true for the in-progress current period) rather than final.
 type costResult struct {
 	start, end time.Time
 	groups     []string
 	amounts    map[string]float64
-	currency   string
+	units      map[string]string
+	estimated  bool
 }
 
 // costAPI is the connector's narrow view of Cost Explorer. The real client wraps
@@ -102,10 +106,16 @@ func schemaFor(opts map[string]any) engine.Schema {
 	for _, g := range groupBys(opts) {
 		cols = append(cols, engine.Column{Name: columnName(g.key), Type: engine.TypeString, Nullable: true})
 	}
-	for _, m := range metrics(opts) {
+	ms := metrics(opts)
+	for _, m := range ms {
 		cols = append(cols, engine.Column{Name: columnName(m), Type: engine.TypeFloat, Nullable: true})
 	}
-	cols = append(cols, engine.Column{Name: "currency", Type: engine.TypeString, Nullable: true})
+	// One unit column per metric (a cost metric's unit is a currency like USD;
+	// UsageQuantity's is GB/Hrs), rather than a single mislabeled "currency".
+	for _, m := range ms {
+		cols = append(cols, engine.Column{Name: columnName(m) + "_unit", Type: engine.TypeString, Nullable: true})
+	}
+	cols = append(cols, engine.Column{Name: "estimated", Type: engine.TypeBool, Nullable: true})
 	return engine.Schema{Columns: cols}
 }
 
@@ -155,7 +165,10 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 				row = append(row, engine.Null())
 			}
 		}
-		row = append(row, stringOrNull(r.currency))
+		for _, m := range ms {
+			row = append(row, stringOrNull(r.units[m]))
+		}
+		row = append(row, engine.BoolVal(r.estimated))
 		rows = append(rows, engine.Row{Values: row})
 	}
 	return engine.NewSliceIter(rows), nil

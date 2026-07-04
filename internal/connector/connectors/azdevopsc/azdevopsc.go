@@ -166,19 +166,39 @@ type field struct {
 	typ  engine.Type
 }
 
+// fields drives both the schema and the batch fetch's `fields=` list (via
+// requestedFields), and each becomes WHERE/ORDER-BY pushable through wiqlFieldFor
+// — so adding a row here surfaces the column, fetches it, and makes it pushable.
 var fields = []field{
 	{"id", []string{"id"}, engine.TypeInt},
 	{"title", []string{"System.Title"}, engine.TypeString},
 	{"work_item_type", []string{"System.WorkItemType"}, engine.TypeString},
 	{"state", []string{"System.State"}, engine.TypeString},
+	{"reason", []string{"System.Reason"}, engine.TypeString},
 	{"assigned_to", []string{"System.AssignedTo", "displayName"}, engine.TypeString},
 	{"assigned_to_email", []string{"System.AssignedTo", "uniqueName"}, engine.TypeString},
+	{"created_by", []string{"System.CreatedBy", "displayName"}, engine.TypeString},
+	{"created_by_email", []string{"System.CreatedBy", "uniqueName"}, engine.TypeString},
+	{"changed_by", []string{"System.ChangedBy", "displayName"}, engine.TypeString},
 	{"area_path", []string{"System.AreaPath"}, engine.TypeString},
 	{"iteration_path", []string{"System.IterationPath"}, engine.TypeString},
+	{"board_column", []string{"System.BoardColumn"}, engine.TypeString},
 	{"tags", []string{"System.Tags"}, engine.TypeString},
 	{"priority", []string{"Microsoft.VSTS.Common.Priority"}, engine.TypeInt},
+	{"severity", []string{"Microsoft.VSTS.Common.Severity"}, engine.TypeString},
+	{"parent_id", []string{"System.Parent"}, engine.TypeInt},
+	{"comment_count", []string{"System.CommentCount"}, engine.TypeInt},
+	// Agile estimate fields are non-integer in Azure (JSON floats).
+	{"story_points", []string{"Microsoft.VSTS.Scheduling.StoryPoints"}, engine.TypeFloat},
+	{"effort", []string{"Microsoft.VSTS.Scheduling.Effort"}, engine.TypeFloat},
+	{"remaining_work", []string{"Microsoft.VSTS.Scheduling.RemainingWork"}, engine.TypeFloat},
+	{"completed_work", []string{"Microsoft.VSTS.Scheduling.CompletedWork"}, engine.TypeFloat},
 	{"created_date", []string{"System.CreatedDate"}, engine.TypeTime},
 	{"changed_date", []string{"System.ChangedDate"}, engine.TypeTime},
+	{"state_change_date", []string{"Microsoft.VSTS.Common.StateChangeDate"}, engine.TypeTime},
+	{"activated_date", []string{"Microsoft.VSTS.Common.ActivatedDate"}, engine.TypeTime},
+	{"resolved_date", []string{"Microsoft.VSTS.Common.ResolvedDate"}, engine.TypeTime},
+	{"closed_date", []string{"Microsoft.VSTS.Common.ClosedDate"}, engine.TypeTime},
 }
 
 func schema() engine.Schema {

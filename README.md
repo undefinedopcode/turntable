@@ -499,9 +499,12 @@ turntable> .use boards trello dataset=boards key=$KEY token=$TOKEN
 turntable> SELECT name, url FROM boards WHERE closed = false;
 ```
 
-`cards` exposes `id, name, desc, closed, id_board, id_list, due, due_complete,
-url, date_last_activity, pos`. Get an API key/token at
-<https://trello.com/app-key>.
+`cards` exposes `id, id_short, name, desc, closed, id_board, id_list, id_members,
+id_labels, labels, start, due, due_complete, due_reminder, url, short_url,
+short_link, subscribed, badges, date_last_activity, pos` (`id_members`,
+`id_labels`, `labels`, and `badges` — the comment/attachment/checklist-progress
+counts — are structured `any` columns; reach into them with `JSON_EXTRACT`). Get
+an API key/token at <https://trello.com/app-key>.
 
 ### Azure DevOps Boards
 
@@ -528,10 +531,14 @@ turntable -c turntable.yaml \
    WHERE state = 'Active' ORDER BY changed_date DESC LIMIT 20"
 ```
 
-Columns: `id, title, work_item_type, state, assigned_to, assigned_to_email,
-area_path, iteration_path, tags, priority, created_date, changed_date`
-(`assigned_to` is the display name; `assigned_to_email` is the identity's unique
-name/email). For full control, pass a `wiql` option with a complete WIQL query
+Columns: `id, title, work_item_type, state, reason, assigned_to,
+assigned_to_email, created_by, created_by_email, changed_by, area_path,
+iteration_path, board_column, tags, priority, severity, parent_id, comment_count,
+story_points, effort, remaining_work, completed_work, created_date, changed_date,
+state_change_date, activated_date, resolved_date, closed_date` (`assigned_to`/
+`created_by` are display names; the `*_email` columns are the identities' unique
+names; the lifecycle timestamps drive cycle-time/lead-time metrics; the estimate
+fields are floats). For full control, pass a `wiql` option with a complete WIQL query
 (it must `SELECT ... FROM workitems`), e.g. `wiql=SELECT [System.Id] FROM
 workitems WHERE [System.Tags] CONTAINS 'release'`.
 

@@ -51,26 +51,31 @@ const (
 type metricQuery struct {
 	metricNames []string
 	namespace   string
-	aggregation string // lower-case Azure aggregation: average/total/minimum/maximum/count
-	interval    string
-	timespan    string // "startISO/endISO"
-	filter      string // dimension $filter, e.g. "node eq '*'"
+	// aggregations are the lower-case Azure aggregations requested
+	// (average/total/minimum/maximum/count). A single Azure query returns every
+	// requested aggregation per point at no extra cost, so several may be asked
+	// for at once; the connector emits one row per (point, aggregation).
+	aggregations []string
+	interval     string
+	timespan     string // "startISO/endISO"
+	filter       string // dimension $filter, e.g. "node eq '*'"
 }
 
-// metricSeries is one returned time series: a metric, its dimension values (from
-// the response metadata), and its points. In batch mode `resource` names the
-// resource the series came from (empty in per-resource mode — the connector
-// fills the column from the single resource option).
+// metricSeries is one returned time series: a metric, its unit, its dimension
+// values (from the response metadata), and its points. In batch mode `resource`
+// names the resource the series came from (empty in per-resource mode — the
+// connector fills the column from the single resource option).
 type metricSeries struct {
 	resource   string
 	metric     string
+	unit       string
 	dimensions map[string]string
 	points     []metricPoint
 }
 
 type metricPoint struct {
-	ts  time.Time
-	val *float64 // the value for the requested aggregation; nil = no data
+	ts   time.Time
+	vals map[string]*float64 // value per requested aggregation (lower-case key); nil/absent = no data
 }
 
 // metricsAPI is the connector's narrow view of Azure Monitor metrics: a
@@ -104,6 +109,7 @@ func (*Connector) Resolve(ctx context.Context, ds connector.Dataset) (engine.Sch
 		{Name: "timestamp", Type: engine.TypeTime, Nullable: true},
 		{Name: "resource", Type: engine.TypeString, Nullable: true},
 		{Name: "metric", Type: engine.TypeString, Nullable: true},
+		{Name: "unit", Type: engine.TypeString, Nullable: true},
 		{Name: "aggregation", Type: engine.TypeString, Nullable: true},
 		{Name: "value", Type: engine.TypeFloat, Nullable: true},
 	}
@@ -124,9 +130,12 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 	if len(metricNames) == 0 {
 		return nil, fmt.Errorf("azmetrics connector requires a metric option")
 	}
-	aggregation := stringOpt(opts, "aggregation")
-	if aggregation == "" {
-		aggregation = defaultAggregation
+	aggregations := splitList(stringOpt(opts, "aggregation"))
+	if len(aggregations) == 0 {
+		aggregations = []string{defaultAggregation}
+	}
+	for i, a := range aggregations {
+		aggregations[i] = strings.ToLower(a)
 	}
 	interval := stringOpt(opts, "interval")
 	if interval == "" {
@@ -138,12 +147,12 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 		filter = dimensionFilter(dims)
 	}
 	q := metricQuery{
-		metricNames: metricNames,
-		namespace:   stringOpt(opts, "namespace"),
-		aggregation: strings.ToLower(aggregation),
-		interval:    interval,
-		timespan:    timespan(opts),
-		filter:      filter,
+		metricNames:  metricNames,
+		namespace:    stringOpt(opts, "namespace"),
+		aggregations: aggregations,
+		interval:     interval,
+		timespan:     timespan(opts),
+		filter:       filter,
 	}
 
 	api, err := c.resolveClient()
@@ -174,7 +183,7 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 			}
 			series = append(series, s...)
 		}
-		return engine.NewSliceIter(buildRows(series, "", aggregation, dims, limit)), nil
+		return engine.NewSliceIter(buildRows(series, "", aggregations, dims, limit)), nil
 	}
 
 	// Per-resource mode.
@@ -189,13 +198,14 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 	if err != nil {
 		return nil, fmt.Errorf("azmetrics %s: %w", resource, err)
 	}
-	return engine.NewSliceIter(buildRows(series, resource, aggregation, dims, limit)), nil
+	return engine.NewSliceIter(buildRows(series, resource, aggregations, dims, limit)), nil
 }
 
-// buildRows flattens series into rows [timestamp, resource, metric, aggregation,
-// value, dims…]. The resource column is the series' own resource (batch mode) or
-// defaultResource (per-resource mode).
-func buildRows(series []metricSeries, defaultResource, aggregation string, dims []string, limit int) []engine.Row {
+// buildRows flattens series into rows [timestamp, resource, metric, unit,
+// aggregation, value, dims…]. Each point yields one row per requested
+// aggregation (a single Azure query returns them all). The resource column is the
+// series' own resource (batch mode) or defaultResource (per-resource mode).
+func buildRows(series []metricSeries, defaultResource string, aggregations, dims []string, limit int) []engine.Row {
 	var rows []engine.Row
 	for _, s := range series {
 		resource := s.resource
@@ -203,24 +213,27 @@ func buildRows(series []metricSeries, defaultResource, aggregation string, dims 
 			resource = defaultResource
 		}
 		for _, p := range s.points {
-			if len(rows) >= limit {
-				return rows
-			}
-			row := []engine.Value{
-				timeVal(p.ts),
-				engine.StringVal(resource),
-				engine.StringVal(s.metric),
-				engine.StringVal(aggregation),
-				floatVal(p.val),
-			}
-			for _, d := range dims {
-				if v, ok := s.dimensions[d]; ok {
-					row = append(row, engine.StringVal(v))
-				} else {
-					row = append(row, engine.Null())
+			for _, agg := range aggregations {
+				if len(rows) >= limit {
+					return rows
 				}
+				row := []engine.Value{
+					timeVal(p.ts),
+					engine.StringVal(resource),
+					engine.StringVal(s.metric),
+					stringOrNull(s.unit),
+					engine.StringVal(agg),
+					floatVal(p.vals[agg]),
+				}
+				for _, d := range dims {
+					if v, ok := s.dimensions[d]; ok {
+						row = append(row, engine.StringVal(v))
+					} else {
+						row = append(row, engine.Null())
+					}
+				}
+				rows = append(rows, engine.Row{Values: row})
 			}
-			rows = append(rows, engine.Row{Values: row})
 		}
 	}
 	return rows
@@ -295,6 +308,13 @@ func floatVal(f *float64) engine.Value {
 		return engine.Null()
 	}
 	return engine.FloatVal(*f)
+}
+
+func stringOrNull(s string) engine.Value {
+	if s == "" {
+		return engine.Null()
+	}
+	return engine.StringVal(s)
 }
 
 // subscriptionFromURI extracts the subscription GUID from an ARM resource ID.

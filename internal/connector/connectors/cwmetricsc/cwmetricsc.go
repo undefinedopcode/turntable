@@ -67,6 +67,11 @@ func schema() engine.Schema {
 		{Name: "metric", Type: engine.TypeString, Nullable: true},
 		{Name: "stat", Type: engine.TypeString, Nullable: true},
 		{Name: "value", Type: engine.TypeFloat, Nullable: true},
+		// label is CloudWatch's display name for the series; status is the
+		// result's StatusCode (Complete/PartialData/…) — surfaced so a truncated
+		// or partial result is visible rather than silently returned as complete.
+		{Name: "label", Type: engine.TypeString, Nullable: true},
+		{Name: "status", Type: engine.TypeString, Nullable: true},
 	}}
 }
 
@@ -135,6 +140,8 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 			return nil, fmt.Errorf("GetMetricData: %w", err)
 		}
 		for _, res := range out.MetricDataResults {
+			label := stringOrNull(aws.ToString(res.Label))
+			status := stringOrNull(string(res.StatusCode))
 			n := len(res.Timestamps)
 			if len(res.Values) < n {
 				n = len(res.Values)
@@ -146,6 +153,8 @@ func (c *Connector) Scan(ctx context.Context, req connector.ScanRequest) (engine
 					engine.StringVal(metricName),
 					engine.StringVal(stat),
 					engine.FloatVal(res.Values[i]),
+					label,
+					status,
 				}})
 				if len(rows) >= limit {
 					break
@@ -291,4 +300,11 @@ func stringOpt(opts map[string]any, key string) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+func stringOrNull(s string) engine.Value {
+	if s == "" {
+		return engine.Null()
+	}
+	return engine.StringVal(s)
 }

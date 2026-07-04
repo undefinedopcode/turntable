@@ -214,6 +214,7 @@ var metaDatasets = metaDef{fields: []field{
 	{"slug", "slug", engine.TypeString},
 	{"description", "description", engine.TypeString},
 	{"columns_count", "regular_columns_count", engine.TypeInt},
+	{"expand_json_depth", "expand_json_depth", engine.TypeInt},
 	{"created_at", "created_at", engine.TypeTime},
 	{"last_written_at", "last_written_at", engine.TypeTime},
 }}

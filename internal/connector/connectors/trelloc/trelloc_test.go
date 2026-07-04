@@ -29,19 +29,42 @@ func drain(t *testing.T, it engine.RowIterator) []engine.Row {
 	return rows
 }
 
-func TestResolveSchema(t *testing.T) {
-	c := New()
-	sc, err := c.Resolve(context.Background(), connector.Dataset{Source: "cards"})
+// idx returns the position of a column by name (schemas are looked up by name so
+// tests survive added columns), failing if absent.
+func idx(t *testing.T, sc engine.Schema, name string) int {
+	t.Helper()
+	if i := sc.Index(name); i >= 0 {
+		return i
+	}
+	t.Fatalf("column %q not in schema", name)
+	return -1
+}
+
+func schemaFor(t *testing.T, source string) engine.Schema {
+	t.Helper()
+	sc, err := New().Resolve(context.Background(), connector.Dataset{Source: source})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"id", "name", "desc", "closed", "id_board", "id_list", "due", "due_complete", "url", "date_last_activity", "pos"}
-	if len(sc.Columns) != len(want) {
-		t.Fatalf("cols = %d, want %d", len(sc.Columns), len(want))
+	return sc
+}
+
+func TestResolveSchema(t *testing.T) {
+	sc := schemaFor(t, "cards")
+	// The core columns plus the richer ones added from the full card object.
+	for _, n := range []string{
+		"id", "name", "desc", "closed", "id_board", "id_list", "due", "due_complete",
+		"url", "date_last_activity", "pos",
+		"id_members", "id_labels", "labels", "start", "short_url", "short_link", "badges",
+	} {
+		if sc.Index(n) < 0 {
+			t.Errorf("cards schema missing column %q", n)
+		}
 	}
-	for i, n := range want {
-		if sc.Columns[i].Name != n {
-			t.Errorf("col %d = %q, want %q", i, sc.Columns[i].Name, n)
+	// Array/object fields are carried as `any`.
+	for _, n := range []string{"id_members", "labels", "badges"} {
+		if sc.Columns[idx(t, sc, n)].Type != engine.TypeAny {
+			t.Errorf("%q should be TypeAny", n)
 		}
 	}
 }
@@ -69,18 +92,18 @@ func TestScanBoardsNoBoardNeeded(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	// cols: id(0) name(1) desc(2) closed(3) url(4) id_organization(5) date_last_activity(6)
-	if rows[0].Values[1].V != "Roadmap" {
-		t.Errorf("name = %v", rows[0].Values[1].V)
+	sc := schemaFor(t, "boards")
+	if rows[0].Values[idx(t, sc, "name")].V != "Roadmap" {
+		t.Errorf("name = %v", rows[0].Values[idx(t, sc, "name")].V)
 	}
-	if b, _ := rows[1].Values[3].AsBool(); !b {
+	if b, _ := rows[1].Values[idx(t, sc, "closed")].AsBool(); !b {
 		t.Errorf("board 2 closed should be true")
 	}
-	if rows[0].Values[6].Type != engine.TypeTime {
-		t.Errorf("dateLastActivity should coerce to time, got %v", rows[0].Values[6].Type)
+	if rows[0].Values[idx(t, sc, "date_last_activity")].Type != engine.TypeTime {
+		t.Errorf("dateLastActivity should coerce to time")
 	}
 	// desc missing on both -> NULL.
-	if !rows[0].Values[2].IsNull() {
+	if !rows[0].Values[idx(t, sc, "desc")].IsNull() {
 		t.Errorf("missing desc should be NULL")
 	}
 }
@@ -88,7 +111,13 @@ func TestScanBoardsNoBoardNeeded(t *testing.T) {
 func TestScanCardsRequiresBoardAndBuildsPath(t *testing.T) {
 	fake := &fakeTrello{data: map[string][]map[string]any{
 		"/boards/B1/cards": {
-			{"id": "c1", "name": "Task", "idBoard": "B1", "idList": "L1", "pos": 16384.0, "dueComplete": false},
+			{
+				"id": "c1", "name": "Task", "idBoard": "B1", "idList": "L1",
+				"pos": 16384.0, "dueComplete": false, "idShort": 7.0,
+				"idMembers": []any{"m1", "m2"},
+				"labels":    []any{map[string]any{"name": "bug", "color": "red"}},
+				"badges":    map[string]any{"comments": 3.0, "attachments": 1.0},
+			},
 		},
 	}}
 	c := newWithClient(fake)
@@ -111,9 +140,40 @@ func TestScanCardsRequiresBoardAndBuildsPath(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
-	// pos is a float column.
-	if f, _ := rows[0].Values[10].AsFloat(); f != 16384.0 {
-		t.Errorf("pos = %v, want 16384", rows[0].Values[10].V)
+	sc := schemaFor(t, "cards")
+	if f, _ := rows[0].Values[idx(t, sc, "pos")].AsFloat(); f != 16384.0 {
+		t.Errorf("pos = %v, want 16384", rows[0].Values[idx(t, sc, "pos")].V)
+	}
+	if n, _ := rows[0].Values[idx(t, sc, "id_short")].AsInt(); n != 7 {
+		t.Errorf("id_short = %v, want 7", rows[0].Values[idx(t, sc, "id_short")].V)
+	}
+	// Array/object fields survive as `any` (slice / map).
+	if _, ok := rows[0].Values[idx(t, sc, "id_members")].V.([]any); !ok {
+		t.Errorf("id_members = %T, want []any", rows[0].Values[idx(t, sc, "id_members")].V)
+	}
+	if _, ok := rows[0].Values[idx(t, sc, "badges")].V.(map[string]any); !ok {
+		t.Errorf("badges = %T, want map", rows[0].Values[idx(t, sc, "badges")].V)
+	}
+}
+
+func TestMembersRequestsExtraFields(t *testing.T) {
+	fake := &fakeTrello{data: map[string][]map[string]any{
+		"/boards/B1/members?fields=id,fullName,username,initials,avatarUrl,confirmed": {
+			{"id": "m1", "fullName": "Ada", "username": "ada", "initials": "A", "confirmed": true},
+		},
+	}}
+	ds := connector.Dataset{Source: "members", Options: map[string]any{"key": "k", "token": "t", "board": "B1"}}
+	it, err := newWithClient(fake).Scan(context.Background(), connector.ScanRequest{Dataset: ds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := drain(t, it)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (path was %q)", len(rows), fake.lastPath)
+	}
+	sc := schemaFor(t, "members")
+	if b, _ := rows[0].Values[idx(t, sc, "confirmed")].AsBool(); !b {
+		t.Errorf("confirmed should be true")
 	}
 }
 

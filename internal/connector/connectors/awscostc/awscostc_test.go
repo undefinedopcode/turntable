@@ -47,7 +47,11 @@ func TestSchemaFromOptions(t *testing.T) {
 		"metrics":  "UnblendedCost, UsageQuantity",
 	}}
 	sc, _ := c.Resolve(context.Background(), ds)
-	want := []string{"period_start", "period_end", "service", "environment", "unblended_cost", "usage_quantity", "currency"}
+	want := []string{
+		"period_start", "period_end", "service", "environment",
+		"unblended_cost", "usage_quantity",
+		"unblended_cost_unit", "usage_quantity_unit", "estimated",
+	}
 	if len(sc.Columns) != len(want) {
 		t.Fatalf("cols = %d, want %d: %+v", len(sc.Columns), len(want), sc.Columns)
 	}
@@ -62,8 +66,8 @@ func TestScanBuildsRequestAndRows(t *testing.T) {
 	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
 	fake := &fakeCost{results: []costResult{
-		{start: start, end: end, groups: []string{"AmazonEC2"}, amounts: map[string]float64{"UnblendedCost": 12.34}, currency: "USD"},
-		{start: start, end: end, groups: []string{"AmazonS3"}, amounts: map[string]float64{"UnblendedCost": 1.5}, currency: "USD"},
+		{start: start, end: end, groups: []string{"AmazonEC2"}, amounts: map[string]float64{"UnblendedCost": 12.34}, units: map[string]string{"UnblendedCost": "USD"}, estimated: true},
+		{start: start, end: end, groups: []string{"AmazonS3"}, amounts: map[string]float64{"UnblendedCost": 1.5}, units: map[string]string{"UnblendedCost": "USD"}},
 	}}
 	c := newWithClient(fake)
 	ds := connector.Dataset{Options: map[string]any{
@@ -85,7 +89,7 @@ func TestScanBuildsRequestAndRows(t *testing.T) {
 		t.Errorf("metrics = %v (want default UnblendedCost)", fake.lastReq.metrics)
 	}
 
-	// Rows: [period_start, period_end, service, unblended_cost, currency].
+	// Rows: [period_start, period_end, service, unblended_cost, unblended_cost_unit, estimated].
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
@@ -98,8 +102,16 @@ func TestScanBuildsRequestAndRows(t *testing.T) {
 	if v, _ := rows[0].Values[3].AsFloat(); v != 12.34 {
 		t.Errorf("cost = %v, want 12.34", rows[0].Values[3].V)
 	}
+	// The per-metric unit column (was a single mislabeled "currency").
 	if rows[0].Values[4].V != "USD" {
-		t.Errorf("currency = %v, want USD", rows[0].Values[4].V)
+		t.Errorf("unblended_cost_unit = %v, want USD", rows[0].Values[4].V)
+	}
+	// estimated flag carried through from ResultByTime.Estimated.
+	if b, _ := rows[0].Values[5].AsBool(); !b {
+		t.Errorf("row 0 estimated should be true")
+	}
+	if b, _ := rows[1].Values[5].AsBool(); b {
+		t.Errorf("row 1 estimated should be false")
 	}
 }
 

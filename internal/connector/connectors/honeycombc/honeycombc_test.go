@@ -82,8 +82,8 @@ func TestMetaDatasetsScan(t *testing.T) {
 	if !rows[1].Values[3].IsNull() {
 		t.Errorf("missing columns_count should be NULL")
 	}
-	if rows[0].Values[5].Type != engine.TypeTime {
-		t.Errorf("last_written_at should coerce to time, got %v", rows[0].Values[5].Type)
+	if lw := sc.Index("last_written_at"); rows[0].Values[lw].Type != engine.TypeTime {
+		t.Errorf("last_written_at should coerce to time, got %v", rows[0].Values[lw].Type)
 	}
 }
 

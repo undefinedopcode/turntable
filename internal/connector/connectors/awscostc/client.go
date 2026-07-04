@@ -63,14 +63,15 @@ func (r *realClient) get(ctx context.Context, req costRequest) ([]costResult, er
 		}
 		for _, rbt := range resp.ResultsByTime {
 			start, end := interval(rbt.TimePeriod)
+			est := rbt.Estimated
 			if len(rbt.Groups) > 0 {
 				for _, g := range rbt.Groups {
-					amounts, cur := metricValues(g.Metrics)
-					out = append(out, costResult{start: start, end: end, groups: g.Keys, amounts: amounts, currency: cur})
+					amounts, units := metricValues(g.Metrics)
+					out = append(out, costResult{start: start, end: end, groups: g.Keys, amounts: amounts, units: units, estimated: est})
 				}
 			} else {
-				amounts, cur := metricValues(rbt.Total)
-				out = append(out, costResult{start: start, end: end, amounts: amounts, currency: cur})
+				amounts, units := metricValues(rbt.Total)
+				out = append(out, costResult{start: start, end: end, amounts: amounts, units: units, estimated: est})
 			}
 		}
 		if resp.NextPageToken == nil || *resp.NextPageToken == "" {
@@ -81,18 +82,17 @@ func (r *realClient) get(ctx context.Context, req costRequest) ([]costResult, er
 	return out, nil
 }
 
-// metricValues extracts amounts (parsed to float) and the currency (the unit of
-// the first metric) from a Cost Explorer metric map.
-func metricValues(m map[string]cetypes.MetricValue) (map[string]float64, string) {
+// metricValues extracts the per-metric amounts (parsed to float) and units from a
+// Cost Explorer metric map. Each metric keeps its own unit — collapsing to one
+// mislabels UsageQuantity (GB/Hrs, not a currency) and mixed-metric queries.
+func metricValues(m map[string]cetypes.MetricValue) (map[string]float64, map[string]string) {
 	amounts := make(map[string]float64, len(m))
-	currency := ""
+	units := make(map[string]string, len(m))
 	for name, mv := range m {
 		amounts[name] = parseAmount(aws.ToString(mv.Amount))
-		if currency == "" {
-			currency = aws.ToString(mv.Unit)
-		}
+		units[name] = aws.ToString(mv.Unit)
 	}
-	return amounts, currency
+	return amounts, units
 }
 
 func interval(d *cetypes.DateInterval) (time.Time, time.Time) {

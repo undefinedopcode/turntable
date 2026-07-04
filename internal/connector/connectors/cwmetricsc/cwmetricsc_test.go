@@ -75,6 +75,8 @@ func TestResolveSchema(t *testing.T) {
 		{"metric", engine.TypeString},
 		{"stat", engine.TypeString},
 		{"value", engine.TypeFloat},
+		{"label", engine.TypeString},
+		{"status", engine.TypeString},
 	}
 	if len(sc.Columns) != len(want) {
 		t.Fatalf("got %d columns, want %d", len(sc.Columns), len(want))

@@ -101,14 +101,20 @@ func TestResolveSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"id", "title", "work_item_type", "state", "assigned_to", "assigned_to_email", "area_path", "iteration_path", "tags", "priority", "created_date", "changed_date"}
-	if len(sc.Columns) != len(want) {
-		t.Fatalf("cols = %d, want %d", len(sc.Columns), len(want))
-	}
-	for i, n := range want {
-		if sc.Columns[i].Name != n {
-			t.Errorf("col %d = %q, want %q", i, sc.Columns[i].Name, n)
+	// Core columns plus the richer lifecycle/estimate fields, by name.
+	for _, n := range []string{
+		"id", "title", "work_item_type", "state", "assigned_to", "assigned_to_email",
+		"area_path", "iteration_path", "tags", "priority", "created_date", "changed_date",
+		"reason", "created_by", "parent_id", "severity", "story_points",
+		"closed_date", "resolved_date", "activated_date", "state_change_date", "board_column",
+	} {
+		if sc.Index(n) < 0 {
+			t.Errorf("work_items schema missing column %q", n)
 		}
+	}
+	// Estimate fields must be float (non-integer in Azure).
+	if sc.Columns[sc.Index("story_points")].Type != engine.TypeFloat {
+		t.Errorf("story_points should be TypeFloat")
 	}
 }
 
@@ -145,23 +151,27 @@ func TestScanFlattensFields(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	// cols: id(0) title(1) type(2) state(3) assigned_to(4) assigned_to_email(5)
-	//       area(6) iter(7) tags(8) priority(9) created(10) changed(11)
-	if n, _ := rows[0].Values[0].AsInt(); n != 42 {
-		t.Errorf("id = %v, want 42", rows[0].Values[0].V)
+	sc, err := New().Resolve(context.Background(), ds(nil))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if rows[0].Values[4].V != "Ada Lovelace" {
-		t.Errorf("assigned_to = %v, want Ada Lovelace (nested displayName)", rows[0].Values[4].V)
+	col := func(r []engine.Value, name string) engine.Value { return r[sc.Index(name)] }
+
+	if n, _ := col(rows[0].Values, "id").AsInt(); n != 42 {
+		t.Errorf("id = %v, want 42", col(rows[0].Values, "id").V)
 	}
-	if p, _ := rows[0].Values[9].AsInt(); p != 2 {
-		t.Errorf("priority = %v, want 2", rows[0].Values[9].V)
+	if col(rows[0].Values, "assigned_to").V != "Ada Lovelace" {
+		t.Errorf("assigned_to = %v, want Ada Lovelace (nested displayName)", col(rows[0].Values, "assigned_to").V)
 	}
-	if rows[0].Values[11].Type != engine.TypeTime {
-		t.Errorf("changed_date should coerce to time, got %v", rows[0].Values[11].Type)
+	if p, _ := col(rows[0].Values, "priority").AsInt(); p != 2 {
+		t.Errorf("priority = %v, want 2", col(rows[0].Values, "priority").V)
+	}
+	if col(rows[0].Values, "changed_date").Type != engine.TypeTime {
+		t.Errorf("changed_date should coerce to time")
 	}
 	// Row 1: missing AssignedTo -> NULL.
-	if !rows[1].Values[4].IsNull() {
-		t.Errorf("row1 assigned_to = %+v, want NULL", rows[1].Values[4])
+	if !col(rows[1].Values, "assigned_to").IsNull() {
+		t.Errorf("row1 assigned_to = %+v, want NULL", col(rows[1].Values, "assigned_to"))
 	}
 }
 

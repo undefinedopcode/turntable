@@ -78,7 +78,7 @@ func (r *realClient) list(ctx context.Context, resourceURI string, q metricQuery
 	}
 	opts := &armmonitor.MetricsClientListOptions{
 		Metricnames: strPtr(strings.Join(q.metricNames, ",")),
-		Aggregation: strPtr(q.aggregation),
+		Aggregation: strPtr(strings.Join(q.aggregations, ",")),
 	}
 	if q.interval != "" {
 		opts.Interval = strPtr(q.interval)
@@ -100,13 +100,18 @@ func (r *realClient) list(ctx context.Context, resourceURI string, q metricQuery
 	var out []metricSeries
 	for _, m := range resp.Value {
 		name := localized(m.Name)
+		unit := armUnit(m.Unit)
 		for _, ts := range m.Timeseries {
-			s := metricSeries{metric: name, dimensions: map[string]string{}}
+			s := metricSeries{metric: name, unit: unit, dimensions: map[string]string{}}
 			for _, md := range ts.Metadatavalues {
 				s.dimensions[localized(md.Name)] = derefStr(md.Value)
 			}
 			for _, dp := range ts.Data {
-				s.points = append(s.points, metricPoint{ts: derefTime(dp.TimeStamp), val: armPointValue(dp, q.aggregation)})
+				vals := make(map[string]*float64, len(q.aggregations))
+				for _, agg := range q.aggregations {
+					vals[agg] = armPointValue(dp, agg)
+				}
+				s.points = append(s.points, metricPoint{ts: derefTime(dp.TimeStamp), vals: vals})
 			}
 			out = append(out, s)
 		}
@@ -138,7 +143,7 @@ func (r *realClient) listBatch(ctx context.Context, subscription, region string,
 	if err != nil {
 		return nil, err
 	}
-	opts := &azmetrics.QueryResourcesOptions{Aggregation: strPtr(q.aggregation)}
+	opts := &azmetrics.QueryResourcesOptions{Aggregation: strPtr(strings.Join(q.aggregations, ","))}
 	if q.interval != "" {
 		opts.Interval = strPtr(q.interval)
 	}
@@ -161,13 +166,18 @@ func (r *realClient) listBatch(ctx context.Context, subscription, region string,
 		resource := derefStr(md.ResourceID)
 		for _, m := range md.Values {
 			name := localizedBatch(m.Name)
+			unit := batchUnit(m.Unit)
 			for _, ts := range m.TimeSeries {
-				s := metricSeries{resource: resource, metric: name, dimensions: map[string]string{}}
+				s := metricSeries{resource: resource, metric: name, unit: unit, dimensions: map[string]string{}}
 				for _, mv := range ts.MetadataValues {
 					s.dimensions[localizedBatch(mv.Name)] = derefStr(mv.Value)
 				}
 				for _, dp := range ts.Data {
-					s.points = append(s.points, metricPoint{ts: derefTime(dp.TimeStamp), val: batchPointValue(dp, q.aggregation)})
+					vals := make(map[string]*float64, len(q.aggregations))
+					for _, agg := range q.aggregations {
+						vals[agg] = batchPointValue(dp, agg)
+					}
+					s.points = append(s.points, metricPoint{ts: derefTime(dp.TimeStamp), vals: vals})
 				}
 				out = append(out, s)
 			}
@@ -216,6 +226,20 @@ func splitTimespan(ts string) (string, string, bool) {
 		return ts[:i], ts[i+1:], true
 	}
 	return "", "", false
+}
+
+func armUnit(u *armmonitor.MetricUnit) string {
+	if u == nil {
+		return ""
+	}
+	return string(*u)
+}
+
+func batchUnit(u *azmetrics.MetricUnit) string {
+	if u == nil {
+		return ""
+	}
+	return string(*u)
 }
 
 func localized(s *armmonitor.LocalizableString) string {
