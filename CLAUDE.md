@@ -386,6 +386,24 @@ interfaces:
     query — two calls per SQL query). `url` = server base; optional `bearer`
     (sensitive). No pushdown: reduce at the source with PromQL (`rate`,
     `sum by (…)`); the engine does the rest. Tests use `httptest`.
+    `grafanac` (Grafana) is a **datasource proxy**: rather than a source itself,
+    it runs queries through a Grafana instance's `POST /api/ds/query`, reusing
+    Grafana's configured datasources + one token. Two modes selected like
+    honeycomb's `kind`: `datasources` (the TOC — `GET /api/datasources`, fixed
+    schema, so Resolve needs no call) and query mode (default): `datasource=` a
+    name/uid, resolved to `(uid, type)` via `/api/datasources/{name,uid}/…`, then
+    a native query (`query`/`expr`/`raw_sql`) rendered into the type-specific
+    request field (`queryField`: prometheus/loki→`expr`+range, sql→`rawSql`+
+    `format`, influx→`query`, graphite→`target`; `query_field` overrides).
+    Grafana returns typed **dataframes**, so schema is exact like `azlogsc` (no
+    inference; `fieldType` maps time/number(int|float per `typeInfo.frame`)/
+    string/boolean); `shapeFrames`/`rowsFromFrames` flatten multiple series-frames
+    into one relation — union of fields (first-seen order) then one string column
+    per distinct label (collision → `label_`). Query-mode Resolve runs the query
+    (two calls per query, like promc). `url` = base (via option or Source);
+    `token`/`api_key` sensitive (→ Bearer, `$GRAFANA_TOKEN` fallback);
+    `from`/`to` Grafana-relative or epoch-ms (default `now-1h`/`now`). No
+    pushdown. Injected `grafanaAPI` client, fake-tested.
     `awsconfigc` (AWS Config Advanced Query) is the AWS analogue of `azrgraphc`:
     account/region resource inventory (every type Config records) via Config's
     SQL `SELECT` surface. Table mode exposes a **fixed** top-level schema

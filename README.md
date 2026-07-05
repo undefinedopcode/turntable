@@ -2,9 +2,9 @@
 
 Query heterogeneous data sources — JSON, CSV, YAML, Excel, Parquet, and log
 files; SQL databases; and a broad set of URL/API connectors (HTTP/REST, Linear,
-Trello, Azure DevOps Boards, Prometheus, Honeycomb, AWS CloudWatch / Athena /
-Config / Cost Explorer, DynamoDB, Azure Table Storage, Azure Monitor metrics &
-logs, Azure Resource Graph, Azure Cost Management) — plus your own via an
+Trello, Azure DevOps Boards, Prometheus, Grafana, Honeycomb, AWS CloudWatch /
+Athena / Config / Cost Explorer, DynamoDB, Azure Table Storage, Azure Monitor
+metrics & logs, Azure Resource Graph, Azure Cost Management) — plus your own via an
 external-process plugin protocol, all through a single SQL-style query language.
 
 > **Status:** active development. Implemented: file connectors (JSON, CSV, YAML,
@@ -718,6 +718,50 @@ sources:
       time_range: 7200        # events query window seconds (default 2h)
 ```
 
+### Grafana
+
+The `grafana` connector is a **datasource proxy**: instead of connecting to
+Prometheus/Loki/a SQL database directly, it runs queries through a Grafana
+instance's HTTP API (`POST /api/ds/query`), reusing Grafana's already-configured
+datasources and a single Grafana token. Two modes:
+
+- **`kind: datasources`** — the table of contents: every datasource Grafana
+  knows about (`id`/`uid`/`name`/`type`/`url`/`is_default`/…). Run this first to
+  see what you can query.
+- **query mode** (the default) — `datasource=<name-or-uid>` plus a native query
+  (`query` / `expr` / `raw_sql`). The connector resolves the datasource's type
+  and renders the right request body (Prometheus/Loki take `expr`, SQL
+  datasources take `rawSql`, InfluxDB `query`, Graphite `target`).
+
+Grafana answers with typed **dataframes**, so — like Azure Logs — the schema is
+exact (no inference): field types map straight to engine types, and multiple
+series-frames are flattened into one relation (the union of their fields plus one
+string column per distinct label). No SQL pushdown — reduce at the source via the
+native query and let the engine apply the residual.
+
+```yaml
+sources:
+  grafana_ds:                   # list what's available
+    connector: grafana
+    url: https://grafana.example.com
+    options:
+      kind: datasources
+      token: ${GRAFANA_TOKEN}   # service-account / API key
+  cpu:                          # query one datasource
+    connector: grafana
+    url: https://grafana.example.com
+    options:
+      datasource: Prometheus    # name or uid (from the datasources table)
+      query: 'rate(node_cpu_seconds_total[5m])'
+      from: now-6h              # Grafana relative or epoch-ms; default now-1h
+      token: ${GRAFANA_TOKEN}
+```
+
+```sql
+SELECT name, type, uid FROM grafana_ds ORDER BY name;   -- the TOC
+SELECT * FROM cpu;                                       -- proxied PromQL
+```
+
 ### Azure Monitor, Resource Graph & Cost
 
 A family of Azure connectors, all authenticating with `DefaultAzureCredential`
@@ -878,7 +922,7 @@ internal/connector/connectors/
   files   jsonc csvc yamlc excelc parquetc logc claudelogsc
   sql     sqlc                       (sqlite/postgres/mysql/sqlserver)
   api     httpc linearc trelloc azdevopsc cwlogsc cwmetricsc dynamodbc
-          aztablesc athenac awsconfigc awscostc promc honeycombc
+          aztablesc athenac awsconfigc awscostc promc honeycombc grafanac
           azrgraphc azmetricsc azlogsc azcostc
   plugin  pluginc                    (external-process connectors; sdk/ + examples/plugins/)
   mem     memc                       (backs materialized views)

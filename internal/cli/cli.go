@@ -28,6 +28,7 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/cwmetricsc"
 	"github.com/april/turntable/internal/connector/connectors/dynamodbc"
 	"github.com/april/turntable/internal/connector/connectors/excelc"
+	"github.com/april/turntable/internal/connector/connectors/grafanac"
 	"github.com/april/turntable/internal/connector/connectors/honeycombc"
 	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
@@ -124,6 +125,7 @@ func NewApp() *App {
 	_ = reg.RegisterConnector(claudelogsc.New())
 	_ = reg.RegisterConnector(honeycombc.New())
 	_ = reg.RegisterConnector(promc.New())
+	_ = reg.RegisterConnector(grafanac.New())
 	mem := memc.New()
 	_ = reg.RegisterConnector(mem) // also serves "mem:<view>" qualified refs
 	return &App{

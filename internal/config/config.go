@@ -156,6 +156,7 @@ var sensitiveOptionFields = map[string][]string{
 	"azuretables": {"connection_string"},
 	"honeycomb":   {"api_key", "management_key"},
 	"prom":        {"bearer"},
+	"grafana":     {"token", "api_key"},
 }
 
 // IsSensitive reports whether a field of src (by its form/option key) holds a

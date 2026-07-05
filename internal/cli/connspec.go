@@ -144,6 +144,21 @@ var connectorSpecs = []ConnectorSpec{
 		Note: "rows are (ts, one column per label, value) — one row per series sample. Reduce at the source with PromQL (rate, sum by (…)).",
 	},
 	{
+		Name: "grafana", Label: "Grafana (datasource proxy)",
+		Fields: []FieldSpec{
+			{Key: "url", Label: "Grafana URL", Required: true, Placeholder: "https://grafana.example.com"},
+			{Key: "token", Label: "API token", Sensitive: true, Placeholder: "${GRAFANA_TOKEN}", Help: "service-account / API key -> Authorization: Bearer"},
+			{Key: "kind", Label: "Mode", Type: "select", Options: []string{"query", "datasources"},
+				Help: "datasources = list what's available; query = run a native query through a datasource"},
+			{Key: "datasource", Label: "Datasource", Placeholder: "Prometheus (name or uid)", Help: "query mode: the datasource to run against"},
+			{Key: "query", Label: "Query", Placeholder: "up  (PromQL / rawSql / native query text)", Help: "expr / raw_sql are type-specific aliases"},
+			{Key: "format", Label: "SQL format", Type: "select", Options: []string{"table", "time_series"}, Help: "SQL datasources only"},
+			{Key: "from", Label: "From", Placeholder: "now-1h", Help: "Grafana relative or epoch-ms"},
+			{Key: "to", Label: "To", Placeholder: "now"},
+		},
+		Note: "Proxies queries through Grafana's /api/ds/query. List datasources with kind=datasources; query one with datasource=<name> plus a native query. Schema comes back exact from Grafana's typed dataframes.",
+	},
+	{
 		Name: "azmetrics", Label: "Azure Monitor Metrics",
 		Fields: []FieldSpec{
 			{Key: "resource", Label: "Resource ID", Placeholder: "/subscriptions/…/managedClusters/aks1", Help: "one resource (or use Resources for a batch)"},
