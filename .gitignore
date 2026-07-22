@@ -7,6 +7,9 @@ examples/plugins/*/bin/
 turntable.local.yaml
 /turntable.yaml
 /data/
+# secrets: config sources reference ${ENV_VAR}s, and cli reads a .env at startup
+.env
+.env.*
 # .turntable/ is the per-project runtime dir (web-UI uploads under data/, plus
 # dashboard definitions). In turntable's own repo it holds only local dev/test
 # artifacts, so it's ignored wholesale — shareable example dashboards belong
