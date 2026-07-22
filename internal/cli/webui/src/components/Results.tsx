@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { exportParquet, type Cell, type QueryResult } from "../api";
 import type { ViewConfig } from "../view";
 import { Modal } from "./Modal";
@@ -56,6 +56,19 @@ export function Results({
   const [expand, setExpand] = useState<Cell | null>(null);
   const [copied, setCopied] = useState("");
   const [pinOpen, setPinOpen] = useState(false);
+  // Fullscreen is a transient maximise of the results pane (a fixed overlay, not
+  // the native Fullscreen API — more predictable with the embedded canvas/chart).
+  const [full, setFull] = useState(false);
+
+  // Escape exits fullscreen. Registered only while maximised.
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFull(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [full]);
 
   const switchMode = (m: "table" | "chart" | "pivot") => {
     setMode(m);
@@ -164,7 +177,7 @@ export function Results({
   };
 
   return (
-    <div className="results">
+    <div className={full ? "results fullscreen" : "results"}>
       {result.truncated && (
         <div className="banner note">
           results truncated to {result.count} rows (raise with --max-rows)
@@ -232,6 +245,13 @@ export function Results({
             onClick={() => exportAs("tsv")}
           >
             Copy
+          </button>
+          <button
+            className={"ghost sm" + (full ? " on" : "")}
+            title={full ? "exit fullscreen (Esc)" : "fullscreen the results"}
+            onClick={() => setFull((f) => !f)}
+          >
+            {full ? "⤡ Exit" : "⤢ Full"}
           </button>
         </div>
         {copied && <span className="copied">{copied}</span>}

@@ -18,6 +18,7 @@ export type ChartType =
   | "calendar"
   | "pie"
   | "graph"
+  | "graph3d"
   | "tree";
 
 export interface ChartViewConfig {
@@ -31,6 +32,8 @@ export interface ChartViewConfig {
   thresholds?: number[]; // horizontal reference lines (alarm levels etc.)
   bandLo?: string; // envelope band: lower/upper bound columns (e.g. p10/p90),
   bandHi?: string; // rendered as a translucent fill behind the series
+  rowDetail?: boolean; // hover tooltip shows the whole source row (default on,
+  // and only where a mark maps 1:1 to a row — raw points, graph nodes)
 
   // graph/tree settings
   node?: string;

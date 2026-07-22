@@ -32,6 +32,7 @@ import ChartDataLabels from "chartjs-plugin-datalabels";
 import zoomPlugin from "chartjs-plugin-zoom";
 import annotationPlugin from "chartjs-plugin-annotation";
 import { Bar, Line, Scatter, Pie, Bubble, Chart as ReactChart } from "react-chartjs-2";
+import { Graph3D } from "./Graph3D";
 import type { Cell, Column } from "../api";
 import type { ChartType, ChartViewConfig } from "../view";
 import { downloadCanvasPNG } from "../export";
@@ -47,6 +48,7 @@ import {
   numOrNull,
   numericColumns,
   pivot,
+  rowLines,
 } from "../pivot";
 
 ChartJS.register(
@@ -105,6 +107,7 @@ const TYPES: ChartType[] = [
   "calendar",
   "pie",
   "graph",
+  "graph3d",
   "tree",
 ];
 const NODE_CAP = 300; // nodes plotted in a graph/tree before capping
@@ -211,6 +214,9 @@ export function Chart({
   // series. -1 = off.
   const [bandLoIdx, setBandLoIdx] = useState(() => byName(config?.bandLo, -1));
   const [bandHiIdx, setBandHiIdx] = useState(() => byName(config?.bandHi, -1));
+  // Hover tooltips append the whole source row when the hovered mark *is* one
+  // row (raw points, graph/tree nodes) — see rowTip below.
+  const [rowDetail, setRowDetail] = useState(() => config?.rowDetail !== false);
   const [seriesBy, setSeriesBy] = useState(() => byName(config?.seriesBy, -1)); // -1 = none (no breakdown)
   const [sizeIdx, setSizeIdx] = useState(() => byName(config?.size, -1)); // bubble/node size measure (-1 = constant)
   const [nodeIdx, setNodeIdx] = useState(() => byName(config?.node, 0)); // graph: the node column
@@ -267,6 +273,7 @@ export function Chart({
       thresholds,
       bandLo: colName(bandLoIdx),
       bandHi: colName(bandHiIdx),
+      rowDetail,
       node: colName(nodeIdx),
       link: colName(linkIdx),
       label: colName(labelIdx),
@@ -285,6 +292,7 @@ export function Chart({
     thresholds,
     bandLoIdx,
     bandHiIdx,
+    rowDetail,
     nodeIdx,
     linkIdx,
     labelIdx,
@@ -304,7 +312,7 @@ export function Chart({
     if (focusNode !== null) setFocusNode(null);
   }
 
-  const isGraph = type === "graph" || type === "tree";
+  const isGraph = type === "graph" || type === "tree" || type === "graph3d";
 
   // Resolve selections defensively against the current columns, so switching
   // queries never references a stale index.
@@ -503,26 +511,53 @@ export function Chart({
               ))}
             </select>
           </label>
+          <button
+            className={"ghost sm" + (rowDetail ? " on" : "")}
+            title="show the node's source row in the hover tooltip"
+            onClick={() => setRowDetail((v) => !v)}
+          >
+            row
+          </button>
           <button className="ghost sm chart-png" title="download chart as PNG" onClick={exportPNG}>
             PNG
           </button>
         </div>
-        <GraphChart
-          canvasRef={canvasRef}
-          rows={rows}
-          columns={columns}
-          numeric={numeric}
-          type={type}
-          graphSource={graphSource}
-          levels={levels}
-          nodeCol={nodeCol}
-          linkCol={linkCol}
-          labelCol={labelCol}
-          sizeCol={gSizeCol}
-          colorCol={colorCol}
-          focusNode={focusNode}
-          onFocus={setFocusNode}
-        />
+        {type === "graph3d" ? (
+          <Graph3D
+            canvasRef={canvasRef}
+            rows={rows}
+            columns={columns}
+            numeric={numeric}
+            graphSource={graphSource}
+            levels={levels}
+            nodeCol={nodeCol}
+            linkCol={linkCol}
+            labelCol={labelCol}
+            sizeCol={gSizeCol}
+            colorCol={colorCol}
+            rowDetail={rowDetail}
+            focusNode={focusNode}
+            onFocus={setFocusNode}
+          />
+        ) : (
+          <GraphChart
+            canvasRef={canvasRef}
+            rows={rows}
+            columns={columns}
+            numeric={numeric}
+            type={type}
+            graphSource={graphSource}
+            levels={levels}
+            nodeCol={nodeCol}
+            linkCol={linkCol}
+            labelCol={labelCol}
+            sizeCol={gSizeCol}
+            colorCol={colorCol}
+            rowDetail={rowDetail}
+            focusNode={focusNode}
+            onFocus={setFocusNode}
+          />
+        )}
       </div>
     );
   }
@@ -608,19 +643,22 @@ export function Chart({
   // decimation plugin (LTTB) thins dense series for display — so ALL rows are
   // plotted, not just the first RAW_CAP. Bails to categorical labels when a
   // value doesn't parse as a time.
-  let timeSers: { label: string; data: { x: number; y: number }[] }[] | null = null;
-  let bandTime: { lo: { x: number; y: number }[]; hi: { x: number; y: number }[] } | null = null;
+  type TimePt = { x: number; y: number; $r?: number };
+  let timeSers: { label: string; data: TimePt[] }[] | null = null;
+  let bandTime: { lo: TimePt[]; hi: TimePt[] } | null = null;
   const timePts = (ms: number[], vals: (number | null)[]) =>
     ms
       .map((m, i) => ({ x: m, y: vals[i] }))
-      .filter((p): p is { x: number; y: number } => p.y !== null)
+      .filter((p): p is TimePt => p.y !== null)
       .sort((a, b) => a.x - b.x);
+  // Raw (one point per row) — each point keeps its row index. LTTB decimation
+  // selects existing point objects, so $r survives the thinning.
   const rawTimePts = (idx: number) => {
-    const pts: { x: number; y: number }[] = [];
-    for (const r of rows) {
-      const m = timeMs(r[x]);
-      const yv = numOrNull(r[idx]);
-      if (m !== null && yv !== null) pts.push({ x: m, y: yv });
+    const pts: TimePt[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const m = timeMs(rows[i][x]);
+      const yv = numOrNull(rows[i][idx]);
+      if (m !== null && yv !== null) pts.push({ x: m, y: yv, $r: i });
     }
     pts.sort((a, b) => a.x - b.x);
     return pts;
@@ -679,6 +717,37 @@ export function Chart({
       : {};
   const BAND_FILL = "rgba(138,147,167,0.16)";
   const BAND_EDGE = "rgba(138,147,167,0.35)";
+
+  // Row detail on hover: when the hovered mark maps 1:1 to a source row, append
+  // that whole record to the tooltip. Two ways to get back to the row — a point
+  // datum carries its index ($r, attached by the scatter/bubble/time builders),
+  // or, for the label-indexed cartesian charts in raw mode, the datum position
+  // IS the rawRows position. Aggregated/pivoted/binned marks cover many rows, so
+  // there is no record to show and the tooltip stays as it was.
+  const rawByIndex = !grouped && !pivoted && !heat;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rowIndexOf = (item: any): number | null => {
+    const r = item?.raw?.$r;
+    if (typeof r === "number") return r;
+    if (rawByIndex && typeof item?.dataIndex === "number") return item.dataIndex;
+    return null;
+  };
+  const rowTipOpts = rowDetail
+    ? {
+        tooltip: {
+          callbacks: {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            afterBody: (items: any[]) => {
+              const i = items.length ? rowIndexOf(items[0]) : null;
+              return i === null || !rows[i] ? [] : ["", ...rowLines(rows[i], columns)];
+            },
+          },
+        },
+      }
+    : {};
+  // Whether the current chart can even show a row (drives the toggle's presence):
+  // heatmap and calendar cells are bins of rows, never one record.
+  const rowTipPossible = rawByIndex && !isCalendar && !isHeatmap;
 
   const showLegend = sers.length > 1 || type === "pie";
   const baseOptions: ChartOptions<"bar"> = {
@@ -757,7 +826,7 @@ export function Chart({
     const pieOptions: ChartOptions<"pie"> = {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { position: "right", labels: { boxWidth: 12 } } },
+      plugins: { legend: { position: "right", labels: { boxWidth: 12 } }, ...rowTipOpts },
     };
     chart = <Pie data={pieData} options={pieOptions} />;
   } else if (isScatter) {
@@ -766,9 +835,12 @@ export function Chart({
     const scatterData = {
       datasets: series.map((idx, k) => ({
         label: `${columns[idx]?.name} × ${columns[x]?.name}`,
+        // $r carries the source row index through to the tooltip (see rowTipOpts).
         data: rawRows
-          .map((r) => ({ x: px(r), y: numOrNull(r[idx]) }))
-          .filter((p): p is { x: number; y: number } => p.x !== null && p.y !== null),
+          .map((r, i) => ({ x: px(r), y: numOrNull(r[idx]), $r: i }))
+          .filter(
+            (p): p is { x: number; y: number; $r: number } => p.x !== null && p.y !== null,
+          ),
         backgroundColor: PALETTE[k % PALETTE.length],
       })),
     };
@@ -782,7 +854,7 @@ export function Chart({
         },
         y: { grid: { color: GRID } },
       },
-      plugins: { ...baseOptions.plugins, ...annotationOpts },
+      plugins: { ...baseOptions.plugins, ...annotationOpts, ...rowTipOpts },
     } as ChartOptions<"scatter">;
     chart = <Scatter data={scatterData} options={opts} />;
   } else if (isBubble) {
@@ -793,8 +865,12 @@ export function Chart({
         x: xIsTime ? timeMs(r[x]) : numOrNull(r[x]),
         y: numOrNull(r[yIdx]),
         r: sizes[i],
+        $r: i, // source row index, for the hover detail
       }))
-      .filter((p): p is { x: number; y: number; r: number } => p.x !== null && p.y !== null);
+      .filter(
+        (p): p is { x: number; y: number; r: number; $r: number } =>
+          p.x !== null && p.y !== null,
+      );
     const bubbleData = {
       datasets: [
         {
@@ -821,7 +897,7 @@ export function Chart({
           title: { display: true, text: columns[yIdx]?.name },
         },
       },
-      plugins: { ...baseOptions.plugins, ...annotationOpts },
+      plugins: { ...baseOptions.plugins, ...annotationOpts, ...rowTipOpts },
     } as ChartOptions<"bubble">;
     chart = <Bubble data={bubbleData} options={opts} />;
   } else if (isHeatmap) {
@@ -1021,6 +1097,7 @@ export function Chart({
         // plotting every row stays cheap even for very large results.
         decimation: { enabled: true, algorithm: "lttb", threshold: 1000 },
         ...annotationOpts,
+        ...rowTipOpts,
       },
     } as ChartOptions<"line">;
     chart = <Line data={timeData} options={opts} />;
@@ -1053,7 +1130,7 @@ export function Chart({
     const opts = {
       ...baseOptions,
       scales: { ...baseOptions.scales, ...y2Scale },
-      plugins: { ...baseOptions.plugins, ...annotationOpts },
+      plugins: { ...baseOptions.plugins, ...annotationOpts, ...rowTipOpts },
     };
     chart = isLine ? (
       <Line data={chartData} options={opts as ChartOptions<"line">} />
@@ -1208,6 +1285,15 @@ export function Chart({
             />
           </label>
         )}
+        {rowTipPossible && (
+          <button
+            className={"ghost sm" + (rowDetail ? " on" : "")}
+            title="show the hovered point's source row in the tooltip"
+            onClick={() => setRowDetail((v) => !v)}
+          >
+            row
+          </button>
+        )}
         <button
           className="ghost sm chart-png"
           title="download chart as PNG"
@@ -1267,6 +1353,7 @@ const GraphChart = memo(function GraphChart({
   labelCol,
   sizeCol,
   colorCol,
+  rowDetail,
   focusNode,
   onFocus,
 }: {
@@ -1282,6 +1369,7 @@ const GraphChart = memo(function GraphChart({
   labelCol: number;
   sizeCol: number;
   colorCol: number;
+  rowDetail: boolean;
   focusNode: string | null;
   onFocus: (key: string | null) => void;
 }) {
@@ -1398,6 +1486,14 @@ const GraphChart = memo(function GraphChart({
             if (colorCol >= 0 && n.color != null) s += ` · ${colorName}=${n.color}`;
             if (n.size !== null) s += ` (${n.size})`;
             return s;
+          },
+          // The source row behind the node. Absent for the synthetic root, an
+          // interior hierarchy prefix, and a node that only appears as a link
+          // target — none of those is a single record.
+          afterBody: (items: { dataIndex: number }[]) => {
+            if (!rowDetail || !items.length) return [];
+            const ri = g.nodes[items[0].dataIndex]?.row;
+            return ri == null || !rows[ri] ? [] : ["", ...rowLines(rows[ri], columns)];
           },
         },
       },

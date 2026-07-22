@@ -41,6 +41,27 @@ export function reduceCell(nums: number[], fn: Agg): number | null {
   return applyAgg(nums, fn);
 }
 
+// rowLines renders one source row as "column: value" lines — the actual record
+// behind a hovered point/node. Capped and truncated on purpose: a tooltip, not a
+// table (the table view is where a whole wide row belongs).
+export function rowLines(
+  row: Cell[] | undefined,
+  columns: Column[],
+  cap = 12,
+  width = 60,
+): string[] {
+  if (!row) return [];
+  const shown = Math.min(columns.length, cap);
+  const out: string[] = [];
+  for (let i = 0; i < shown; i++) {
+    let v = labelOf(row[i]);
+    if (v.length > width) v = v.slice(0, width - 1) + "…";
+    out.push(`${columns[i].name}: ${v}`);
+  }
+  if (columns.length > shown) out.push(`… +${columns.length - shown} more columns`);
+  return out;
+}
+
 // numericColumns returns the columns that contain at least one numeric value.
 export function numericColumns(columns: Column[], rows: Cell[][]) {
   return columns
@@ -107,6 +128,7 @@ export interface GraphNode {
   label: string;
   size: number | null; // optional measure for node sizing
   color: Cell; // optional raw value for node colouring (null when unset/absent)
+  row: number | null; // index of the source row behind this node, for hover detail
 }
 
 export interface Graph {
@@ -150,7 +172,7 @@ export function nodesEdges(
     if (i === undefined) {
       i = nodes.length;
       index.set(key, i);
-      nodes.push({ key, label: key, size: null, color: null });
+      nodes.push({ key, label: key, size: null, color: null, row: null });
     }
     return i;
   };
@@ -159,7 +181,8 @@ export function nodesEdges(
   const edges: { source: number; target: number }[] = [];
   const hasParent = new Set<number>();
 
-  for (const r of rows) {
+  for (let ri = 0; ri < rows.length; ri++) {
+    const r = rows[ri];
     // The cap bounds an unfocused graph; when focusing we build everything and
     // then extract the (small) subtree below.
     if (!focused && index.size >= cap && index.get(labelOf(r[nodeIdx])) === undefined) continue;
@@ -168,6 +191,10 @@ export function nodesEdges(
     if (labelIdx >= 0) nodes[ni].label = labelOf(r[labelIdx]);
     if (sizeIdx >= 0) nodes[ni].size = numOrNull(r[sizeIdx]);
     if (colorIdx >= 0) nodes[ni].color = r[colorIdx] ?? null;
+    // The row that *defines* this node (last wins, like label/size/colour). A
+    // node that only ever appears as a link target keeps row=null — there is no
+    // record behind it.
+    nodes[ni].row = ri;
 
     const linkCell = r[linkIdx];
     if (linkCell !== null && linkCell !== undefined && linkCell !== "") {
@@ -218,7 +245,7 @@ export function nodesEdges(
   let rootIndex = -1;
   if (mode === "tree") {
     rootIndex = nodes.length;
-    nodes.push({ key: "", label: "", size: null, color: null });
+    nodes.push({ key: "", label: "", size: null, color: null, row: null });
     for (let i = 0; i < rootIndex; i++) {
       if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
     }
@@ -273,7 +300,7 @@ function finalizeGraph(
   let rootIndex = -1;
   if (mode === "tree") {
     rootIndex = nodes.length;
-    nodes.push({ key: "", label: "", size: null, color: null });
+    nodes.push({ key: "", label: "", size: null, color: null, row: null });
     for (let i = 0; i < rootIndex; i++) {
       if (!hasParent.has(i)) edges.push({ source: rootIndex, target: i });
     }
@@ -312,12 +339,13 @@ export function nodesEdgesFromPath(
     if (i === undefined) {
       i = nodes.length;
       index.set(key, i);
-      nodes.push({ key, label, size: null, color: null });
+      nodes.push({ key, label, size: null, color: null, row: null });
     }
     return i;
   };
 
-  for (const r of rows) {
+  for (let ri = 0; ri < rows.length; ri++) {
+    const r = rows[ri];
     const segs: string[] = [];
     for (const c of levelIdxs) {
       const v = r[c];
@@ -336,6 +364,9 @@ export function nodesEdgesFromPath(
       const ni = ensure(prefix, segs[d]);
       if (rowSize !== null) nodes[ni].size = (nodes[ni].size ?? 0) + rowSize;
       if (colorIdx >= 0 && d === segs.length - 1) nodes[ni].color = r[colorIdx] ?? null;
+      // Only a leaf is one row; an interior prefix aggregates many, so it keeps
+      // row=null and shows no record on hover.
+      if (d === segs.length - 1) nodes[ni].row = ri;
       if (prevIdx >= 0 && prevIdx !== ni) {
         const ek = prevIdx + ">" + ni;
         if (!edgeSet.has(ek)) {

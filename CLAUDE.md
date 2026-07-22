@@ -559,7 +559,7 @@ column/function autocomplete), query history + saved queries (also localStorage)
 and a results pane with three views: a table (client-side sort/filter, cell
 copy/JSON-expand, CSV/JSON/NDJSON export via `export.ts`), a Chart.js chart
 (`Chart.tsx`: bar/line/area/scatter/bubble/heatmap/pie plus node-link
-graph/tree with PNG export, X column + multi-series Y toggles + a series-by
+graph/tree/**graph3d** with PNG export, X column + multi-series Y toggles + a series-by
 breakdown + client-side group-by-X aggregation count/sum/avg/min/max; a
 **time-typed X** on line/area gets a real time axis — points become (epoch ms,
 y) via `chartjs-adapter-date-fns`, uneven sampling/gaps render truthfully, and
@@ -568,7 +568,13 @@ accept a time X too; chart extras: a Y chip cycles left axis → **right axis**
 (dual-axis `y2`, mixed-unit series) → off, a **threshold** input draws
 horizontal reference lines via `chartjs-plugin-annotation`, and a **band**
 lo/hi column pair renders a translucent envelope fill (e.g. P10–P90) behind
-line/area series — all persisted in the ViewConfig so they carry into
+line/area series, and a **row** toggle (`ChartViewConfig.rowDetail`, default on)
+appends the hovered mark's whole source record to the tooltip (`rowLines` in
+`pivot.ts` — capped/truncated). Row detail only appears where a mark IS one row:
+point charts and raw (`agg: none`) cartesian/pie datums carry their row index as
+a `$r` field on the datum (LTTB decimation preserves it) or resolve by position,
+while aggregated/pivoted/heatmap/calendar marks cover many rows and show
+nothing — all persisted in the ViewConfig so they carry into
 dashboard panels), and a
 pivot table (`PivotTable.tsx` — row×column cross-tab of one measure, optional
 cell heatmap colouring). The chart heatmap uses the `chartjs-chart-matrix`
@@ -576,7 +582,10 @@ plugin; the **graph/tree** types use `chartjs-chart-graph` (force-directed +
 hierarchical layouts) + `chartjs-plugin-datalabels` for node labels — they map an
 edge-list/parent-pointer result (a *node* column + a *parent/links-to* column,
 e.g. `pid`/`ppid`) to nodes+edges via `nodesEdges` in `pivot.ts`, with a
-synthetic root joining a forest into one tree and a node cap. Nodes can be
+synthetic root joining a forest into one tree and a node cap. Each `GraphNode`
+records the source row that defined it (`row`, null for the synthetic root, an
+interior hierarchy prefix, and a node seen only as a link target) so hover can
+show the record behind it. Nodes can be
 coloured by a column (categorical palette / numeric gradient, with a legend) and
 sized by a measure. The graph is interactive: scroll/drag to zoom+pan
 (`chartjs-plugin-zoom`, + a "reset view" button) and **click a node to drill
@@ -589,8 +598,31 @@ react-chartjs-2's per-render update to run, and reused option objects corrupt th
 controller) yet only re-renders on real input changes, so unrelated re-renders
 (typing in the editor) never disturb or blank it. NB:
 `chartjs-chart-graph` 4.3.5 needs chart.js pinned to ~4.4 (it breaks on 4.5's
-option-sharing — see the note in `Chart.tsx`). The shared aggregation/pivot
+option-sharing — see the note in `Chart.tsx`). The **graph3d** type is a
+dependency-free 3D renderer (`Graph3D.tsx`) — no three.js/WebGL: it reuses the
+same `nodesEdges`/`nodesEdgesFromPath` Graph model (always mode `graph`) and the
+shared node colouring/legend/sizing extracted to `graphColors.tsx`
+(`computeNodeColors`, `bubbleRadii`, `GraphColorLegend`, `PALETTE` — the 2D
+`GraphChart` still keeps its own inline copies), then runs a small 3D
+Fruchterman–Reingold force layout (all-pairs repulsion + per-edge attraction +
+gravity, cooling) on a plain 2D `<canvas>` with yaw/pitch rotation + perspective
+projection, auto-fit-to-view, painter's-order draw, and depth-dimmed edges. Its
+rAF loop lives in a mount-only effect reading a mutable state ref, so unrelated
+re-renders only patch colours/labels (never restart the layout); the layout
+re-seeds only when a structural signature (node/link/level/colour/size selection
+or focus) changes. Interaction: drag to rotate, scroll to zoom, click a node to
+focus its subtree (same focus model), plus an auto-rotate toggle and reset-view.
+Hover detail is drawn *on the canvas* (there is no DOM element per node): the
+draw loop hit-tests the pointer against that frame's projection (`hitTest`,
+shared with the click handler), rings the node and paints a tooltip panel with
+its label and — when the row toggle is on — `rowLines` of the source row
+(`GraphNode.row`, cached per hovered node).
+The shared aggregation/pivot
 primitives live in `pivot.ts` (used by both the chart and the pivot table).
+The results pane can be **maximised** to a fixed full-viewport overlay via a
+`⤢ Full` toggle in the result bar (`Results.tsx`, `.results.fullscreen` in
+`styles.css`; Esc exits) — the responsive chart/graph canvases grow to fill it;
+the state is transient (not persisted).
 The frontend is a **React + Vite + TypeScript** app under
 `internal/cli/webui/` (source) built to `webui/dist/` (committed), embedded via
 `//go:embed all:webui/dist` and served with `http.FileServerFS`. `go build`

@@ -188,8 +188,9 @@ name), query history and saved queries, and an **Explain** button. The results
 pane has three views: a **table** (client-side sort/filter, cell copy/expand,
 CSV/JSON/NDJSON export plus **Parquet** — encoded server-side), a **chart**
 (Chart.js — bar/line/area/scatter/bubble/
-heatmap/pie plus node-link graph & tree, with time axes and dual-axis support),
-and a **pivot** table. Results and views can be **pinned** into **dashboards** —
+heatmap/pie plus node-link graph & tree, and a dependency-free **3D graph**
+you can rotate/zoom, with time axes and dual-axis support),
+and a **pivot** table. Any view can be **maximised** to fullscreen (⤢). Results and views can be **pinned** into **dashboards** —
 named panel lists (markdown/table/pivot/chart/stat) stored as YAML, with
 toolbar variables and optional auto-refresh; a dashboard can also be rendered to
 a self-contained HTML report headlessly (`turntable dashboard render <slug>`).

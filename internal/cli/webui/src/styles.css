@@ -257,6 +257,15 @@ kbd {
   padding: 0 16px 16px;
   min-height: 0;
 }
+/* Fullscreen: maximise the results pane as a fixed overlay over the whole app.
+   The chart/graph canvases are responsive and grow to fill the extra space. */
+.results.fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--bg);
+  padding: 10px 16px 16px;
+}
 /* The table scrolls inside its own wrapper so the result-bar stays put and the
    chart view can flex to fill the remaining height. */
 .table-wrap {
