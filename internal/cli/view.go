@@ -42,7 +42,7 @@ func (a *App) createViewCore(ctx context.Context, s *sql.CreateViewStmt) (string
 		return "", fmt.Errorf("view %q already exists (use CREATE OR REPLACE VIEW)", s.Name)
 	}
 	// Bind the definition now so errors surface at create time, like PostgreSQL.
-	if _, err := plan.Build(ctx, s.Query, a.Reg, plan.IfStrict(a.strict)...); err != nil {
+	if _, err := plan.Build(ctx, s.Query, a.Reg, a.planOpts()...); err != nil {
 		return "", fmt.Errorf("plan: %w", err)
 	}
 	if err := a.Reg.RegisterView(s.Name, s.Query, s.OrReplace); err != nil {
@@ -74,7 +74,7 @@ func (a *App) viewSchemaFor(ctx context.Context, name string) (engine.Schema, bo
 	if !ok {
 		return engine.Schema{}, false, nil
 	}
-	p, err := plan.Build(ctx, q, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, q, a.Reg, a.planOpts()...)
 	if err != nil {
 		return engine.Schema{}, true, fmt.Errorf("view %q: %w", name, err)
 	}

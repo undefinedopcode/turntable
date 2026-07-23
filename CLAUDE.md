@@ -160,7 +160,20 @@ A query moves through fixed stages, one package each:
    aligned to a `Schema`. `ops.go` = operators, `eval.go` = expression
    evaluation, `funcs.go` = the scalar + aggregate **function registry**
    (`FuncRegistry`), `value.go`/`types.go` = the `Value`/`Type`/`Schema`/`Row`
-   model. Joins: in-memory `HashJoinIter` supporting INNER/LEFT/RIGHT/FULL (plus
+   model. **GROUP BY** (`AggregateIter`) folds rows through one streaming
+   accumulator per aggregate (`aggacc.go` — `aggAccumulator`), so it holds
+   O(#groups) state, not the input rows; the holistic aggregates
+   (MEDIAN/PERCENTILE/STDDEV/STRING_AGG/DISTINCT) still retain their argument
+   values. Memory is bounded by `engine.AggConfig` (`aggspill.go`): `MaxGroups`
+   caps groups per in-memory pass (0 = unlimited, the default), and on overflow
+   the iterator either **spills** rows to on-disk partitions keyed by group hash
+   (GRACE-style: every row of a group hashes to one partition, so partitions
+   aggregate independently and a group is never split — correct for holistic
+   aggregates too; each partition becomes a later pass, re-partitioned with a
+   depth-varied seed until it fits) or, when `Spill` is off, **errors cleanly**
+   instead of OOMing. Config threads from CLI `--max-agg-groups`/`--spill`/
+   `--spill-dir` (or config `defaults`) via `plan.WithAggConfig` → the exec
+   context. Joins: in-memory `HashJoinIter` supporting INNER/LEFT/RIGHT/FULL (plus
    planner-only SEMI/ANTI for decorrelated EXISTS). The planner's `splitJoin`
    divides `ON` into `a.x = b.y` equi-conjuncts (each a hash-key pair; multiple
    AND'd equalities → a **composite** bucket key) and a **residual** `sql.Expr`

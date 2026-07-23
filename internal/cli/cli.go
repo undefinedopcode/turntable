@@ -33,11 +33,11 @@ import (
 	"github.com/april/turntable/internal/connector/connectors/httpc"
 	"github.com/april/turntable/internal/connector/connectors/jsonc"
 	"github.com/april/turntable/internal/connector/connectors/linearc"
-	"github.com/april/turntable/internal/connector/connectors/promc"
 	"github.com/april/turntable/internal/connector/connectors/logc"
 	"github.com/april/turntable/internal/connector/connectors/memc"
 	"github.com/april/turntable/internal/connector/connectors/parquetc"
 	"github.com/april/turntable/internal/connector/connectors/pluginc"
+	"github.com/april/turntable/internal/connector/connectors/promc"
 	"github.com/april/turntable/internal/connector/connectors/sqlc"
 	"github.com/april/turntable/internal/connector/connectors/trelloc"
 	"github.com/april/turntable/internal/connector/connectors/yamlc"
@@ -64,6 +64,10 @@ type App struct {
 
 	// strict makes type-coercion failures hard errors instead of NULL.
 	strict bool
+
+	// aggConfig bounds GROUP BY memory: a per-pass group budget and optional
+	// disk spill. Zero value = unlimited, in-memory aggregation.
+	aggConfig engine.AggConfig
 
 	// uploadDir is the persistent directory (.turntable/data) holding files
 	// uploaded through the web UI; created in serve() and kept across restarts so
@@ -129,11 +133,11 @@ func NewApp() *App {
 	mem := memc.New()
 	_ = reg.RegisterConnector(mem) // also serves "mem:<view>" qualified refs
 	return &App{
-		Out:      os.Stdout,
-		Err:      os.Stderr,
-		Reg:      reg,
-		Output:   render.FormatTable,
-		Funcs:    engine.NewFuncRegistry(),
+		Out:        os.Stdout,
+		Err:        os.Stderr,
+		Reg:        reg,
+		Output:     render.FormatTable,
+		Funcs:      engine.NewFuncRegistry(),
 		mem:        mem,
 		matViews:   map[string]*matView{},
 		matViewDir: matViewDirPath,
@@ -582,16 +586,19 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("turntable", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	var (
-		configPath string
-		file       string
-		output     string
-		repl       bool
-		explain    bool
-		quiet      bool
-		maxRows    int
-		strict     bool
-		serve      bool
-		addr       string
+		configPath   string
+		file         string
+		output       string
+		repl         bool
+		explain      bool
+		quiet        bool
+		maxRows      int
+		strict       bool
+		serve        bool
+		addr         string
+		maxAggGroups int
+		spill        bool
+		spillDir     string
 	)
 	fs.StringVar(&configPath, "config", "", "path to turntable.yaml")
 	fs.StringVar(&configPath, "c", "", "short for --config")
@@ -605,6 +612,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	fs.BoolVar(&strict, "strict", false, "hard errors for type coercion failures")
 	fs.BoolVar(&serve, "serve", false, "serve the web query UI instead of running a query")
 	fs.StringVar(&addr, "addr", "localhost:8080", "address for --serve (host:port)")
+	fs.IntVar(&maxAggGroups, "max-agg-groups", 0, "cap in-memory GROUP BY groups per pass (0 = unlimited)")
+	fs.BoolVar(&spill, "spill", false, "spill GROUP BY overflow to disk instead of erroring when --max-agg-groups is exceeded")
+	fs.StringVar(&spillDir, "spill-dir", "", "directory for GROUP BY spill files (default: OS temp)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -631,10 +641,21 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	}
 	a.registerSources(cfg)
 	a.loadPersistedMatViews() // restore PERSISTENT materialized views from disk
-	defer a.Close() // tear down any plugin subprocesses on exit
+	defer a.Close()           // tear down any plugin subprocesses on exit
 	if cfg.Defaults.Output != "" && output == "" {
 		a.Output = render.Format(cfg.Defaults.Output)
 	}
+	// GROUP BY memory budget / spill: flags win, else config defaults.
+	if maxAggGroups == 0 {
+		maxAggGroups = cfg.Defaults.MaxAggGroups
+	}
+	if !spill {
+		spill = cfg.Defaults.Spill
+	}
+	if spillDir == "" {
+		spillDir = cfg.Defaults.SpillDir
+	}
+	a.aggConfig = engine.AggConfig{MaxGroups: maxAggGroups, Spill: spill, SpillDir: spillDir}
 
 	if serve {
 		return a.serve(ctx, addr)
@@ -681,6 +702,16 @@ func (a *App) runQuery(ctx context.Context, query string, explain, quiet bool) i
 	return a.runQueryInto(ctx, query, explain, quiet, a.Out, a.Err)
 }
 
+// planOpts returns the BuildOptions common to every plan built by this App:
+// strict-mode coercion and the GROUP BY memory budget / spill configuration.
+func (a *App) planOpts() []plan.BuildOption {
+	opts := plan.IfStrict(a.strict)
+	if a.aggConfig != (engine.AggConfig{}) {
+		opts = append(opts, plan.WithAggConfig(a.aggConfig))
+	}
+	return opts
+}
+
 // runQueryInto parses, plans, and executes one query, writing results to out
 // and metadata/errors to errw. Splitting the writer out from a.Out lets the
 // REPL route output through readline's managed TTY writers.
@@ -706,7 +737,7 @@ func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet boo
 		return a.dropView(s, explain, errw)
 	}
 
-	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, stmt, a.Reg, a.planOpts()...)
 	if err != nil {
 		fmt.Fprintf(errw, "plan error: %v\n", err)
 		return 1
@@ -775,6 +806,9 @@ func (a *App) runQueryInto(ctx context.Context, query string, explain, quiet boo
 	if a.maxRows > 0 {
 		cappedIt = engine.NewLimitIter(it, &a.maxRows, 0)
 	}
+	// The streaming render path (unlike Materialize) does not close the iterator
+	// itself, so close it here to release any GROUP BY spill files.
+	defer it.Close()
 	n, err := sr.RenderStream(out, schema, cappedIt)
 	if err != nil {
 		fmt.Fprintf(errw, "render error: %v\n", err)

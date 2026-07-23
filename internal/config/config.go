@@ -46,6 +46,12 @@ type Source struct {
 type Defaults struct {
 	Output  string `yaml:"output,omitempty"`
 	MaxRows int    `yaml:"max-rows,omitempty"`
+	// MaxAggGroups caps in-memory GROUP BY groups per pass (0 = unlimited);
+	// Spill sends overflow to disk instead of erroring; SpillDir overrides the
+	// spill location (default: OS temp). See engine.AggConfig.
+	MaxAggGroups int    `yaml:"max-agg-groups,omitempty"`
+	Spill        bool   `yaml:"spill,omitempty"`
+	SpillDir     string `yaml:"spill-dir,omitempty"`
 }
 
 // Load reads a config file from path. If path is empty and no default file

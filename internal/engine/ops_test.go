@@ -250,6 +250,69 @@ func TestAggregateEmptyGlobal(t *testing.T) {
 	}
 }
 
+// TestAggregateIterStreaming exercises the per-group streaming accumulators with
+// groups interleaved in the input and a mix of algebraic (SUM, FIRST, LAST) and
+// holistic (MEDIAN, COUNT DISTINCT) aggregates — a bug that reused or dropped a
+// group's running state, or mis-ordered FIRST/LAST, would surface here.
+func TestAggregateIterStreaming(t *testing.T) {
+	schema := Schema{Columns: []Column{
+		{Name: "grp", Type: TypeString},
+		{Name: "ts", Type: TypeInt},
+		{Name: "v", Type: TypeInt},
+	}}
+	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}
+	mk := func(g string, ts, v int64) Row {
+		return Row{Values: []Value{StringVal(g), IntVal(ts), IntVal(v)}}
+	}
+	// Groups a and b interleaved; ts deliberately out of input order so FIRST/LAST
+	// must compare the ordering column rather than trust arrival order.
+	rows := []Row{
+		mk("a", 3, 10), mk("b", 1, 100), mk("a", 1, 20),
+		mk("b", 2, 200), mk("a", 2, 20), mk("b", 3, 100),
+	}
+	col := func(n string) *sql.ColRef { return &sql.ColRef{Name: n} }
+	aggs := []AggSpec{
+		{Func: "SUM", Arg: col("v"), Name: "sum"},
+		{Func: "COUNT", Arg: col("v"), Name: "ndistinct", Distinct: true},
+		{Func: "MEDIAN", Arg: col("v"), Name: "med"},
+		{Func: "FIRST", Arg: col("v"), Arg2: col("ts"), Name: "first"}, // v at min ts
+		{Func: "LAST", Arg: col("v"), Arg2: col("ts"), Name: "last"},   // v at max ts
+	}
+	outSchema := Schema{Columns: []Column{
+		{Name: "grp", Type: TypeString}, {Name: "sum", Type: TypeFloat},
+		{Name: "ndistinct", Type: TypeInt}, {Name: "med", Type: TypeFloat},
+		{Name: "first", Type: TypeInt}, {Name: "last", Type: TypeInt},
+	}}
+	it := NewAggregateIter(NewSliceIter(rows), []sql.Expr{col("grp")}, aggs, nil, eval, Evaluator{}, outSchema)
+	got, err := Materialize(context.Background(), it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byGrp := map[string]Row{}
+	for _, r := range got {
+		byGrp[r.Values[0].AsString()] = r
+	}
+	// group a: v = {10@3, 20@1, 20@2}; sum 50, distinct {10,20}=2, median 20,
+	//          first (min ts=1) 20, last (max ts=3) 10.
+	// group b: v = {100@1, 200@2, 100@3}; sum 400, distinct {100,200}=2,
+	//          median 100, first (ts=1) 100, last (ts=3) 100.
+	want := map[string][5]Value{
+		"a": {FloatVal(50), IntVal(2), FloatVal(20), IntVal(20), IntVal(10)},
+		"b": {FloatVal(400), IntVal(2), FloatVal(100), IntVal(100), IntVal(100)},
+	}
+	for g, w := range want {
+		r, ok := byGrp[g]
+		if !ok {
+			t.Fatalf("missing group %q", g)
+		}
+		for i, wv := range w {
+			if r.Values[i+1] != wv {
+				t.Errorf("group %q col %d = %v, want %v", g, i+1, r.Values[i+1], wv)
+			}
+		}
+	}
+}
+
 func TestComputeAggExtras(t *testing.T) {
 	schema := Schema{Columns: []Column{{Name: "v", Type: TypeInt}, {Name: "s", Type: TypeString}}}
 	eval := Evaluator{Resolve: SchemaResolver(schema, ""), Funcs: NewFuncRegistry()}

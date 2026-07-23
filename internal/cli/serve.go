@@ -300,7 +300,7 @@ func (a *App) execStmt(ctx context.Context, stmt sql.Statement) (engine.Schema, 
 // execStmtCapped plans and executes a SELECT, returning the schema and up to
 // rowCap rows, plus whether the result was truncated at the cap.
 func (a *App) execStmtCapped(ctx context.Context, stmt sql.Statement, rowCap int) (engine.Schema, []engine.Row, bool, error) {
-	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, stmt, a.Reg, a.planOpts()...)
 	if err != nil {
 		return engine.Schema{}, nil, false, fmt.Errorf("plan error: %w", err)
 	}
@@ -333,7 +333,7 @@ func (a *App) explainQuery(ctx context.Context, query string) (string, error) {
 }
 
 func (a *App) explainStmt(ctx context.Context, stmt sql.Statement) (string, error) {
-	p, err := plan.Build(ctx, stmt, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, stmt, a.Reg, a.planOpts()...)
 	if err != nil {
 		return "", fmt.Errorf("plan error: %w", err)
 	}
