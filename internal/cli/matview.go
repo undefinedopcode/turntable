@@ -189,7 +189,7 @@ func (a *App) dropMatViewCore(s *sql.DropMatViewStmt) (string, error) {
 // schema, leaving the table unpopulated. The stored schema is normalized so the
 // view exposes clean, unqualified column names (like a SQL view).
 func (a *App) materialize(ctx context.Context, query sql.Statement, populate bool) (*memc.Table, error) {
-	p, err := plan.Build(ctx, query, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, query, a.Reg, a.planOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("plan: %w", err)
 	}
@@ -289,7 +289,7 @@ func (a *App) loadPersistedMatViews() {
 // explainStatement builds query and prints its plan tree (shared by the --explain
 // path of CREATE/REFRESH).
 func (a *App) explainStatement(ctx context.Context, query sql.Statement, out, errw io.Writer) int {
-	p, err := plan.Build(ctx, query, a.Reg, plan.IfStrict(a.strict)...)
+	p, err := plan.Build(ctx, query, a.Reg, a.planOpts()...)
 	if err != nil {
 		fmt.Fprintf(errw, "plan error: %v\n", err)
 		return 1

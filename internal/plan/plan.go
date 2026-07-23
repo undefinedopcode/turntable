@@ -27,6 +27,9 @@ type Plan struct {
 	Funcs        *engine.FuncRegistry
 	// Strict makes type-coercion failures hard errors at execution time.
 	Strict bool
+	// Agg bounds GROUP BY memory (group budget + optional disk spill). The zero
+	// value is unlimited, in-memory aggregation.
+	Agg engine.AggConfig
 }
 
 // Node is a node in the logical plan tree.
@@ -451,6 +454,11 @@ type BuildOption func(*Plan)
 // WithStrict enables strict (hard-error) type coercion for the plan.
 func WithStrict() BuildOption {
 	return func(p *Plan) { p.Strict = true }
+}
+
+// WithAggConfig sets the GROUP BY memory budget / spill configuration.
+func WithAggConfig(cfg engine.AggConfig) BuildOption {
+	return func(p *Plan) { p.Agg = cfg }
 }
 
 // IfStrict returns WithStrict() when enabled is true, else nil options. A

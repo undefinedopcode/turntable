@@ -41,6 +41,10 @@ func generateSeries(n *TableFunc) ([]engine.Row, error) {
 //
 // The executor returns the iterator plus the output schema of the root node.
 func Exec(ctx context.Context, p *Plan) (engine.RowIterator, engine.Schema, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = withAggConfig(ctx, p.Agg)
 	it, schema, err := execNode(ctx, p.Root, p.Funcs, p.Strict)
 	if err != nil {
 		return nil, engine.Schema{}, err
@@ -51,7 +55,28 @@ func Exec(ctx context.Context, p *Plan) (engine.RowIterator, engine.Schema, erro
 // ctxKey types values stored on the exec context.
 type ctxKey int
 
-const outerKey ctxKey = iota
+const (
+	outerKey ctxKey = iota
+	aggConfigKey
+)
+
+// withAggConfig binds the aggregation memory budget on the context so the
+// AggregateIter built deep in the plan can read it without threading a parameter
+// through every execNode call.
+func withAggConfig(ctx context.Context, cfg engine.AggConfig) context.Context {
+	return context.WithValue(ctx, aggConfigKey, cfg)
+}
+
+// aggConfigFromCtx returns the bound aggregation config (zero value = unlimited,
+// in-memory — the default for exec paths that never set one).
+func aggConfigFromCtx(ctx context.Context) engine.AggConfig {
+	if ctx != nil {
+		if cfg, ok := ctx.Value(aggConfigKey).(engine.AggConfig); ok {
+			return cfg
+		}
+	}
+	return engine.AggConfig{}
+}
 
 // withOuter binds an enclosing query's current row on the context so that the
 // subquery plan executed under it can resolve correlated OuterRef expressions.
@@ -301,6 +326,7 @@ func execAggregate(ctx context.Context, node *Aggregate, funcs *engine.FuncRegis
 		havingEval = engine.Evaluator{Resolve: engine.SchemaResolver(node.Schema, ""), Funcs: funcs, Strict: strict}
 	}
 	it := engine.NewAggregateIter(child, node.Keys, node.Aggs, node.Having, eval, havingEval, node.Schema)
+	it.SetAggConfig(aggConfigFromCtx(ctx))
 	return it, node.Schema, nil
 }
 

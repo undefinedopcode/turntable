@@ -2,7 +2,7 @@ package engine
 
 import (
 	"fmt"
-	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -14,10 +14,10 @@ import (
 
 // FilterIter applies a predicate to rows from its child.
 type FilterIter struct {
-	child    RowIterator
-	eval     Evaluator
-	pred     sql.Expr
-	closed   bool
+	child  RowIterator
+	eval   Evaluator
+	pred   sql.Expr
+	closed bool
 }
 
 // NewFilterIter returns an iterator that yields child rows where pred is true.
@@ -66,10 +66,10 @@ type ProjectedExpr struct {
 // ProjectIter evaluates the select list against child rows, producing rows
 // conforming to outSchema.
 type ProjectIter struct {
-	child   RowIterator
-	out     []ProjectedExpr
-	eval    Evaluator
-	closed  bool
+	child  RowIterator
+	out    []ProjectedExpr
+	eval   Evaluator
+	closed bool
 }
 
 // NewProjectIter returns an iterator that projects child rows via the given
@@ -201,12 +201,12 @@ func sortRows(rows []Row, terms []sortKey, eval Evaluator) {
 
 // LimitIter applies LIMIT/OFFSET to child rows.
 type LimitIter struct {
-	child  RowIterator
-	limit  *int
-	offset int
+	child   RowIterator
+	limit   *int
+	offset  int
 	skipped int
 	yielded int
-	closed bool
+	closed  bool
 }
 
 // NewLimitIter returns an iterator that skips offset rows then yields up to
@@ -262,7 +262,7 @@ type KeyExtractor func(row Row) Value
 type HashJoinIter struct {
 	left, right         RowIterator
 	leftKeys, rightKeys []KeyExtractor
-	residual            sql.Expr // extra ON conditions, evaluated per candidate pair (nil if none)
+	residual            sql.Expr  // extra ON conditions, evaluated per candidate pair (nil if none)
 	eval                Evaluator // over the combined [left..., right...] schema, for residual
 
 	kind                  sql.JoinKind
@@ -690,29 +690,43 @@ type AggSpec struct {
 }
 
 // AggregateIter groups child rows by the group-key expressions and computes
-// the specified aggregates per group. It materializes all groups in memory
-// (v0.1 assumption: bounded datasets). After grouping, an optional HAVING
+// the specified aggregates per group. Each group holds one streaming
+// accumulator per aggregate (see aggacc.go), folding rows as they arrive rather
+// than buffering them — so memory is O(number of groups) plus, for the holistic
+// aggregates (MEDIAN/PERCENTILE/STDDEV/STRING_AGG/DISTINCT), the retained
+// argument values, never the whole input. After grouping, an optional HAVING
 // predicate (evaluated against the aggregate-output row) filters groups.
+//
+// Aggregation runs as a sequence of passes. The first pass reads the child; if
+// the group budget (AggConfig.MaxGroups) is reached and spilling is enabled,
+// rows for not-yet-seen groups are partitioned to disk (see aggspill.go) and
+// each partition becomes a later pass. Groups already resident in a pass keep
+// aggregating in memory, so no group is ever split across passes and the
+// holistic aggregates still see every value of their group. With the default
+// config (MaxGroups == 0) there is exactly one pass and no spilling.
 //
 // The output row layout is: [group key values..., aggregate values...].
 type AggregateIter struct {
-	child    RowIterator
-	keys     []sql.Expr
-	aggs     []AggSpec
-	having   sql.Expr
-	eval     Evaluator
+	child      RowIterator
+	keys       []sql.Expr
+	aggs       []AggSpec
+	having     sql.Expr
+	eval       Evaluator
 	havingEval Evaluator // resolver over the aggregate output schema
-	outSchema Schema
+	outSchema  Schema
+	cfg        AggConfig
 
-	groups   []*aggGroup
-	gi       int
-	closed   bool
+	childStarted bool                // whether the child pass has begun
+	pending      []*spillPartition   // spilled partitions awaiting their pass
+	spillDirs    map[string]struct{} // temp dirs to remove on Close
+	groups       []*aggGroup         // current pass's groups being emitted
+	gi           int
+	closed       bool
 }
 
 type aggGroup struct {
-	key   string
 	keyVals []Value
-	rows  []Row
+	accs    []aggAccumulator
 }
 
 // NewAggregateIter returns an iterator that groups and aggregates child rows.
@@ -733,80 +747,192 @@ func NewAggregateIter(
 	}
 }
 
+// SetAggConfig applies the memory budget / spill configuration. Call before the
+// first Next; the zero value (unlimited, no spill) is the default.
+func (a *AggregateIter) SetAggConfig(cfg AggConfig) { a.cfg = cfg }
+
 func (a *AggregateIter) Next() (Row, bool, error) {
-	if a.groups == nil {
-		if err := a.collect(); err != nil {
-			return Row{}, false, err
-		}
-	}
-	for a.gi < len(a.groups) {
-		g := a.groups[a.gi]
-		a.gi++
-		out := make([]Value, 0, len(g.keyVals)+len(a.aggs))
-		out = append(out, g.keyVals...)
-		for _, spec := range a.aggs {
-			v, err := computeAgg(spec, g.rows, a.eval)
+	for {
+		if a.groups == nil {
+			src, depth, ok, err := a.nextSource()
 			if err != nil {
 				return Row{}, false, err
 			}
-			out = append(out, v)
-		}
-		// Apply HAVING if present.
-		if a.having != nil && a.havingEval.Resolve != nil {
-			v, err := a.havingEval.Eval(a.having, Row{Values: out})
-			if err != nil {
+			if !ok {
+				return Row{}, false, nil
+			}
+			if err := a.runPass(src, depth); err != nil {
 				return Row{}, false, err
 			}
-			if v.IsNull() {
-				continue
-			}
-			if b, ok := v.AsBool(); !ok || !b {
-				continue
-			}
 		}
-		return Row{Values: out}, true, nil
+		for a.gi < len(a.groups) {
+			g := a.groups[a.gi]
+			a.gi++
+			out := make([]Value, 0, len(g.keyVals)+len(a.aggs))
+			out = append(out, g.keyVals...)
+			for _, acc := range g.accs {
+				v, err := acc.Result()
+				if err != nil {
+					return Row{}, false, err
+				}
+				out = append(out, v)
+			}
+			// Apply HAVING if present.
+			if a.having != nil && a.havingEval.Resolve != nil {
+				v, err := a.havingEval.Eval(a.having, Row{Values: out})
+				if err != nil {
+					return Row{}, false, err
+				}
+				if v.IsNull() {
+					continue
+				}
+				if b, ok := v.AsBool(); !ok || !b {
+					continue
+				}
+			}
+			return Row{Values: out}, true, nil
+		}
+		// This pass is exhausted; loop to fetch the next source (spill partition).
+		a.groups = nil
 	}
-	return Row{}, false, nil
 }
 
-func (a *AggregateIter) collect() error {
-	// Non-nil so Next does not re-collect when the input is empty.
+// nextSource returns the row source for the next aggregation pass: the child
+// first, then each spilled partition in turn. depth varies the spill hash so a
+// re-partitioned pass distributes keys differently.
+func (a *AggregateIter) nextSource() (RowIterator, int, bool, error) {
+	if !a.childStarted {
+		a.childStarted = true
+		return a.child, 0, true, nil
+	}
+	if len(a.pending) > 0 {
+		p := a.pending[0]
+		a.pending = a.pending[1:]
+		it, err := p.iterator()
+		if err != nil {
+			return nil, 0, false, err
+		}
+		return it, p.depth, true, nil
+	}
+	return nil, 0, false, nil
+}
+
+// runPass consumes src into this pass's in-memory groups, spilling rows for
+// groups beyond the budget to disk (when enabled). It fills a.groups and resets
+// a.gi; spilled partitions are appended to a.pending for later passes.
+func (a *AggregateIter) runPass(src RowIterator, depth int) error {
+	defer src.Close()
 	a.groups = []*aggGroup{}
+	a.gi = 0
 	index := map[string]int{}
+	limit := a.cfg.MaxGroups
+	var spill *spillSet
+
 	for {
-		r, ok, err := a.child.Next()
+		r, ok, err := src.Next()
 		if err != nil {
 			return err
 		}
 		if !ok {
 			break
 		}
-		keyVals := make([]Value, len(a.keys))
-		var kb strings.Builder
-		for i, ke := range a.keys {
-			v, err := a.eval.Eval(ke, r)
+		keyVals, ks, err := a.keyOf(r)
+		if err != nil {
+			return err
+		}
+		if idx, seen := index[ks]; seen {
+			// A group already resident in this pass always aggregates in memory,
+			// so it is never split across the memory/spill boundary.
+			for _, acc := range a.groups[idx].accs {
+				if err := acc.Add(r); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		// A new group: admit it in memory while under budget and not already
+		// spilling; once spilling has begun in this pass, every new group spills.
+		if spill == nil && (limit <= 0 || len(a.groups) < limit) {
+			g, err := a.newGroup(keyVals)
 			if err != nil {
 				return err
 			}
-			keyVals[i] = v
-			kb.WriteString(keyString(v))
-			kb.WriteString("\x01")
+			index[ks] = len(a.groups)
+			a.groups = append(a.groups, g)
+			for _, acc := range g.accs {
+				if err := acc.Add(r); err != nil {
+					return err
+				}
+			}
+			continue
 		}
-		ks := kb.String()
-		idx, seen := index[ks]
-		if !seen {
-			idx = len(a.groups)
-			index[ks] = idx
-			a.groups = append(a.groups, &aggGroup{key: ks, keyVals: keyVals})
+		if !a.cfg.Spill {
+			return fmt.Errorf("aggregation exceeded the in-memory group limit of %d; "+
+				"reduce cardinality at the source, use an APPROX_* aggregate, or enable spilling (--spill)", limit)
 		}
-		a.groups[idx].rows = append(a.groups[idx].rows, r)
+		if spill == nil {
+			spill, err = newSpillSet(a.cfg.SpillDir, depth)
+			if err != nil {
+				return err
+			}
+			if a.spillDirs == nil {
+				a.spillDirs = map[string]struct{}{}
+			}
+			a.spillDirs[spill.dir] = struct{}{}
+		}
+		if err := spill.write(ks, r); err != nil {
+			return err
+		}
+	}
+
+	if spill != nil {
+		parts, err := spill.finish()
+		if err != nil {
+			return err
+		}
+		a.pending = append(a.pending, parts...)
 	}
 	// A global aggregate (no GROUP BY) over an empty input still yields one row:
-	// COUNT(*) = 0, SUM/MIN/MAX/AVG = NULL.
-	if len(a.groups) == 0 && len(a.keys) == 0 {
-		a.groups = append(a.groups, &aggGroup{})
+	// COUNT(*) = 0, SUM/MIN/MAX/AVG = NULL. Only the first (child) pass can be
+	// empty-with-no-keys — a spill partition always holds rows.
+	if depth == 0 && len(a.groups) == 0 && len(a.keys) == 0 {
+		g, err := a.newGroup(nil)
+		if err != nil {
+			return err
+		}
+		a.groups = append(a.groups, g)
 	}
 	return nil
+}
+
+// keyOf evaluates the group-key expressions for a row, returning the key values
+// and their string encoding (the map key + spill hash input).
+func (a *AggregateIter) keyOf(r Row) ([]Value, string, error) {
+	keyVals := make([]Value, len(a.keys))
+	var kb strings.Builder
+	for i, ke := range a.keys {
+		v, err := a.eval.Eval(ke, r)
+		if err != nil {
+			return nil, "", err
+		}
+		keyVals[i] = v
+		kb.WriteString(keyString(v))
+		kb.WriteString("\x01")
+	}
+	return keyVals, kb.String(), nil
+}
+
+// newGroup builds a group with a fresh accumulator per aggregate spec.
+func (a *AggregateIter) newGroup(keyVals []Value) (*aggGroup, error) {
+	accs := make([]aggAccumulator, len(a.aggs))
+	for i, spec := range a.aggs {
+		acc, err := newAggAccumulator(spec, a.eval)
+		if err != nil {
+			return nil, err
+		}
+		accs[i] = acc
+	}
+	return &aggGroup{keyVals: keyVals, accs: accs}, nil
 }
 
 func (a *AggregateIter) Close() error {
@@ -814,89 +940,12 @@ func (a *AggregateIter) Close() error {
 		return nil
 	}
 	a.closed = true
+	// Remove any spill temp dirs (files for unconsumed partitions live here; a
+	// consumed partition removes its own file when its reader closes).
+	for dir := range a.spillDirs {
+		os.RemoveAll(dir)
+	}
 	return a.child.Close()
-}
-
-// computeRegr computes the two-argument statistical aggregates (correlation,
-// covariance, linear regression) over paired (y, x) values from spec.Arg (y) and
-// spec.Arg2 (x), skipping rows where either is NULL. Argument order follows SQL:
-// the dependent variable y is first, e.g. CORR(y, x) / REGR_SLOPE(y, x).
-func computeRegr(name string, spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
-	if spec.Arg2 == nil {
-		return Value{}, fmt.Errorf("%s expects 2 args, e.g. %s(y, x)", name, name)
-	}
-	var n int
-	var sx, sy, sxx, syy, sxy float64
-	for _, r := range rows {
-		yv, err := eval.Eval(spec.Arg, r)
-		if err != nil {
-			return Value{}, err
-		}
-		xv, err := eval.Eval(spec.Arg2, r)
-		if err != nil {
-			return Value{}, err
-		}
-		if yv.IsNull() || xv.IsNull() {
-			continue
-		}
-		y, ok1 := yv.AsFloat()
-		x, ok2 := xv.AsFloat()
-		if !ok1 || !ok2 {
-			return Value{}, fmt.Errorf("%s requires numeric args", name)
-		}
-		n++
-		sx, sy, sxx, syy, sxy = sx+x, sy+y, sxx+x*x, syy+y*y, sxy+x*y
-	}
-	if name == "REGR_COUNT" {
-		return IntVal(int64(n)), nil
-	}
-	if n == 0 {
-		return Null(), nil
-	}
-	fn := float64(n)
-	mx, my := sx/fn, sy/fn
-	// Centered sums of squares / cross-products: Σ(x-x̄)², Σ(y-ȳ)², Σ(x-x̄)(y-ȳ).
-	cxx := sxx - sx*sx/fn
-	cyy := syy - sy*sy/fn
-	cxy := sxy - sx*sy/fn
-	switch name {
-	case "REGR_AVGX":
-		return FloatVal(mx), nil
-	case "REGR_AVGY":
-		return FloatVal(my), nil
-	case "COVAR_POP":
-		return FloatVal(cxy / fn), nil
-	case "COVAR_SAMP":
-		if n < 2 {
-			return Null(), nil
-		}
-		return FloatVal(cxy / (fn - 1)), nil
-	case "REGR_SLOPE":
-		if cxx == 0 {
-			return Null(), nil
-		}
-		return FloatVal(cxy / cxx), nil
-	case "REGR_INTERCEPT":
-		if cxx == 0 {
-			return Null(), nil
-		}
-		return FloatVal(my - (cxy/cxx)*mx), nil
-	case "CORR":
-		if cxx == 0 || cyy == 0 {
-			return Null(), nil
-		}
-		return FloatVal(cxy / math.Sqrt(cxx*cyy)), nil
-	case "REGR_R2":
-		if cxx == 0 {
-			return Null(), nil
-		}
-		if cyy == 0 {
-			return FloatVal(1), nil // x varies but y is constant
-		}
-		r := cxy / math.Sqrt(cxx*cyy)
-		return FloatVal(r * r), nil
-	}
-	return Value{}, fmt.Errorf("unknown aggregate %s", name)
 }
 
 // computeFirstLast implements FIRST(value, ord) / LAST(value, ord): the value
@@ -909,194 +958,37 @@ func computeFirstLast(name string, spec AggSpec, rows []Row, eval Evaluator) (Va
 	if spec.Arg2 == nil {
 		return Value{}, fmt.Errorf("%s expects 2 args, e.g. %s(value, ts)", name, name)
 	}
-	var bestOrd, bestVal Value
-	found := false
-	for _, r := range rows {
-		ov, err := eval.Eval(spec.Arg2, r)
-		if err != nil {
+	acc := &firstLastAcc{name: strings.ToUpper(name), arg: spec.Arg, ord: spec.Arg2, eval: eval}
+	for i := range rows {
+		if err := acc.Add(rows[i]); err != nil {
 			return Value{}, err
 		}
-		if ov.IsNull() {
-			continue
-		}
-		if found {
-			c := Compare(ov, bestOrd)
-			// FIRST replaces only on a strictly smaller ordering value; LAST
-			// replaces on greater-or-equal (so a tie takes the later row).
-			if (name == "FIRST" && c >= 0) || (name == "LAST" && c < 0) {
-				continue
-			}
-		}
-		vv, err := eval.Eval(spec.Arg, r)
-		if err != nil {
-			return Value{}, err
-		}
-		bestOrd, bestVal, found = ov, vv, true
 	}
-	if !found {
-		return Null(), nil
-	}
-	return bestVal, nil
+	return acc.Result()
 }
 
+// computeAgg is the batch aggregate API: it folds all rows through a fresh
+// streaming accumulator (see aggacc.go). AggregateIter uses the accumulators
+// directly, one per group, so it never buffers rows; this wrapper serves the
+// window/frame callers and tests that aggregate a materialized slice.
 func computeAgg(spec AggSpec, rows []Row, eval Evaluator) (Value, error) {
-	name := strings.ToUpper(spec.Func)
-	// COUNT(*) counts rows regardless of nullness; DISTINCT is meaningless on it.
-	if name == "COUNT" {
-		if cr, ok := spec.Arg.(*sql.ColRef); ok && cr.Name == "*" && cr.Qualifier == "" {
-			return IntVal(int64(len(rows))), nil
-		}
+	acc, err := newAggAccumulator(spec, eval)
+	if err != nil {
+		return Value{}, err
 	}
-
-	// Two-argument statistical aggregates pair both columns per row.
-	switch name {
-	case "CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE", "REGR_INTERCEPT",
-		"REGR_R2", "REGR_COUNT", "REGR_AVGX", "REGR_AVGY":
-		return computeRegr(name, spec, rows, eval)
-	case "FIRST", "LAST":
-		return computeFirstLast(name, spec, rows, eval)
-	}
-
-	// Evaluate the argument over each row, dropping NULLs and (with DISTINCT)
-	// duplicates. The value-based aggregates below operate on this list.
-	var vals []Value
-	var seen map[string]bool
-	if spec.Distinct {
-		seen = make(map[string]bool)
-	}
-	for _, r := range rows {
-		v, err := eval.Eval(spec.Arg, r)
-		if err != nil {
+	for i := range rows {
+		if err := acc.Add(rows[i]); err != nil {
 			return Value{}, err
 		}
-		if v.IsNull() {
-			continue
-		}
-		if seen != nil {
-			k := keyString(v)
-			if seen[k] {
-				continue
-			}
-			seen[k] = true
-		}
-		vals = append(vals, v)
 	}
-
-	switch name {
-	case "COUNT":
-		return IntVal(int64(len(vals))), nil
-	case "MIN", "MAX":
-		if len(vals) == 0 {
-			return Null(), nil
-		}
-		best := vals[0]
-		for _, v := range vals[1:] {
-			c := Compare(v, best)
-			if (name == "MIN" && c < 0) || (name == "MAX" && c > 0) {
-				best = v
-			}
-		}
-		return best, nil
-	case "STRING_AGG":
-		if len(vals) == 0 {
-			return Null(), nil
-		}
-		sep, err := aggSeparator(spec, rows, eval)
-		if err != nil {
-			return Value{}, err
-		}
-		parts := make([]string, len(vals))
-		for i, v := range vals {
-			parts[i] = v.AsString()
-		}
-		return StringVal(strings.Join(parts, sep)), nil
-	}
-
-	// The remaining aggregates are numeric.
-	nums := make([]float64, len(vals))
-	for i, v := range vals {
-		f, ok := v.AsFloat()
-		if !ok {
-			return Value{}, fmt.Errorf("%s requires numeric arg", name)
-		}
-		nums[i] = f
-	}
-	switch name {
-	case "SUM":
-		if len(nums) == 0 {
-			return Null(), nil
-		}
-		var s float64
-		for _, f := range nums {
-			s += f
-		}
-		return FloatVal(s), nil
-	case "AVG":
-		if len(nums) == 0 {
-			return Null(), nil
-		}
-		return FloatVal(mean(nums)), nil
-	case "MEDIAN":
-		if len(nums) == 0 {
-			return Null(), nil
-		}
-		s := append([]float64(nil), nums...)
-		sort.Float64s(s)
-		n := len(s)
-		if n%2 == 1 {
-			return FloatVal(s[n/2]), nil
-		}
-		return FloatVal((s[n/2-1] + s[n/2]) / 2), nil
-	case "VARIANCE", "VAR_SAMP", "VAR_POP", "STDDEV", "STDDEV_SAMP", "STDDEV_POP":
-		pop := name == "VAR_POP" || name == "STDDEV_POP"
-		v, ok := variance(nums, pop)
-		if !ok {
-			return Null(), nil
-		}
-		if strings.HasPrefix(name, "STDDEV") {
-			return FloatVal(math.Sqrt(v)), nil
-		}
-		return FloatVal(v), nil
-	case "PERCENTILE_CONT", "QUANTILE", "PERCENTILE_DISC":
-		if len(nums) == 0 {
-			return Null(), nil
-		}
-		p, err := aggPercentile(spec, rows, eval)
-		if err != nil {
-			return Value{}, err
-		}
-		s := append([]float64(nil), nums...)
-		sort.Float64s(s)
-		n := len(s)
-		if name == "PERCENTILE_DISC" {
-			// Smallest value whose cumulative distribution >= p.
-			idx := int(math.Ceil(p*float64(n))) - 1
-			if idx < 0 {
-				idx = 0
-			}
-			return FloatVal(s[idx]), nil
-		}
-		// PERCENTILE_CONT / QUANTILE: linear interpolation between neighbours.
-		rank := p * float64(n-1)
-		lo := int(math.Floor(rank))
-		hi := int(math.Ceil(rank))
-		if lo == hi {
-			return FloatVal(s[lo]), nil
-		}
-		return FloatVal(s[lo] + (s[hi]-s[lo])*(rank-float64(lo))), nil
-	}
-	return Value{}, fmt.Errorf("unknown aggregate %s", name)
+	return acc.Result()
 }
 
 // aggPercentile evaluates the percentile fraction (second argument) of a
 // PERCENTILE_*/QUANTILE aggregate, clamped to [0,1]. It is normally a constant.
-func aggPercentile(spec AggSpec, rows []Row, eval Evaluator) (float64, error) {
+func aggPercentile(spec AggSpec, probe Row, eval Evaluator) (float64, error) {
 	if spec.Arg2 == nil {
 		return 0, fmt.Errorf("%s requires a percentile in [0,1], e.g. %s(x, 0.95)", spec.Func, spec.Func)
-	}
-	probe := Row{}
-	if len(rows) > 0 {
-		probe = rows[0]
 	}
 	pv, err := eval.Eval(spec.Arg2, probe)
 	if err != nil {
@@ -1117,13 +1009,9 @@ func aggPercentile(spec AggSpec, rows []Row, eval Evaluator) (float64, error) {
 
 // aggSeparator evaluates a STRING_AGG delimiter (its second argument), which is
 // normally a constant. It defaults to "" when absent.
-func aggSeparator(spec AggSpec, rows []Row, eval Evaluator) (string, error) {
+func aggSeparator(spec AggSpec, probe Row, eval Evaluator) (string, error) {
 	if spec.Arg2 == nil {
 		return "", nil
-	}
-	probe := Row{}
-	if len(rows) > 0 {
-		probe = rows[0]
 	}
 	sv, err := eval.Eval(spec.Arg2, probe)
 	if err != nil {
